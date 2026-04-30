@@ -211,7 +211,7 @@ public enum SCTE35Decoder {
             guard payloadEnd <= bytes.count else {
                 throw SCTE35DecodeError.malformedSection
             }
-            descriptors.append(SCTE35Descriptor(
+            descriptors.append(try SCTE35Descriptor.parse(
                 tag: tag,
                 length: UInt8(length),
                 bytes: Array(bytes[payloadStart..<payloadEnd])
