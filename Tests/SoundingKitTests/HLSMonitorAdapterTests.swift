@@ -134,6 +134,100 @@ final class HLSMonitorAdapterTests: XCTestCase {
         XCTAssertEqual(markers.first?.segment, "7")
     }
 
+    func testPipelineRunsHLSFixtureAndAppliesMarkerTypeFilter() async throws {
+        let fixturePath = hlsFixturePath()
+        let options = try MonitorOptions(
+            source: fixturePath,
+            streamType: .hls,
+            filter: "scte35",
+            quiet: true,
+            emitJSON: true
+        )
+
+        let markers = try await MonitorPipeline.run(options: options)
+
+        XCTAssertEqual(markers.count, 2)
+        XCTAssertEqual(markers.map(\.type), ["SCTE35", "SCTE35"])
+        XCTAssertEqual(markers.map(\.source), ["hls_manifest", "hls_segment"])
+        XCTAssertEqual(markers.map(\.segment), ["7", "7"])
+    }
+
+    func testPipelineAutoDetectsLocalM3U8FixtureAsHLS() async throws {
+        let options = try MonitorOptions(
+            source: hlsFixturePath(),
+            streamType: .auto,
+            filter: "all"
+        )
+
+        let markers = try await MonitorPipeline.run(options: options)
+
+        XCTAssertEqual(markers.map(\.source), ["hls_manifest", "hls_segment"])
+        XCTAssertEqual(markers.map(\.segment), ["7", "7"])
+    }
+
+    func testPipelineAutoDetectionTreatsM3U8HTTPURLsAsHLSWithoutLoadingInTest() {
+        XCTAssertEqual(
+            MonitorPipeline.resolvedStreamType(for: "https://example.test/live/manifest.m3u8?token=secret#frag", requested: .auto),
+            .hls
+        )
+        XCTAssertEqual(
+            MonitorPipeline.resolvedStreamType(for: "http://example.test/live/manifest.M3U8", requested: .auto),
+            .hls
+        )
+    }
+
+    func testPipelineAutoNonHLSRemainsUnsupported() async throws {
+        let options = try MonitorOptions(
+            source: "fixture.ts",
+            streamType: .auto,
+            filter: "all"
+        )
+
+        do {
+            _ = try await MonitorPipeline.run(options: options)
+            XCTFail("Expected non-HLS auto source to remain unsupported")
+        } catch let error as MonitorError {
+            guard case let .notImplemented(phase, source, streamType) = error else {
+                return XCTFail("Expected notImplemented, got \(error)")
+            }
+            XCTAssertEqual(phase, .sourceOpen)
+            XCTAssertEqual(source, "fixture.ts")
+            XCTAssertEqual(streamType, .auto)
+        } catch {
+            XCTFail("Expected MonitorError, got \(error)")
+        }
+    }
+
+    func testPipelinePropagatesHLSAdapterErrorsWithoutRewriting() async throws {
+        let options = try MonitorOptions(
+            source: "missing-fixture.m3u8",
+            streamType: .hls,
+            filter: "all"
+        )
+
+        do {
+            _ = try await MonitorPipeline.run(options: options)
+            XCTFail("Expected source-open MonitorError")
+        } catch let error as MonitorError {
+            guard case let .operationFailed(phase, source, streamType, context, _) = error else {
+                return XCTFail("Expected operationFailed, got \(error)")
+            }
+            XCTAssertEqual(phase, .sourceOpen)
+            XCTAssertEqual(source, "missing-fixture.m3u8")
+            XCTAssertEqual(streamType, .hls)
+            XCTAssertEqual(context["sourceClass"], "hls_manifest")
+        } catch {
+            XCTFail("Expected MonitorError, got \(error)")
+        }
+    }
+
+    private func hlsFixturePath() -> String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/HLS/manifest-scte35.m3u8")
+            .path
+    }
+
     private func makeTransportStreamPacket(section: Data) -> Data {
         var packet = Data(repeating: 0xFF, count: 188)
         packet[0] = 0x47

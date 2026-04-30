@@ -59,16 +59,16 @@ final class MonitorOptionsTests: XCTestCase {
         }
     }
 
-    func testPlaceholderRunnerThrowsRedactedNotImplementedError() async throws {
+    func testPipelineKeepsUnsupportedTypesAsRedactedNotImplementedErrors() async throws {
         let options = try MonitorOptions(
-            source: "https://user:pass@example.test/live.m3u8?token=secret#frag",
-            streamType: .hls,
+            source: "https://user:pass@example.test/live.ts?token=secret#frag",
+            streamType: .icecast,
             filter: "all"
         )
 
         do {
             _ = try await MonitorPipeline.run(options: options)
-            XCTFail("Expected monitor pipeline placeholder to throw")
+            XCTFail("Expected unsupported monitor pipeline source to throw")
         } catch let error as MonitorError {
             guard case let .notImplemented(phase, source, streamType) = error else {
                 return XCTFail("Expected notImplemented, got \(error)")
@@ -76,12 +76,12 @@ final class MonitorOptionsTests: XCTestCase {
 
             XCTAssertEqual(phase, .sourceOpen)
             XCTAssertEqual(source, options.source)
-            XCTAssertEqual(streamType, .hls)
+            XCTAssertEqual(streamType, .icecast)
 
             let description = error.description
             XCTAssertTrue(description.contains("sourceOpen"))
-            XCTAssertTrue(description.contains("hls"))
-            XCTAssertTrue(description.contains("https://example.test/live.m3u8"))
+            XCTAssertTrue(description.contains("icecast"))
+            XCTAssertTrue(description.contains("https://example.test/live.ts"))
             XCTAssertFalse(description.contains("user"))
             XCTAssertFalse(description.contains("pass"))
             XCTAssertFalse(description.contains("token"))
@@ -91,5 +91,21 @@ final class MonitorOptionsTests: XCTestCase {
         } catch {
             XCTFail("Expected MonitorError, got \(error)")
         }
+    }
+
+    func testFilterIncludesCentralizesMarkerMatchingSemantics() throws {
+        let scte35Unknown = AdMarker(type: "SCTE35", classification: .unknown, source: "hls_manifest")
+        let lowercasedSCTE35AdStart = AdMarker(type: "scte35", classification: .adStart, source: "hls_segment")
+        let id3AdEnd = AdMarker(type: "ID3", classification: .adEnd, source: "fixture")
+
+        XCTAssertTrue(MonitorFilter.all.includes(scte35Unknown))
+        XCTAssertFalse(MonitorFilter.ad.includes(scte35Unknown))
+        XCTAssertTrue(MonitorFilter.ad.includes(lowercasedSCTE35AdStart))
+        XCTAssertTrue(MonitorFilter.ad.includes(id3AdEnd))
+        XCTAssertTrue(MonitorFilter.classification(.unknown).includes(scte35Unknown))
+        XCTAssertFalse(MonitorFilter.classification(.adEnd).includes(lowercasedSCTE35AdStart))
+        XCTAssertTrue(MonitorFilter.markerType("scte35").includes(scte35Unknown))
+        XCTAssertTrue(MonitorFilter.markerType("SCTE35").includes(lowercasedSCTE35AdStart))
+        XCTAssertFalse(MonitorFilter.markerType("scte35").includes(id3AdEnd))
     }
 }

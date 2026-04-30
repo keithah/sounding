@@ -27,4 +27,17 @@ public enum MonitorFilter: Equatable, Sendable {
             throw MonitorError.invalidFilter(rawValue)
         }
     }
+
+    public func includes(_ marker: AdMarker) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .ad:
+            return marker.classification == .adStart || marker.classification == .adEnd
+        case let .classification(classification):
+            return marker.classification == classification
+        case let .markerType(type):
+            return marker.type.caseInsensitiveCompare(type) == .orderedSame
+        }
+    }
 }
