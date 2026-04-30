@@ -5,7 +5,67 @@ import Foundation
 /// Parsing is intentionally line-scoped and deterministic: no I/O, clocks, network, global
 /// state, or SCTE-35 binary decoding happen here. Unsupported and malformed marker lines are
 /// ignored so monitor failure reporting can remain phase-specific in later pipeline layers.
+public struct HLSManifestMediaSegment: Equatable, Sendable {
+    public let uri: String
+    public let mediaSequence: String
+    public let duration: String?
+    public let scte35Tags: [HLSManifestSCTE35Tag]
+
+    public init(
+        uri: String,
+        mediaSequence: String,
+        duration: String? = nil,
+        scte35Tags: [HLSManifestSCTE35Tag] = []
+    ) {
+        self.uri = uri
+        self.mediaSequence = mediaSequence
+        self.duration = duration
+        self.scte35Tags = scte35Tags
+    }
+}
+
 public enum HLSManifestParser {
+    public static func parseMediaSegments(_ manifest: String) -> [HLSManifestMediaSegment] {
+        var mediaSequence = 0
+        var pendingTags = [HLSManifestSCTE35Tag]()
+        var pendingDuration: String?
+        var segments = [HLSManifestMediaSegment]()
+
+        for rawLine in manifest.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            if line.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") {
+                mediaSequence = normalizedMediaSequence(from: line)
+                continue
+            }
+
+            if line.hasPrefix("#EXTINF:") {
+                pendingDuration = parseExtInfDuration(line)
+                continue
+            }
+
+            if line.hasPrefix("#") {
+                if let tag = parseTagLine(line) {
+                    pendingTags.append(tag)
+                }
+                continue
+            }
+
+            segments.append(HLSManifestMediaSegment(
+                uri: line,
+                mediaSequence: String(mediaSequence),
+                duration: pendingDuration,
+                scte35Tags: pendingTags
+            ))
+            mediaSequence += 1
+            pendingDuration = nil
+            pendingTags.removeAll(keepingCapacity: true)
+        }
+
+        return segments
+    }
+
     public static func parseTagLine(_ line: String) -> HLSManifestSCTE35Tag? {
         let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedLine.isEmpty else { return nil }
@@ -143,6 +203,24 @@ public enum HLSManifestParser {
             fields: ["cue": .string("in")],
             sanitizedTagIdentity: tagName
         )
+    }
+
+    private static func normalizedMediaSequence(from line: String) -> Int {
+        let (_, rawBody) = splitTagNameAndBody(line)
+        guard let rawBody,
+              let value = Int(rawBody.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return 0
+        }
+
+        return max(0, value)
+    }
+
+    private static func parseExtInfDuration(_ line: String) -> String? {
+        let (_, rawBody) = splitTagNameAndBody(line)
+        guard let rawBody else { return nil }
+        let duration = rawBody.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return duration?.isEmpty == false ? duration : nil
     }
 
     private static func splitTagNameAndBody(_ line: String) -> (String, String?) {
