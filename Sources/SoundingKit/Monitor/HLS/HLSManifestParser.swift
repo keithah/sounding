@@ -105,6 +105,10 @@ public enum HLSManifestParser {
             )
         }
 
+        if attributes.keys.contains("CUE") {
+            return nil
+        }
+
         return HLSManifestSCTE35Tag(
             kind: .scte35,
             rawTagName: tagName,

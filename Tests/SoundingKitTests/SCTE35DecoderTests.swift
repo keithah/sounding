@@ -40,8 +40,8 @@ final class SCTE35DecoderTests: XCTestCase {
         XCTAssertEqual(cue.spliceCommandType, 0x05)
         XCTAssertEqual(cue.spliceEventID, 1_207_959_710)
         XCTAssertEqual(cue.outOfNetworkIndicator, true)
-        XCTAssertEqual(cue.ptsTime, 90.0, accuracy: 0.000_001)
-        XCTAssertEqual(cue.breakDuration, 60.293567, accuracy: 0.000_001)
+        XCTAssertEqual(cue.ptsTime!, 90.0, accuracy: 0.000_001)
+        XCTAssertEqual(cue.breakDuration!, 60.293567, accuracy: 0.000_001)
         XCTAssertEqual(cue.descriptors, [])
         XCTAssertEqual(cue.rawBase64, section.base64EncodedString())
     }
@@ -108,8 +108,8 @@ final class SCTE35DecoderTests: XCTestCase {
 
         let cue = try SCTE35Decoder.decode(.data(section))
 
-        XCTAssertEqual(cue.ptsTime, Double(max33Bit) / 90_000.0, accuracy: 0.000_001)
-        XCTAssertEqual(cue.breakDuration, Double(max33Bit) / 90_000.0, accuracy: 0.000_001)
+        XCTAssertEqual(cue.ptsTime!, Double(max33Bit) / 90_000.0, accuracy: 0.000_001)
+        XCTAssertEqual(cue.breakDuration!, Double(max33Bit) / 90_000.0, accuracy: 0.000_001)
     }
 
     private func mutateSpliceNull(_ mutate: (inout Data) -> Void) -> Data {
@@ -150,7 +150,7 @@ final class SCTE35DecoderTests: XCTestCase {
         section.append(0xF0 | UInt8((commandBytes.count >> 8) & 0x0F))
         section.append(UInt8(commandBytes.count & 0xFF))
         section.append(0x05) // splice_insert
-        section.append(commandBytes)
+        section.append(contentsOf: commandBytes)
         section.append(0x00)
         section.append(0x00) // descriptor_loop_length
         section.append(contentsOf: [0x00, 0x00, 0x00, 0x00]) // CRC placeholder; parser validates placement only in this slice
@@ -182,24 +182,24 @@ final class SCTE35DecoderTests: XCTestCase {
 }
 
 private struct BitWriter {
-    private var bytes = [UInt8]()
+    private var storage = [UInt8]()
     private var bitOffset = 0
 
     mutating func write(_ value: UInt64, bits bitCount: Int) {
         precondition(bitCount >= 0 && bitCount <= 64)
         for shift in stride(from: bitCount - 1, through: 0, by: -1) {
             if bitOffset.isMultiple(of: 8) {
-                bytes.append(0)
+                storage.append(0)
             }
             let bit = UInt8((value >> UInt64(shift)) & 1)
             let byteIndex = bitOffset / 8
             let bitIndex = 7 - (bitOffset % 8)
-            bytes[byteIndex] |= bit << UInt8(bitIndex)
+            storage[byteIndex] |= bit << UInt8(bitIndex)
             bitOffset += 1
         }
     }
 
     func bytes() -> [UInt8] {
-        bytes
+        storage
     }
 }

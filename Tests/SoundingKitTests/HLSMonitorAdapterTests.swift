@@ -325,24 +325,24 @@ private enum FixtureError: Error {
 }
 
 private struct BitWriter {
-    private var bytes = [UInt8]()
+    private var storage = [UInt8]()
     private var bitOffset = 0
 
     mutating func write(_ value: UInt64, bits bitCount: Int) {
         precondition(bitCount >= 0 && bitCount <= 64)
         for shift in stride(from: bitCount - 1, through: 0, by: -1) {
             if bitOffset.isMultiple(of: 8) {
-                bytes.append(0)
+                storage.append(0)
             }
             let bit = UInt8((value >> UInt64(shift)) & 1)
             let byteIndex = bitOffset / 8
             let bitIndex = 7 - (bitOffset % 8)
-            bytes[byteIndex] |= bit << UInt8(bitIndex)
+            storage[byteIndex] |= bit << UInt8(bitIndex)
             bitOffset += 1
         }
     }
 
     func bytes() -> [UInt8] {
-        bytes
+        storage
     }
 }

@@ -1,0 +1,83 @@
+{
+  "": {
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/master.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/AdMarkerEncodingTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/AdMarkerEncodingTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/AdMarkerEncodingTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/AdMarkerEncodingTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/AdMarkerEncodingTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/HLSManifestMarkerTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestMarkerTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestMarkerTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestMarkerTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestMarkerTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/HLSManifestParserTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestParserTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestParserTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestParserTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSManifestParserTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/HLSMonitorAdapterTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSMonitorAdapterTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSMonitorAdapterTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSMonitorAdapterTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/HLSMonitorAdapterTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/ID3TagScannerTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/ID3TagScannerTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/ID3TagScannerTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/ID3TagScannerTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/ID3TagScannerTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/MonitorOptionsTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/MonitorOptionsTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/MonitorOptionsTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/MonitorOptionsTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/MonitorOptionsTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/SCTE35DecoderTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35DecoderTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35DecoderTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35DecoderTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35DecoderTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/SCTE35FixtureTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35FixtureTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35FixtureTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35FixtureTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35FixtureTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/SCTE35MarkerMappingTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35MarkerMappingTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35MarkerMappingTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35MarkerMappingTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35MarkerMappingTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/SCTE35PayloadTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35PayloadTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35PayloadTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35PayloadTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SCTE35PayloadTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/SoundingKitTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SoundingKitTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SoundingKitTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SoundingKitTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SoundingKitTests.swiftdeps"
+  },
+  "/workspace/Tests/SoundingKitTests/Support/SemanticJSON.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SemanticJSON.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SemanticJSON.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SemanticJSON~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/SemanticJSON.swiftdeps"
+  },
+  "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/DerivedSources/resource_bundle_accessor.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/resource_bundle_accessor.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/resource_bundle_accessor.swiftdeps"
+  }
+}

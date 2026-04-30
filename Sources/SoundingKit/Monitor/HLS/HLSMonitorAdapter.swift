@@ -91,7 +91,7 @@ public struct HLSMonitorAdapter {
 
     private func loadManifestData(from source: String) async throws -> Data {
         if let url = URL(string: source), url.scheme == "http" || url.scheme == "https" {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await HLSURLSessionDataLoader.data(from: url, using: .shared)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw HLSMonitorAdapterError.invalidManifestResponse
             }

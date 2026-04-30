@@ -1,0 +1,13 @@
+/workspace/Tests/SoundingKitTests/AdMarkerEncodingTests.swift
+/workspace/Tests/SoundingKitTests/HLSManifestMarkerTests.swift
+/workspace/Tests/SoundingKitTests/HLSManifestParserTests.swift
+/workspace/Tests/SoundingKitTests/HLSMonitorAdapterTests.swift
+/workspace/Tests/SoundingKitTests/ID3TagScannerTests.swift
+/workspace/Tests/SoundingKitTests/MonitorOptionsTests.swift
+/workspace/Tests/SoundingKitTests/SCTE35DecoderTests.swift
+/workspace/Tests/SoundingKitTests/SCTE35FixtureTests.swift
+/workspace/Tests/SoundingKitTests/SCTE35MarkerMappingTests.swift
+/workspace/Tests/SoundingKitTests/SCTE35PayloadTests.swift
+/workspace/Tests/SoundingKitTests/SoundingKitTests.swift
+/workspace/Tests/SoundingKitTests/Support/SemanticJSON.swift
+/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingKitTests.build/DerivedSources/resource_bundle_accessor.swift

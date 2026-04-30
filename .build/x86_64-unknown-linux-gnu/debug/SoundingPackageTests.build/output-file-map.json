@@ -1,0 +1,11 @@
+{
+  "": {
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageTests.build/master.swiftdeps"
+  },
+  "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageTests.derived/runner.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageTests.build/runner.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageTests.build/runner.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageTests.build/runner.swiftdeps"
+  }
+}

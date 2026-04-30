@@ -1,0 +1,17 @@
+{
+  "": {
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/master.swiftdeps"
+  },
+  "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.derived/SoundingKitTests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/SoundingKitTests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/SoundingKitTests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/SoundingKitTests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/SoundingKitTests.swiftdeps"
+  },
+  "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.derived/all-discovered-tests.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/all-discovered-tests.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/all-discovered-tests.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/all-discovered-tests~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/SoundingPackageDiscoveredTests.build/all-discovered-tests.swiftdeps"
+  }
+}

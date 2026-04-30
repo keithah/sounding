@@ -29,7 +29,7 @@ public struct HLSSegmentLoader: HLSSegmentLoading {
             throw HLSSegmentLoaderError.unsupportedScheme
         }
 
-        let (data, response) = try await urlSession.data(from: segmentURL)
+        let (data, response) = try await HLSURLSessionDataLoader.data(from: segmentURL, using: urlSession)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw HLSSegmentLoaderError.invalidResponse
         }

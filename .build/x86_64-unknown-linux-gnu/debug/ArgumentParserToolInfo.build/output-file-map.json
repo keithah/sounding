@@ -1,0 +1,11 @@
+{
+  "": {
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/ArgumentParserToolInfo.build/master.swiftdeps"
+  },
+  "/workspace/.build/checkouts/swift-argument-parser/Sources/ArgumentParserToolInfo/ToolInfo.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/ArgumentParserToolInfo.build/ToolInfo.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/ArgumentParserToolInfo.build/ToolInfo.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/ArgumentParserToolInfo.build/ToolInfo~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/ArgumentParserToolInfo.build/ToolInfo.swiftdeps"
+  }
+}

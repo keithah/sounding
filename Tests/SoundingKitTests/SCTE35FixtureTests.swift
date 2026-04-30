@@ -10,7 +10,7 @@ final class SCTE35FixtureTests: XCTestCase {
             eventID: 0x4800009E,
             ptsTicks: 8_100_000,
             breakDurationTicks: 5_426_421,
-            descriptors: [makeSegmentationDescriptor(
+            descriptors: makeSegmentationDescriptor(
                 eventID: 0x01020304,
                 durationTicks: 2_700_000,
                 upidType: 0x0C,
@@ -18,7 +18,7 @@ final class SCTE35FixtureTests: XCTestCase {
                 segmentationTypeID: 0x34,
                 segmentNumber: 1,
                 segmentsExpected: 2
-            )]
+            )
         )
         let base64 = section.base64EncodedString()
         let hex = Self.hexString(for: section)
@@ -36,7 +36,7 @@ final class SCTE35FixtureTests: XCTestCase {
 
         XCTAssertEqual(binaryCue.commandName, "Splice Insert")
         XCTAssertEqual(binaryCue.spliceEventID, 0x4800009E)
-        XCTAssertEqual(binaryCue.breakDuration, 60.293567, accuracy: 0.000_001)
+        XCTAssertEqual(binaryCue.breakDuration!, 60.293567, accuracy: 0.000_001)
         XCTAssertEqual(binaryCue.rawBase64, base64)
         XCTAssertEqual(binaryCue.descriptors.count, 1)
 
@@ -46,24 +46,25 @@ final class SCTE35FixtureTests: XCTestCase {
         XCTAssertEqual(base64Marker.segment, "seg-1.ts")
         XCTAssertEqual(base64Marker.timestamp, "2026-04-30T08:00:00Z")
         XCTAssertEqual(base64Marker.rawBase64, base64)
-        XCTAssertEqual(base64Marker.pts, 90.0, accuracy: 0.000_001)
-        XCTAssertEqual(base64Marker.breakDuration, 60.293567, accuracy: 0.000_001)
+        XCTAssertEqual(base64Marker.pts!, 90.0, accuracy: 0.000_001)
+        XCTAssertEqual(base64Marker.breakDuration!, 60.293567, accuracy: 0.000_001)
         XCTAssertEqual(base64Marker.fields["CommandName"], "SPLICE_INSERT_OON_TRUE")
         XCTAssertEqual(base64Marker.fields["BreakDuration"], "60.294")
         XCTAssertEqual(base64Marker.fields["SpliceEventID"], "0x4800009e")
         XCTAssertEqual(base64Marker.fields["SegmentationEventID"], "0x01020304")
         XCTAssertEqual(base64Marker.fields["SegmentationTypeID"], "0x34")
         XCTAssertEqual(base64Marker.fields["SegmentationUPID"], "asset-42")
-        XCTAssertEqual(base64Marker.command, [
+        let expectedCommand: JSONValue = [
             "Name": "Splice Insert",
             "Type": "0x05",
             "SpliceEventID": "0x4800009e",
             "OutOfNetworkIndicator": true,
             "PTS": 90.0,
             "BreakDuration": 60.293567
-        ])
+        ]
+        XCTAssertEqual(base64Marker.command, expectedCommand)
         let descriptor = try XCTUnwrap(base64Marker.descriptors.first)
-        XCTAssertEqual(descriptor, [
+        let expectedDescriptor: JSONValue = [
             "Tag": "SegmentationDescriptor",
             "DescriptorTag": "0x02",
             "Identifier": "CUEI",
@@ -78,7 +79,8 @@ final class SCTE35FixtureTests: XCTestCase {
             "SegmentationTypeID": "0x34",
             "SegmentNumber": 1,
             "SegmentsExpected": 2
-        ])
+        ]
+        XCTAssertEqual(descriptor, expectedDescriptor)
 
         XCTAssertEqual(hexMarker.rawBase64, base64Marker.rawBase64)
         XCTAssertEqual(hexMarker.command, base64Marker.command)
@@ -224,24 +226,24 @@ final class SCTE35FixtureTests: XCTestCase {
 }
 
 private struct BitWriter {
-    private var bytes = [UInt8]()
+    private var storage = [UInt8]()
     private var bitOffset = 0
 
     mutating func write(_ value: UInt64, bits bitCount: Int) {
         precondition(bitCount >= 0 && bitCount <= 64)
         for shift in stride(from: bitCount - 1, through: 0, by: -1) {
             if bitOffset.isMultiple(of: 8) {
-                bytes.append(0)
+                storage.append(0)
             }
             let bit = UInt8((value >> UInt64(shift)) & 1)
             let byteIndex = bitOffset / 8
             let bitIndex = 7 - (bitOffset % 8)
-            bytes[byteIndex] |= bit << UInt8(bitIndex)
+            storage[byteIndex] |= bit << UInt8(bitIndex)
             bitOffset += 1
         }
     }
 
     func bytes() -> [UInt8] {
-        bytes
+        storage
     }
 }

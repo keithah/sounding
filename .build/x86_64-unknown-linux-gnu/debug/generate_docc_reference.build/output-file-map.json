@@ -1,0 +1,23 @@
+{
+  "": {
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/master.swiftdeps"
+  },
+  "/workspace/.build/checkouts/swift-argument-parser/Tools/generate-docc-reference/Extensions/ArgumentParser+Markdown.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/ArgumentParser+Markdown.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/ArgumentParser+Markdown.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/ArgumentParser+Markdown~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/ArgumentParser+Markdown.swiftdeps"
+  },
+  "/workspace/.build/checkouts/swift-argument-parser/Tools/generate-docc-reference/Extensions/Process+SimpleAPI.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/Process+SimpleAPI.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/Process+SimpleAPI.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/Process+SimpleAPI~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/Process+SimpleAPI.swiftdeps"
+  },
+  "/workspace/.build/checkouts/swift-argument-parser/Tools/generate-docc-reference/GenerateDoccReference.swift": {
+    "dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/GenerateDoccReference.d",
+    "object": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/GenerateDoccReference.swift.o",
+    "swiftmodule": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/GenerateDoccReference~partial.swiftmodule",
+    "swift-dependencies": "/workspace/.build/x86_64-unknown-linux-gnu/debug/generate_docc_reference.build/GenerateDoccReference.swiftdeps"
+  }
+}

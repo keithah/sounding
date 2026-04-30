@@ -1,0 +1,46 @@
+{
+  "commandLine" : [
+    "/usr/bin/swiftc",
+    "-L",
+    "/usr/lib/swift/pm/PluginAPI",
+    "-lPackagePlugin",
+    "-Xlinker",
+    "-rpath",
+    "-Xlinker",
+    "/usr/lib/swift/pm/PluginAPI",
+    "-g",
+    "-swift-version",
+    "5",
+    "-package-description-version",
+    "5.8.0",
+    "-I",
+    "/usr/lib/swift/pm/PluginAPI",
+    "-parse-as-library",
+    "-Xfrontend",
+    "-serialize-diagnostics-path",
+    "-Xfrontend",
+    "/workspace/.build/plugins/cache/GenerateDoccReference.dia",
+    "/workspace/.build/checkouts/swift-argument-parser/Plugins/GenerateDoccReference/GenerateDoccReference.swift",
+    "/workspace/.build/checkouts/swift-argument-parser/Plugins/GenerateDoccReference/GenerateDoccReferenceError.swift",
+    "/workspace/.build/checkouts/swift-argument-parser/Plugins/GenerateDoccReference/PackagePlugin+Helpers.swift",
+    "-o",
+    "/workspace/.build/plugins/cache/GenerateDoccReference"
+  ],
+  "environment" : {
+    "HOME" : "/tmp",
+    "HOSTNAME" : "55cd14db3e26",
+    "PATH" : "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "SWIFT_BRANCH" : "swift-5.10.1-release",
+    "SWIFT_PLATFORM" : "ubuntu22.04",
+    "SWIFT_SIGNING_KEY" : "A62AE125BBBFBB96A6E042EC925CC1CCED3D1561",
+    "SWIFT_VERSION" : "swift-5.10.1-RELEASE",
+    "SWIFT_WEBROOT" : "https://download.swift.org"
+  },
+  "inputHash" : "7811c49e88a64bb91d60f23492c62f38c3a45d4851c8fb28e77fc917befbee16",
+  "output" : "",
+  "result" : {
+    "exit" : {
+      "code" : 0
+    }
+  }
+}
