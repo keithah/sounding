@@ -1,0 +1,32 @@
+name: Sounding
+
+options:
+  minimumXcodeGenVersion: 2.40.0
+  deploymentTarget:
+    macOS: "13.0"
+
+packages:
+  SoundingPackage:
+    path: .
+
+targets:
+  Sounding:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: App
+    dependencies:
+      - package: SoundingPackage
+        product: SoundingKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.sounding.Sounding
+        PRODUCT_NAME: Sounding
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Sounding
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        ENABLE_HARDENED_RUNTIME: YES
