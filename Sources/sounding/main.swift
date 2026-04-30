@@ -6,7 +6,8 @@ struct SoundingCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sounding",
         abstract: "Command line interface for \(SoundingKitVersion.current.name).",
-        version: SoundingKitVersion.current.string
+        version: SoundingKitVersion.current.string,
+        subcommands: [MonitorCommand.self]
     )
 
     mutating func run() async throws {
