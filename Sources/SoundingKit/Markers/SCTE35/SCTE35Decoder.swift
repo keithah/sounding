@@ -8,6 +8,22 @@ public enum SCTE35Decoder {
     private static let ptsTimescale = 90_000.0
     private static let ptsMask = (UInt64(1) << 33) - 1
 
+    /// Decodes caller-provided SCTE-35 payload input into a tidemark-compatible ad marker.
+    public static func decodeMarker(
+        _ payload: SCTE35PayloadInput,
+        source: String,
+        tag: String? = nil,
+        segment: String? = nil,
+        timestamp: String? = nil
+    ) throws -> AdMarker {
+        try SCTE35MarkerMapper.map(payload, source: source, tag: tag, segment: segment, timestamp: timestamp)
+    }
+
+    /// Decodes a binary SCTE-35 `splice_info_section` without requiring transport coupling.
+    public static func decodeSection(_ data: Data) throws -> SCTE35Cue {
+        try decode(.data(data))
+    }
+
     public static func decode(_ input: SCTE35PayloadInput) throws -> SCTE35Cue {
         try decode(SCTE35Payload(input: input))
     }
