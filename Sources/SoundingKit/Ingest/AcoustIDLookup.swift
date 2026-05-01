@@ -170,7 +170,7 @@ public struct DeterministicAcoustIDLookup: AcoustIDLookuping {
     }
 
     private static func responseJSON(for hash: String) -> String {
-        #"{"status":"ok","source":"deterministic","fingerprintHash":"#
+        #"{"status":"ok","source":"deterministic","fingerprintHash":""#
             + jsonEscaped(hash)
             + #""}"#
     }

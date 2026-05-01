@@ -54,6 +54,7 @@ struct IngestCommand: AsyncParsableCommand {
         let queue = InferenceQueue()
         let providers = makeProviders(cache: cache, queue: queue)
         let fingerprinter = makeFingerprinter()
+        let fingerprintEnricher = makeFingerprintEnricher(database: database)
 
         do {
             if normalizedSources.count == 1 {
@@ -62,7 +63,8 @@ struct IngestCommand: AsyncParsableCommand {
                     decoder: AVFoundationAudioDecoder(),
                     transcriber: providers.transcriber,
                     diarizer: providers.diarizer,
-                    fingerprinter: fingerprinter
+                    fingerprinter: fingerprinter,
+                    fingerprintEnricher: fingerprintEnricher
                 ).run(
                     source: normalizedSources[0],
                     streamType: streamType.value,
@@ -89,7 +91,8 @@ struct IngestCommand: AsyncParsableCommand {
                 decoderFactory: { _ in AVFoundationAudioDecoder() },
                 transcriber: providers.transcriber,
                 diarizer: providers.diarizer,
-                fingerprinter: fingerprinter
+                fingerprinter: fingerprinter,
+                fingerprintEnricher: fingerprintEnricher
             )
             let outcomes = try await supervisor.run(
                 normalizedSources.map { source in
@@ -172,6 +175,43 @@ struct IngestCommand: AsyncParsableCommand {
             return DeterministicAudioFingerprinter()
         }
         return NoOpAudioFingerprinter()
+    }
+
+    private func makeFingerprintEnricher(database: SoundingDatabase) -> any AudioFingerprintEnriching {
+        AcoustIDAudioFingerprintEnricher(
+            cache: AcoustIDLookupCache(database: database),
+            lookup: makeAcoustIDLookup()
+        )
+    }
+
+    private func makeAcoustIDLookup() -> any AcoustIDLookuping {
+        let environment = ProcessInfo.processInfo.environment
+        let stubMode = environment["SOUNDING_ACOUSTID_STUB"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if stubMode == "success" {
+            return DeterministicAcoustIDLookup()
+        }
+        if let stubMode, !stubMode.isEmpty {
+            return NoOpAcoustIDLookup(
+                reason: "unknown SOUNDING_ACOUSTID_STUB value; acoustid lookup disabled"
+            )
+        }
+
+        let apiKey = environment["SOUNDING_ACOUSTID_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard apiKey?.isEmpty == false else {
+            return NoOpAcoustIDLookup(reason: "acoustid api key missing")
+        }
+
+        let realMode = environment["SOUNDING_ACOUSTID_MODE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard realMode == "real" else {
+            return NoOpAcoustIDLookup(reason: "acoustid live lookup not enabled")
+        }
+
+        return NoOpAcoustIDLookup(reason: "acoustid live lookup client unavailable")
     }
 
     private func summaryLine(for outcome: MultiStreamIngestOutcome, index: Int) -> String {

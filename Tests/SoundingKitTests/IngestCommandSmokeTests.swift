@@ -101,7 +101,10 @@ final class IngestCommandSmokeTests: XCTestCase {
                 "--stream-type", "hls",
                 "--max-chunks", "1",
             ],
-            environment: ["SOUNDING_DETERMINISTIC_ML": "1"]
+            environment: [
+                "SOUNDING_DETERMINISTIC_ML": "1",
+                "SOUNDING_ACOUSTID_STUB": "success",
+            ]
         )
 
         XCTAssertEqual(ingest.exitCode, 0, ingest.diagnosticSummary)
@@ -128,6 +131,8 @@ final class IngestCommandSmokeTests: XCTestCase {
                     db, sql: "SELECT COUNT(*) FROM audio_fingerprints"),
                 "songs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM songs"),
                 "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+                "acoustid_lookup_cache": Int.fetchOne(
+                    db, sql: "SELECT COUNT(*) FROM acoustid_lookup_cache"),
             ]
         }
         XCTAssertEqual(counts["streams"] as? Int, 2)
@@ -140,6 +145,17 @@ final class IngestCommandSmokeTests: XCTestCase {
         XCTAssertEqual(counts["audio_fingerprints"] as? Int, 2)
         XCTAssertEqual(counts["songs"] as? Int, 1)
         XCTAssertEqual(counts["song_plays"] as? Int, 2)
+        XCTAssertEqual(counts["acoustid_lookup_cache"] as? Int, 1)
+
+        let enrichedSong = try database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT title, artist FROM songs WHERE song_key LIKE 'fingerprint:%' LIMIT 1")
+        }
+        XCTAssertTrue(
+            (enrichedSong?["title"] as String? ?? "").hasPrefix("Deterministic Song "),
+            ingest.diagnosticSummary)
+        XCTAssertEqual(enrichedSong?["artist"] as String?, "Sounding Fixtures")
 
         let search = try runSounding(arguments: [
             "search", "cli shared phrase",
@@ -175,6 +191,154 @@ final class IngestCommandSmokeTests: XCTestCase {
                 return Int64(value)
             })
         XCTAssertEqual(countStreamIDs, streamIDs, count.diagnosticSummary)
+    }
+
+    func testAcoustIDNoKeyModeCompletesAndPersistsRedactedDisabledDiagnostic() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "acoustid-no-key-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        let fixture =
+            packageRootURL
+            .appendingPathComponent("Tests/SoundingKitTests/Fixtures/HLS/manifest-scte35.m3u8")
+
+        let ingest = try runSounding(
+            arguments: [
+                "ingest",
+                fixture.path,
+                "--db", dbURL.path,
+                "--stream-type", "hls",
+                "--max-chunks", "1",
+            ],
+            environment: [
+                "SOUNDING_DETERMINISTIC_ML": "1",
+                "SOUNDING_ACOUSTID_API_KEY": "",
+                "SOUNDING_ACOUSTID_STUB": "",
+            ]
+        )
+
+        XCTAssertEqual(ingest.exitCode, 0, ingest.diagnosticSummary)
+        let stdout = String(data: ingest.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(stdout.contains("diagnostics=1"), ingest.diagnosticSummary)
+        let stderr = String(data: ingest.stderr, encoding: .utf8) ?? ""
+        assertSanitized(stderr, forbiddenLiteral: fixture.path)
+        assertSanitized(stderr, forbiddenLiteral: dbURL.path)
+
+        let database = try DatabaseQueue(path: dbURL.path)
+        let diagnostic = try database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT reason, context_json
+                    FROM ingest_diagnostics
+                    WHERE phase = 'fingerprint'
+                    LIMIT 1
+                    """)
+        }
+        XCTAssertEqual(diagnostic?["reason"] as String?, "acoustid-lookup-disabled")
+        let context = diagnostic?["context_json"] as String? ?? ""
+        XCTAssertTrue(context.contains("acoustid api key missing"), context)
+        assertSanitized(context, forbiddenLiteral: dbURL.path)
+        assertSanitized(context, forbiddenLiteral: fixture.path)
+    }
+
+    func testAcoustIDStubModeEnrichesSongAndCachesLookupWithoutSecretLeak() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "acoustid-stub-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        let fixture =
+            packageRootURL
+            .appendingPathComponent("Tests/SoundingKitTests/Fixtures/HLS/manifest-scte35.m3u8")
+        let syntheticAPIKey = "api_key=synthetic-secret-value"
+
+        let ingest = try runSounding(
+            arguments: [
+                "ingest",
+                fixture.path,
+                "--db", dbURL.path,
+                "--stream-type", "hls",
+                "--max-chunks", "1",
+            ],
+            environment: [
+                "SOUNDING_DETERMINISTIC_ML": "1",
+                "SOUNDING_ACOUSTID_STUB": "success",
+                "SOUNDING_ACOUSTID_API_KEY": syntheticAPIKey,
+            ]
+        )
+
+        XCTAssertEqual(ingest.exitCode, 0, ingest.diagnosticSummary)
+        let stdout = String(data: ingest.stdout, encoding: .utf8) ?? ""
+        let stderr = String(data: ingest.stderr, encoding: .utf8) ?? ""
+        XCTAssertTrue(stdout.contains("diagnostics=0"), ingest.diagnosticSummary)
+        assertSanitized(stdout, forbiddenLiteral: syntheticAPIKey)
+        assertSanitized(stderr, forbiddenLiteral: syntheticAPIKey)
+        assertSanitized(stdout, forbiddenLiteral: dbURL.path)
+        assertSanitized(stderr, forbiddenLiteral: dbURL.path)
+
+        let database = try DatabaseQueue(path: dbURL.path)
+        let row = try database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT songs.title AS title,
+                           songs.artist AS artist,
+                           acoustid_lookup_cache.title AS cached_title,
+                           acoustid_lookup_cache.artist AS cached_artist,
+                           (SELECT COUNT(*) FROM acoustid_lookup_cache) AS cache_count,
+                           (SELECT COUNT(*) FROM ingest_diagnostics WHERE phase = 'fingerprint') AS fingerprint_diagnostics
+                    FROM songs
+                    JOIN acoustid_lookup_cache ON acoustid_lookup_cache.title = songs.title
+                    WHERE songs.song_key LIKE 'fingerprint:%'
+                    LIMIT 1
+                    """)
+        }
+        XCTAssertTrue((row?["title"] as String? ?? "").hasPrefix("Deterministic Song "))
+        XCTAssertEqual(row?["artist"] as String?, "Sounding Fixtures")
+        XCTAssertEqual(row?["cached_artist"] as String?, "Sounding Fixtures")
+        XCTAssertEqual(row?["cache_count"] as Int?, 1)
+        XCTAssertEqual(row?["fingerprint_diagnostics"] as Int?, 0)
+    }
+
+    func testAcoustIDUnknownStubModeCompletesWithRedactedConfigurationDiagnostic() throws {
+        let dbURL = temporaryDatabaseURL(
+            secretComponent: "acoustid-unknown-stub-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        let fixture =
+            packageRootURL
+            .appendingPathComponent("Tests/SoundingKitTests/Fixtures/HLS/manifest-scte35.m3u8")
+        let secretStubMode = "secret-stub-mode-token=synthetic-secret"
+
+        let ingest = try runSounding(
+            arguments: [
+                "ingest",
+                fixture.path,
+                "--db", dbURL.path,
+                "--stream-type", "hls",
+                "--max-chunks", "1",
+            ],
+            environment: [
+                "SOUNDING_DETERMINISTIC_ML": "1",
+                "SOUNDING_ACOUSTID_STUB": secretStubMode,
+            ]
+        )
+
+        XCTAssertEqual(ingest.exitCode, 0, ingest.diagnosticSummary)
+        let stdout = String(data: ingest.stdout, encoding: .utf8) ?? ""
+        let stderr = String(data: ingest.stderr, encoding: .utf8) ?? ""
+        assertSanitized(stdout, forbiddenLiteral: secretStubMode)
+        assertSanitized(stderr, forbiddenLiteral: secretStubMode)
+
+        let database = try DatabaseQueue(path: dbURL.path)
+        let context = try database.read { db in
+            try String.fetchOne(
+                db,
+                sql: """
+                    SELECT context_json
+                    FROM ingest_diagnostics
+                    WHERE reason = 'acoustid-lookup-disabled'
+                    LIMIT 1
+                    """)
+        } ?? ""
+        XCTAssertTrue(context.contains("unknown SOUNDING_ACOUSTID_STUB value"), context)
+        assertSanitized(context, forbiddenLiteral: secretStubMode)
+        assertSanitized(context, forbiddenLiteral: "synthetic-secret")
     }
 
     func testUnwritableDatabasePathFailsBeforeOpeningSourceOrModels() throws {
