@@ -182,7 +182,7 @@ public struct SongReportQuery {
     }
 
     public func plays(filter: Filter = Filter()) throws -> [PlayResult] {
-        let normalized = try validate(filter)
+        let normalized = try Self.validate(filter)
 
         do {
             return try database.read { db in
@@ -277,7 +277,7 @@ public struct SongReportQuery {
         }.sorted(by: compareRepeatResults)
     }
 
-    private func validate(_ filter: Filter) throws -> Filter {
+    static func validate(_ filter: Filter) throws -> Filter {
         let stream = filter.stream?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let stream, stream.isEmpty {
             throw QueryError.emptyStreamFilter
