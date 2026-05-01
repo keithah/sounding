@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import XCTest
 
 @testable import SoundingKit
@@ -83,6 +84,208 @@ final class ReportCommandSmokeTests: XCTestCase {
         XCTAssertFalse(jsonText.contains("Play 1:"), json.diagnosticSummary)
         assertSanitized(jsonText, forbiddenLiteral: fixture.path)
         assertSanitized(jsonText, forbiddenLiteral: dbURL.path)
+    }
+
+    func testAcoustIDStubIngestReportsEnrichedSongAndCachesLookup() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "enriched-report-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        let fixture =
+            packageRootURL
+            .appendingPathComponent("Tests/SoundingKitTests/Fixtures/HLS/manifest-scte35.m3u8")
+        let syntheticAPIKey = "api_key=synthetic-secret-value"
+
+        let ingest = try runSounding(
+            arguments: [
+                "ingest",
+                fixture.path,
+                "--db", dbURL.path,
+                "--stream-type", "hls",
+                "--max-chunks", "1",
+            ],
+            environment: [
+                "SOUNDING_DETERMINISTIC_ML": "1",
+                "SOUNDING_ACOUSTID_STUB": "success",
+                "SOUNDING_ACOUSTID_API_KEY": syntheticAPIKey,
+            ]
+        )
+        XCTAssertEqual(ingest.exitCode, 0, ingest.diagnosticSummary)
+        let ingestStdout = String(data: ingest.stdout, encoding: .utf8) ?? ""
+        let ingestStderr = String(data: ingest.stderr, encoding: .utf8) ?? ""
+        XCTAssertTrue(ingestStdout.contains("diagnostics=0"), ingest.diagnosticSummary)
+        assertSanitized(ingestStdout, forbiddenLiteral: syntheticAPIKey)
+        assertSanitized(ingestStderr, forbiddenLiteral: syntheticAPIKey)
+        assertSanitized(ingestStdout, forbiddenLiteral: fixture.path)
+        assertSanitized(ingestStderr, forbiddenLiteral: fixture.path)
+        assertSanitized(ingestStdout, forbiddenLiteral: dbURL.path)
+        assertSanitized(ingestStderr, forbiddenLiteral: dbURL.path)
+
+        let json = try runSounding(arguments: [
+            "report", "plays",
+            "--db", dbURL.path,
+            "--json",
+        ])
+        XCTAssertEqual(json.exitCode, 0, json.diagnosticSummary)
+        XCTAssertEqual(json.stderr.count, 0, json.diagnosticSummary)
+        let payload = try decodeJSON(
+            PlaysPayload.self, from: json.stdout, context: json.diagnosticSummary)
+        XCTAssertEqual(payload.results.count, 1, json.diagnosticSummary)
+        let play = try XCTUnwrap(payload.results.first, json.diagnosticSummary)
+        XCTAssertEqual(play.identity.streamType, "hls", json.diagnosticSummary)
+        XCTAssertEqual(play.song.artist, "Sounding Fixtures", json.diagnosticSummary)
+        XCTAssertTrue(
+            play.song.title?.hasPrefix("Deterministic Song ") == true,
+            json.diagnosticSummary)
+        XCTAssertTrue(play.song.isrc?.hasPrefix("QSND26") == true, json.diagnosticSummary)
+        XCTAssertFalse(play.song.isUnknown, json.diagnosticSummary)
+        XCTAssertEqual(
+            play.song.displayLabel,
+            "Sounding Fixtures — \(play.song.title ?? "")",
+            json.diagnosticSummary)
+        XCTAssertEqual(play.source, "deterministic_fingerprint", json.diagnosticSummary)
+
+        let jsonText = String(data: json.stdout, encoding: .utf8) ?? ""
+        assertSanitized(jsonText, forbiddenLiteral: syntheticAPIKey)
+        assertSanitized(jsonText, forbiddenLiteral: fixture.path)
+        assertSanitized(jsonText, forbiddenLiteral: dbURL.path)
+
+        let database = try DatabaseQueue(path: dbURL.path)
+        let counts = try database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT
+                        (SELECT COUNT(*) FROM acoustid_lookup_cache) AS cache_count,
+                        (SELECT COUNT(*) FROM ingest_diagnostics WHERE phase = 'fingerprint') AS fingerprint_diagnostics
+                    """)
+        }
+        XCTAssertEqual(counts?["cache_count"] as Int?, 1, json.diagnosticSummary)
+        XCTAssertEqual(counts?["fingerprint_diagnostics"] as Int?, 0, json.diagnosticSummary)
+    }
+
+    func testAcoustIDFailureStubsRemainNonFatalAndReportFallbacksWithRedactedDiagnostics() throws {
+        struct FailureCase {
+            var name: String
+            var environment: [String: String]
+            var expectedReason: String
+            var forbidden: [String]
+        }
+
+        let credentialURL = "https://user:pass@example.test/lookup?token=synthetic-secret"
+        let malformedRaw = "raw={\"api_key\":\"synthetic-secret\""
+        let cases = [
+            FailureCase(
+                name: "missing-key",
+                environment: [
+                    "SOUNDING_DETERMINISTIC_ML": "1",
+                    "SOUNDING_ACOUSTID_API_KEY": "",
+                    "SOUNDING_ACOUSTID_STUB": "",
+                ],
+                expectedReason: "acoustid-lookup-disabled",
+                forbidden: ["synthetic-secret"]
+            ),
+            FailureCase(
+                name: "transient",
+                environment: [
+                    "SOUNDING_DETERMINISTIC_ML": "1",
+                    "SOUNDING_ACOUSTID_STUB": "transient",
+                    "SOUNDING_ACOUSTID_API_KEY": "api_key=synthetic-secret-value",
+                ],
+                expectedReason: "acoustid-transient-failure",
+                forbidden: ["synthetic-secret", "/tmp/acoustid-token=synthetic-secret.json"]
+            ),
+            FailureCase(
+                name: "rate-limit",
+                environment: [
+                    "SOUNDING_DETERMINISTIC_ML": "1",
+                    "SOUNDING_ACOUSTID_STUB": "rate-limit",
+                    "SOUNDING_ACOUSTID_API_KEY": "api_key=synthetic-secret-value",
+                ],
+                expectedReason: "acoustid-rate-limited",
+                forbidden: ["synthetic-secret"]
+            ),
+            FailureCase(
+                name: "malformed",
+                environment: [
+                    "SOUNDING_DETERMINISTIC_ML": "1",
+                    "SOUNDING_ACOUSTID_STUB": "malformed",
+                    "SOUNDING_ACOUSTID_API_KEY": "api_key=synthetic-secret-value",
+                ],
+                expectedReason: "acoustid-malformed-response",
+                forbidden: [
+                    "synthetic-secret", "user:pass", credentialURL, malformedRaw,
+                    "/tmp/acoustid-token=synthetic-secret.json",
+                ]
+            ),
+        ]
+
+        for failureCase in cases {
+            let dbURL = temporaryDatabaseURL(
+                secretComponent: "acoustid-\(failureCase.name)-token=synthetic-secret")
+            defer { removeDatabaseFiles(dbURL) }
+            let fixture =
+                packageRootURL
+                .appendingPathComponent("Tests/SoundingKitTests/Fixtures/HLS/manifest-scte35.m3u8")
+
+            let ingest = try runSounding(
+                arguments: [
+                    "ingest",
+                    fixture.path,
+                    "--db", dbURL.path,
+                    "--stream-type", "hls",
+                    "--max-chunks", "1",
+                ],
+                environment: failureCase.environment
+            )
+            XCTAssertEqual(ingest.exitCode, 0, "\(failureCase.name): \(ingest.diagnosticSummary)")
+            let ingestStdout = String(data: ingest.stdout, encoding: .utf8) ?? ""
+            let ingestStderr = String(data: ingest.stderr, encoding: .utf8) ?? ""
+            XCTAssertTrue(ingestStdout.contains("diagnostics=1"), ingest.diagnosticSummary)
+
+            let report = try runSounding(arguments: [
+                "report", "plays",
+                "--db", dbURL.path,
+                "--json",
+            ])
+            XCTAssertEqual(report.exitCode, 0, "\(failureCase.name): \(report.diagnosticSummary)")
+            XCTAssertEqual(report.stderr.count, 0, report.diagnosticSummary)
+            let payload = try decodeJSON(
+                PlaysPayload.self, from: report.stdout, context: report.diagnosticSummary)
+            XCTAssertEqual(payload.results.count, 1, report.diagnosticSummary)
+            let play = try XCTUnwrap(payload.results.first, report.diagnosticSummary)
+            XCTAssertTrue(play.song.songKey.hasPrefix("fingerprint:"), report.diagnosticSummary)
+            XCTAssertTrue(play.song.isUnknown, report.diagnosticSummary)
+            XCTAssertTrue(play.song.displayLabel.hasPrefix("unknown("), report.diagnosticSummary)
+            XCTAssertEqual(play.source, "deterministic_fingerprint", report.diagnosticSummary)
+
+            let database = try DatabaseQueue(path: dbURL.path)
+            let row = try database.read { db in
+                try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT reason, context_json,
+                               (SELECT COUNT(*) FROM song_plays) AS play_count,
+                               (SELECT COUNT(*) FROM acoustid_lookup_cache) AS cache_count
+                        FROM ingest_diagnostics
+                        WHERE phase = 'fingerprint'
+                        LIMIT 1
+                        """)
+            }
+            XCTAssertEqual(row?["reason"] as String?, failureCase.expectedReason)
+            XCTAssertEqual(row?["play_count"] as Int?, 1)
+            XCTAssertEqual(row?["cache_count"] as Int?, 0)
+            let context = row?["context_json"] as String? ?? ""
+            if failureCase.expectedReason == "acoustid-rate-limited" {
+                XCTAssertTrue(context.contains("retryAfterSeconds"), context)
+            }
+
+            let reportText = String(data: report.stdout, encoding: .utf8) ?? ""
+            for forbidden in failureCase.forbidden + [fixture.path, dbURL.path] {
+                assertSanitized(ingestStdout, forbiddenLiteral: forbidden)
+                assertSanitized(ingestStderr, forbiddenLiteral: forbidden)
+                assertSanitized(reportText, forbiddenLiteral: forbidden)
+                assertSanitized(context, forbiddenLiteral: forbidden)
+            }
+        }
     }
 
     func testFiltersAndEmptyDatabaseReportStableShapes() throws {
@@ -192,6 +395,10 @@ final class ReportCommandSmokeTests: XCTestCase {
 
     private struct Song: Decodable {
         var songKey: String
+        var title: String?
+        var artist: String?
+        var isrc: String?
+        var displayLabel: String
         var isUnknown: Bool
     }
 

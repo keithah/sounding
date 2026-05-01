@@ -189,13 +189,35 @@ struct IngestCommand: AsyncParsableCommand {
         let stubMode = environment["SOUNDING_ACOUSTID_STUB"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        if stubMode == "success" {
+        switch stubMode {
+        case "success":
             return DeterministicAcoustIDLookup()
-        }
-        if let stubMode, !stubMode.isEmpty {
+        case "not-found":
+            return StubAcoustIDLookup(
+                outcome: .notFound(
+                    reason: "no AcoustID result for https://user:pass@example.test/lookup?token=synthetic-secret"
+                )
+            )
+        case "transient":
+            return StubAcoustIDLookup(
+                outcome: .transientFailure(
+                    reason: "temporary AcoustID failure reading /tmp/acoustid-token=synthetic-secret.json"
+                )
+            )
+        case "rate-limit":
+            return StubAcoustIDLookup(outcome: .rateLimited(retryAfterSeconds: 30))
+        case "malformed":
+            return StubAcoustIDLookup(
+                outcome: .malformedResponse(
+                    reason: "malformed AcoustID body raw={\"api_key\":\"synthetic-secret\",\"url\":\"https://user:pass@example.test/lookup?token=synthetic-secret\"} file=/tmp/acoustid-token=synthetic-secret.json"
+                )
+            )
+        case .some(let stubMode) where !stubMode.isEmpty:
             return NoOpAcoustIDLookup(
                 reason: "unknown SOUNDING_ACOUSTID_STUB value; acoustid lookup disabled"
             )
+        default:
+            break
         }
 
         let apiKey = environment["SOUNDING_ACOUSTID_API_KEY"]?
@@ -279,6 +301,14 @@ private final class CLIModelProgressSink: @unchecked Sendable {
         let line =
             "model \(progress.event.rawValue): provider=\(IngestRedaction.component(progress.provider)) model=\(IngestRedaction.component(progress.model))\(suffix)"
         FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+}
+
+private struct StubAcoustIDLookup: AcoustIDLookuping {
+    var outcome: AcoustIDLookupOutcome
+
+    func lookup(_ request: AcoustIDLookupRequest) async -> AcoustIDLookupOutcome {
+        outcome
     }
 }
 
