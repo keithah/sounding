@@ -28,10 +28,67 @@ final class StreamRegistryTests: XCTestCase {
         XCTAssertEqual(try registry.find(id: record.id), record)
         XCTAssertEqual(try registry.find(name: "Main Stream"), record)
 
-        let storedSource = try temporary.database.read { db in
-            try String.fetchOne(db, sql: "SELECT source FROM streams WHERE id = ?", arguments: [record.id])
+        let stored = try temporary.database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT source, source_url FROM streams WHERE id = ?",
+                arguments: [record.id]
+            )
         }
-        XCTAssertEqual(storedSource, "https://example.test/private/live.m3u8")
+        XCTAssertEqual(stored?["source"] as String?, "https://example.test/private/live.m3u8")
+        XCTAssertEqual(
+            stored?["source_url"] as String?,
+            "https://user:pass@example.test/private/live.m3u8?token=secret#frag"
+        )
+    }
+
+    func testReconnectSourceExposesRawSourceWithoutChangingListRedaction() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let rawSource = "https://user:pass@example.test/private/live.m3u8?token=secret#frag"
+
+        let record = try registry.add(
+            name: "Main",
+            streamType: "hls",
+            source: rawSource,
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+
+        XCTAssertEqual(try registry.find(id: record.id)?.sourceDescription, "https://example.test/private/live.m3u8")
+        XCTAssertEqual(try registry.list().first?.sourceDescription, "https://example.test/private/live.m3u8")
+
+        let reconnect = try XCTUnwrap(registry.reconnectSource(id: record.id))
+        XCTAssertEqual(reconnect.streamID, record.id)
+        XCTAssertEqual(reconnect.name, "Main")
+        XCTAssertEqual(reconnect.streamType, "hls")
+        XCTAssertEqual(reconnect.source, rawSource)
+        XCTAssertEqual(reconnect.sourceDescription, "https://example.test/private/live.m3u8")
+    }
+
+    func testReconnectSourceFallsBackToRedactedCompatibilitySourceForLegacyRows() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+
+        try temporary.database.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO streams (name, stream_type, source, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    "Legacy",
+                    "hls",
+                    "https://example.test/legacy.m3u8",
+                    StreamStatus.active.rawValue,
+                    "2026-05-01T10:00:00Z",
+                    "2026-05-01T10:00:00Z"
+                ]
+            )
+        }
+
+        let reconnect = try XCTUnwrap(registry.reconnectSource(id: 1))
+        XCTAssertEqual(reconnect.source, "https://example.test/legacy.m3u8")
+        XCTAssertEqual(reconnect.sourceDescription, "https://example.test/legacy.m3u8")
     }
 
     func testRejectsEmptyInputsAndMalformedIDsBeforeMutation() throws {

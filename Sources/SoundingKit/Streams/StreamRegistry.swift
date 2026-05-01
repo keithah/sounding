@@ -20,6 +20,14 @@ public struct StreamRecord: Equatable, Sendable {
     public var removedAt: String?
 }
 
+public struct StreamReconnectSource: Equatable, Sendable {
+    public var streamID: Int64
+    public var name: String
+    public var streamType: String
+    public var source: String
+    public var sourceDescription: String
+}
+
 public struct StreamMutationResult: Equatable, Sendable {
     public var record: StreamRecord
     public var changed: Bool
@@ -40,9 +48,10 @@ public enum StreamRegistryError: Error, Equatable, Sendable {
 
 /// SQLite-backed lifecycle registry for named streams.
 ///
-/// The registry deliberately stores the redacted source description rather than a raw
-/// URL or local file path. Each mutation runs in one GRDB write transaction so status
-/// transitions and lifecycle timestamps cannot be partially applied.
+/// The `streams.source` column remains the redacted compatibility/reporting value used by
+/// existing CLI, ingest, and query surfaces. New registry-created rows also persist the
+/// original reconnectable source in `streams.source_url`, which is exposed only through
+/// `reconnectSource` so list/find records and diagnostics continue to carry redacted text.
 public final class StreamRegistry {
     private let database: SoundingDatabase
 
@@ -58,7 +67,8 @@ public final class StreamRegistry {
     ) throws -> StreamRecord {
         let name = try validatedName(name)
         let streamType = try validatedStreamType(streamType)
-        let sourceDescription = try redactedSourceDescription(source)
+        let source = try validatedReconnectSource(source)
+        let sourceDescription = IngestRedaction.sourceDescription(source)
         let createdAt = createdAt ?? Self.nowString()
 
         do {
@@ -70,14 +80,15 @@ public final class StreamRegistry {
                 try db.execute(
                     sql: """
                     INSERT INTO streams (
-                        name, stream_type, source, status, created_at, updated_at,
+                        name, stream_type, source, source_url, status, created_at, updated_at,
                         paused_at, resumed_at, removed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                     """,
                     arguments: [
                         name,
                         streamType,
                         sourceDescription,
+                        source,
                         StreamStatus.active.rawValue,
                         createdAt,
                         createdAt
@@ -149,6 +160,19 @@ public final class StreamRegistry {
         do {
             return try database.read { db in
                 try fetchStream(name: name, includeRemoved: includeRemoved, db: db)
+            }
+        } catch let error as StreamRegistryError {
+            throw error
+        } catch {
+            throw StreamRegistryError.databaseReadFailed(message: Self.redactedDatabaseMessage(error))
+        }
+    }
+
+    public func reconnectSource(id: Int64, includeRemoved: Bool = false) throws -> StreamReconnectSource? {
+        let id = try validatedID(id)
+        do {
+            return try database.read { db in
+                try fetchReconnectSource(id: id, includeRemoved: includeRemoved, db: db)
             }
         } catch let error as StreamRegistryError {
             throw error
@@ -247,10 +271,10 @@ public final class StreamRegistry {
         return trimmed
     }
 
-    private func redactedSourceDescription(_ source: String) throws -> String {
+    private func validatedReconnectSource(_ source: String) throws -> String {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw StreamRegistryError.invalidSource }
-        return IngestRedaction.sourceDescription(trimmed)
+        return trimmed
     }
 
     private func activeStreamExists(named name: String, db: Database) throws -> Bool {
@@ -302,6 +326,22 @@ public final class StreamRegistry {
         ).map(Self.decode(row:))
     }
 
+    private func fetchReconnectSource(id: Int64, includeRemoved: Bool, db: Database) throws -> StreamReconnectSource? {
+        let removedClause = includeRemoved ? "" : "AND removed_at IS NULL"
+        return try Row.fetchOne(
+            db,
+            sql: """
+            SELECT id, name, stream_type, source, source_url, status
+            FROM streams
+            WHERE id = ?
+              AND name IS NOT NULL
+              \(removedClause)
+            LIMIT 1
+            """,
+            arguments: [id]
+        ).map(Self.decodeReconnectSource(row:))
+    }
+
     private static func decode(row: Row) throws -> StreamRecord {
         let statusValue: String = row["status"]
         guard let status = StreamStatus(rawValue: statusValue) else {
@@ -318,6 +358,22 @@ public final class StreamRegistry {
             pausedAt: row["paused_at"],
             resumedAt: row["resumed_at"],
             removedAt: row["removed_at"]
+        )
+    }
+
+    private static func decodeReconnectSource(row: Row) throws -> StreamReconnectSource {
+        let statusValue: String = row["status"]
+        guard StreamStatus(rawValue: statusValue) != nil else {
+            throw StreamRegistryError.invalidStatus(statusValue)
+        }
+        let sourceDescription: String = row["source"]
+        let sourceURL: String? = row["source_url"]
+        return StreamReconnectSource(
+            streamID: row["id"],
+            name: row["name"],
+            streamType: row["stream_type"],
+            source: sourceURL ?? sourceDescription,
+            sourceDescription: sourceDescription
         )
     }
 

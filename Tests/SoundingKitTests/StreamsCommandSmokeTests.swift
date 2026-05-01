@@ -56,6 +56,12 @@ final class StreamsCommandSmokeTests: XCTestCase {
         XCTAssertTrue(addText.contains("name=Main"), add.diagnosticSummary)
         assertStreamOutputSanitized(addText, dbURL: dbURL)
 
+        let stored = try DatabaseQueue(path: dbURL.path).read { db in
+            try Row.fetchOne(db, sql: "SELECT source, source_url FROM streams WHERE id = 1")
+        }
+        XCTAssertEqual(stored?["source"] as String?, "https://example.test/private/live.m3u8")
+        XCTAssertEqual(stored?["source_url"] as String?, source)
+
         let human = try runSounding(arguments: [
             "streams", "list",
             "--db", dbURL.path,

@@ -21,7 +21,7 @@ struct StreamsCommand: AsyncParsableCommand {
         @Argument(help: "Unique stream name.")
         var name: String
 
-        @Argument(help: "Stream source URL or local path. Stored only as a redacted description.")
+        @Argument(help: "Stream source URL or local path. CLI output and reports use a redacted description; registry persistence keeps reconnect data.")
         var source: String
 
         @Option(

@@ -287,6 +287,12 @@ enum SoundingDatabaseMigrator {
                 """)
         }
 
+        migrator.registerMigration("addStreamReconnectSource") { db in
+            try db.alter(table: "streams") { table in
+                table.add(column: "source_url", .text)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }
