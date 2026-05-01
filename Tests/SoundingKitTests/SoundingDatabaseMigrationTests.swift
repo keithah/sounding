@@ -3,17 +3,17 @@ import XCTest
 @testable import SoundingKit
 
 final class SoundingDatabaseMigrationTests: XCTestCase {
-    private let deferredPostM002Tables: Set<String> = [
+    private let deferredPostS01Tables: Set<String> = [
         "marker" + "_events",
-        "songs",
         "song_fingerprints",
         "fingerprints",
         "reports",
         "report_rows",
-        "songs_fts"
+        "songs_fts",
+        "acoustid_lookup_cache"
     ]
 
-    func testMigrationsCreateM001AndM002IngestTimelineTablesOnly() throws {
+    func testMigrationsCreateIngestTranscriptAndSongTimelineTablesOnly() throws {
         let temporary = try TemporarySoundingDatabase()
 
         let tables = try temporary.database.read { db in
@@ -42,10 +42,13 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "transcript_words",
                 "speaker_turns",
                 "transcript_segments_fts",
+                "audio_fingerprints",
+                "songs",
+                "song_plays",
                 "grdb_migrations"
             ]
         )
-        XCTAssertTrue(tables.isDisjoint(with: deferredPostM002Tables))
+        XCTAssertTrue(tables.isDisjoint(with: deferredPostS01Tables))
     }
 
     func testBaselineTablesExposeExpectedColumns() throws {
@@ -60,7 +63,10 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "ingest_diagnostics": columnNames(in: "ingest_diagnostics", db),
                 "transcript_segments": columnNames(in: "transcript_segments", db),
                 "transcript_words": columnNames(in: "transcript_words", db),
-                "speaker_turns": columnNames(in: "speaker_turns", db)
+                "speaker_turns": columnNames(in: "speaker_turns", db),
+                "audio_fingerprints": columnNames(in: "audio_fingerprints", db),
+                "songs": columnNames(in: "songs", db),
+                "song_plays": columnNames(in: "song_plays", db)
             ]
         }
 
@@ -149,6 +155,73 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "confidence",
             "created_at"
         ])
+        XCTAssertEqual(columnsByTable["audio_fingerprints"], [
+            "id",
+            "stream_id",
+            "run_id",
+            "chunk_id",
+            "algorithm",
+            "algorithm_version",
+            "fingerprint",
+            "fingerprint_hash",
+            "start_seconds",
+            "end_seconds",
+            "confidence",
+            "created_at"
+        ])
+        XCTAssertEqual(columnsByTable["songs"], [
+            "id",
+            "song_key",
+            "title",
+            "artist",
+            "album",
+            "isrc",
+            "display_name",
+            "is_unknown",
+            "created_at",
+            "updated_at"
+        ])
+        XCTAssertEqual(columnsByTable["song_plays"], [
+            "id",
+            "stream_id",
+            "run_id",
+            "song_id",
+            "first_chunk_id",
+            "last_chunk_id",
+            "start_seconds",
+            "end_seconds",
+            "confidence",
+            "source",
+            "created_at",
+            "updated_at"
+        ])
+    }
+
+    func testSongTimelineMigrationCreatesReportIndexes() throws {
+        let temporary = try TemporarySoundingDatabase()
+
+        let indexes = try temporary.database.read { db in
+            try Set(String.fetchAll(db, sql: """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'index'
+                  AND tbl_name IN ('audio_fingerprints', 'songs', 'song_plays')
+                ORDER BY name
+                """))
+        }
+
+        XCTAssertTrue(indexes.isSuperset(of: [
+            "audio_fingerprints_on_stream_run_time",
+            "audio_fingerprints_on_chunk_id",
+            "audio_fingerprints_on_fingerprint_hash",
+            "songs_on_song_key",
+            "songs_on_isrc",
+            "songs_on_display_name",
+            "song_plays_on_stream_run_time",
+            "song_plays_on_run_time",
+            "song_plays_on_song_id",
+            "song_plays_on_last_chunk_id"
+        ]))
     }
 
     func testNewMigratedDatabaseStartsWithEmptyBaselineTables() throws {
@@ -164,7 +237,10 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "transcript_segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
                 "transcript_words": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_words"),
                 "speaker_turns": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM speaker_turns"),
-                "transcript_segments_fts": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments_fts")
+                "transcript_segments_fts": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments_fts"),
+                "audio_fingerprints": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM audio_fingerprints"),
+                "songs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM songs"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays")
             ]
         }
 
@@ -177,7 +253,10 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "transcript_segments": 0,
             "transcript_words": 0,
             "speaker_turns": 0,
-            "transcript_segments_fts": 0
+            "transcript_segments_fts": 0,
+            "audio_fingerprints": 0,
+            "songs": 0,
+            "song_plays": 0
         ])
     }
 

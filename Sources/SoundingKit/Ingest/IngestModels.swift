@@ -15,6 +15,7 @@ public enum IngestDiagnosticPhase: String, Sendable {
     case decode
     case transcribe
     case diarize
+    case fingerprint
     case persist
     case modelSetup
 }
@@ -131,6 +132,95 @@ public struct IngestDiagnosticDraft: Equatable, Sendable {
     }
 }
 
+public struct AudioFingerprintDraft: Equatable, Sendable {
+    public var algorithm: String
+    public var algorithmVersion: String
+    public var fingerprint: String
+    public var fingerprintHash: String
+    public var startSeconds: Double
+    public var endSeconds: Double
+    public var confidence: Double?
+
+    public init(
+        algorithm: String,
+        algorithmVersion: String,
+        fingerprint: String,
+        fingerprintHash: String,
+        startSeconds: Double,
+        endSeconds: Double,
+        confidence: Double? = nil
+    ) {
+        self.algorithm = algorithm
+        self.algorithmVersion = algorithmVersion
+        self.fingerprint = fingerprint
+        self.fingerprintHash = fingerprintHash
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.confidence = confidence
+    }
+}
+
+public struct UnresolvedSongDraft: Equatable, Sendable {
+    public static let unidentifiedKey = "unknown:unidentified"
+    public static let unidentifiedDisplayName = "Unknown song"
+
+    public var songKey: String
+    public var title: String?
+    public var artist: String?
+    public var album: String?
+    public var isrc: String?
+    public var displayName: String
+    public var isUnknown: Bool
+
+    public init(
+        songKey: String,
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        isrc: String? = nil,
+        displayName: String,
+        isUnknown: Bool = false
+    ) {
+        self.songKey = songKey
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.isrc = isrc
+        self.displayName = displayName
+        self.isUnknown = isUnknown
+    }
+
+    public static func unidentified(displayName: String = unidentifiedDisplayName) -> UnresolvedSongDraft {
+        UnresolvedSongDraft(
+            songKey: unidentifiedKey,
+            displayName: displayName,
+            isUnknown: true
+        )
+    }
+}
+
+public struct SongPlayDraft: Equatable, Sendable {
+    public var song: UnresolvedSongDraft
+    public var startSeconds: Double
+    public var endSeconds: Double
+    public var confidence: Double?
+    public var source: String?
+
+    public init(
+        song: UnresolvedSongDraft,
+        startSeconds: Double,
+        endSeconds: Double,
+        confidence: Double? = nil,
+        source: String? = nil
+    ) {
+        self.song = song
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.confidence = confidence
+        self.source = source
+    }
+}
+
 public struct IngestChunkTimeline: Equatable, Sendable {
     public var runID: Int64
     public var chunkID: Int64
@@ -138,6 +228,8 @@ public struct IngestChunkTimeline: Equatable, Sendable {
     public var speakerTurns: [SpeakerTurnDraft]
     public var adMarkers: [AdMarker]
     public var diagnostics: [IngestDiagnosticDraft]
+    public var fingerprints: [AudioFingerprintDraft]
+    public var songPlays: [SongPlayDraft]
     public var createdAt: String
 
     public init(
@@ -147,6 +239,8 @@ public struct IngestChunkTimeline: Equatable, Sendable {
         speakerTurns: [SpeakerTurnDraft] = [],
         adMarkers: [AdMarker] = [],
         diagnostics: [IngestDiagnosticDraft] = [],
+        fingerprints: [AudioFingerprintDraft] = [],
+        songPlays: [SongPlayDraft] = [],
         createdAt: String
     ) {
         self.runID = runID
@@ -155,6 +249,8 @@ public struct IngestChunkTimeline: Equatable, Sendable {
         self.speakerTurns = speakerTurns
         self.adMarkers = adMarkers
         self.diagnostics = diagnostics
+        self.fingerprints = fingerprints
+        self.songPlays = songPlays
         self.createdAt = createdAt
     }
 }
