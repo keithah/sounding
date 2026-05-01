@@ -121,6 +121,8 @@ struct ContentView: View {
                     .accessibilityLabel("Persistence error: \(persistenceError)")
             }
 
+            ConfigurationIssuesView(issues: viewModel.configurationIssues)
+
             Button {
                 addStream()
             } label: {
@@ -345,64 +347,60 @@ struct ContentView: View {
         }
     }
 
-    private static func makeInitialState() -> (
-        registry: StreamRegistry?,
-        runtime: (any AppStreamRuntimeControlling)?,
-        timelineStore: StreamAppTimelineStore?,
-        searchStore: StreamAppSearchStore?,
-        viewModel: StreamAppViewModel,
-        persistenceError: String?
-    ) {
-        do {
-            let databaseURL = try defaultDatabaseURL()
-            let database = try SoundingDatabase(fileURL: databaseURL)
-            let registry = StreamRegistry(database: database)
-            let timelineStore = StreamAppTimelineStore(database: database)
-            let searchStore = StreamAppSearchStore(database: database)
-            let queue = InferenceQueue()
-            let cache = ModelCache()
-            let timeline = AppPlayerTimelineClock()
-            let rollingBuffer = RollingPCMBuffer(configuration: .appDefault())
-            let runner = StreamIngestAppRuntimeRunner(
-                database: database,
-                decoder: AVFoundationAudioDecoder(),
-                transcriber: QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
-                diarizer: QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue),
-                player: AVFoundationAppPCMPlayerAdapter(),
-                timeline: timeline,
-                rollingBuffer: rollingBuffer
-            )
-            let runtime = AppStreamRuntimeService(
-                registry: registry,
-                ingester: runner,
-                playbackTimeline: timeline,
-                rollingBuffer: rollingBuffer
-            )
-            var viewModel = StreamAppViewModel()
-            try viewModel.reload(from: registry)
-            return (registry, runtime, timelineStore, searchStore, viewModel, nil)
-        } catch {
-            return (
-                nil,
-                nil,
-                nil,
-                nil,
-                StreamAppViewModel(),
-                "Sounding database failed: \(IngestRedaction.redact(String(describing: error)))."
-            )
+    private static func makeInitialState() -> SoundingAppRuntimeStartupState {
+        SoundingAppRuntimeFactory().makeStartupState()
+    }
+}
+
+private struct ConfigurationIssuesView: View {
+    var issues: [SoundingAppConfigurationIssue]
+
+    var body: some View {
+        if !issues.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(issues) { issue in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(issue.message, systemImage: systemImage(for: issue.severity))
+                            .font(.caption)
+                            .foregroundStyle(color(for: issue.severity))
+                        if let detail = issue.detail {
+                            Text(detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(issue.action.label)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "Configuration \(issue.severity.rawValue): \(issue.message) \(issue.detail ?? "") Action: \(issue.action.label)"
+                    )
+                }
+            }
         }
     }
 
-    private static func defaultDatabaseURL() throws -> URL {
-        let base = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        let directory = base.appendingPathComponent("Sounding", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("Sounding.sqlite", isDirectory: false)
+    private func systemImage(for severity: SoundingAppIssueSeverity) -> String {
+        switch severity {
+        case .info:
+            return "info.circle"
+        case .warning:
+            return "exclamationmark.triangle"
+        case .blocking:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func color(for severity: SoundingAppIssueSeverity) -> Color {
+        switch severity {
+        case .info:
+            return .secondary
+        case .warning:
+            return .orange
+        case .blocking:
+            return .red
+        }
     }
 }
 
