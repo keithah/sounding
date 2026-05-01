@@ -111,7 +111,12 @@ public struct AppPlayerTimelineSnapshot: Equatable, Sendable {
         lastMessage: String = "Player idle."
     ) {
         self.streamID = streamID
-        self.state = state
+        switch state {
+        case .failed(let message):
+            self.state = .failed(message: IngestRedaction.redact(message))
+        case .idle, .buffering, .playing, .paused, .stopped:
+            self.state = state
+        }
         self.positionSeconds = positionSeconds
         self.liveEdgeSeconds = liveEdgeSeconds
         self.bufferedStartSeconds = bufferedStartSeconds

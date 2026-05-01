@@ -136,6 +136,122 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.lastLifecycleMessage.contains("token=secret"))
     }
 
+
+    func testRuntimeReconnectIssueProjectsLastRedactedMessageForVisibleStatus() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        var viewModel = StreamAppViewModel()
+        viewModel.addDraft = StreamAppAddDraft(
+            name: "Retry HLS",
+            source: "https://user:pass@example.test/retry.m3u8?token=secret",
+            transport: .hls
+        )
+        let item = try viewModel.addStream(using: registry)
+
+        viewModel.applyRuntimeEvent(
+            AppStreamRuntimeEvent(
+                streamID: item.id,
+                phase: .reconnecting(nextRetrySeconds: 5),
+                message: "Runtime failed for Retry HLS at /tmp/token=secret.raw for https://user:pass@example.test/retry.m3u8?token=secret#frag. Reconnecting in 5 second(s)."
+            )
+        )
+
+        let issue = try XCTUnwrap(viewModel.selectedStream?.runtimeIssue)
+        XCTAssertEqual(issue.id, "runtime.reconnecting")
+        XCTAssertEqual(issue.severity, .warning)
+        XCTAssertTrue(issue.message.contains("Reconnecting in 5 second"), issue.message)
+        XCTAssertFalse(issue.message.contains("user:pass"), issue.message)
+        XCTAssertFalse(issue.message.contains("token=secret"), issue.message)
+        XCTAssertFalse(issue.message.contains("/tmp/"), issue.message)
+        XCTAssertTrue(issue.message.contains("[redacted-path]"), issue.message)
+    }
+
+    func testPlayerAndBufferIssuesProjectRedactedVisibleWarnings() {
+        let item = StreamAppListItem(
+            record: StreamRecord(
+                id: 42,
+                name: "Fixture HLS",
+                streamType: "hls",
+                sourceDescription: "https://example.test/live.m3u8",
+                status: .active,
+                createdAt: "2026-05-01T10:00:00Z",
+                updatedAt: "2026-05-01T10:00:00Z",
+                pausedAt: nil,
+                resumedAt: nil,
+                removedAt: nil
+            )
+        )
+        let timeline = AppPlayerTimelineSnapshot(
+            streamID: item.id,
+            state: .failed(message: "Audio device failed at /Users/example/private/device.raw?token=secret"),
+            rollingBuffer: RollingBufferSnapshot(
+                streamID: item.id,
+                bufferedRange: RollingBufferRange(startSeconds: 0, endSeconds: 12),
+                liveEdgeSeconds: 12,
+                frameCount: 2,
+                memoryFrameCount: 2,
+                spillAvailable: false,
+                memoryOnlyFallback: true,
+                lastMessage: "Rolling buffer spill failed at /Users/example/private/spill.pcm?token=secret"
+            ),
+            lastMessage: "Audio device failed at /Users/example/private/device.raw?token=secret"
+        )
+
+        let selected = StreamAppSelectedStream(item: item, timeline: timeline)
+
+        let playerIssue = try! XCTUnwrap(selected.playerIssue)
+        XCTAssertEqual(playerIssue.id, "player.failed")
+        XCTAssertEqual(playerIssue.severity, .warning)
+        XCTAssertFalse(playerIssue.message.contains("/Users/example"), playerIssue.message)
+        XCTAssertFalse(playerIssue.message.contains("token=secret"), playerIssue.message)
+        let bufferIssue = try! XCTUnwrap(selected.bufferIssue)
+        XCTAssertEqual(bufferIssue.id, "buffer.memory-only-fallback")
+        XCTAssertEqual(bufferIssue.severity, .warning)
+        XCTAssertTrue(bufferIssue.message.contains("Rolling buffer"), bufferIssue.message)
+        XCTAssertFalse(bufferIssue.message.contains("/Users/example"), bufferIssue.message)
+        XCTAssertFalse(bufferIssue.message.contains("token=secret"), bufferIssue.message)
+    }
+
+    func testVisiblePlayerAndBufferIssuesClearAfterRecoverySnapshot() {
+        let item = StreamAppListItem(
+            record: StreamRecord(
+                id: 43,
+                name: "Recovered HLS",
+                streamType: "hls",
+                sourceDescription: "https://example.test/recovered.m3u8",
+                status: .active,
+                createdAt: "2026-05-01T10:00:00Z",
+                updatedAt: "2026-05-01T10:00:00Z",
+                pausedAt: nil,
+                resumedAt: nil,
+                removedAt: nil
+            )
+        )
+        let recovered = AppPlayerTimelineSnapshot(
+            streamID: item.id,
+            state: .playing,
+            positionSeconds: 5,
+            liveEdgeSeconds: 10,
+            rollingBuffer: RollingBufferSnapshot(
+                streamID: item.id,
+                bufferedRange: RollingBufferRange(startSeconds: 0, endSeconds: 10),
+                liveEdgeSeconds: 10,
+                frameCount: 2,
+                memoryFrameCount: 1,
+                spillFrameCount: 1,
+                spillAvailable: true,
+                memoryOnlyFallback: false,
+                lastMessage: "Rolling buffer ready."
+            ),
+            lastMessage: "Playback resumed."
+        )
+
+        let selected = StreamAppSelectedStream(item: item, timeline: recovered)
+
+        XCTAssertNil(selected.playerIssue)
+        XCTAssertNil(selected.bufferIssue)
+    }
+
     func testDuplicateNamesMapToActionableAddError() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

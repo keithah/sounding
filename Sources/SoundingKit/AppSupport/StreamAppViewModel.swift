@@ -279,10 +279,32 @@ public struct StreamAppSearchSelectionAction: Equatable, Sendable {
   }
 }
 
+public struct StreamAppVisibleIssue: Equatable, Sendable, Identifiable {
+  public var id: String
+  public var severity: SoundingAppIssueSeverity
+  public var message: String
+  public var actionLabel: String
+
+  public init(
+    id: String,
+    severity: SoundingAppIssueSeverity,
+    message: String,
+    actionLabel: String
+  ) {
+    self.id = id
+    self.severity = severity
+    self.message = IngestRedaction.redact(message)
+    self.actionLabel = IngestRedaction.redact(actionLabel)
+  }
+}
+
 public struct StreamAppSelectedStream: Equatable, Sendable {
   public var item: StreamAppListItem
   public var playerStateTitle: String
   public var playerStateDetail: String
+  public var runtimeIssue: StreamAppVisibleIssue?
+  public var playerIssue: StreamAppVisibleIssue?
+  public var bufferIssue: StreamAppVisibleIssue?
   public var bufferedRangeTitle: String
   public var controlsEnabled: Bool
   public var canStartRuntime: Bool
@@ -318,6 +340,7 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
   public init(
     item: StreamAppListItem,
     timeline: AppPlayerTimelineSnapshot? = nil,
+    runtimeEventMessage: String? = nil,
     snapshot: StreamAppTimelineSnapshot? = nil,
     timelineRefreshErrorMessage: String? = nil,
     speakerEditErrorMessage: String? = nil,
@@ -381,6 +404,10 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
       canStopRuntime = false
     }
 
+    runtimeIssue = Self.runtimeIssue(for: item.status, eventMessage: runtimeEventMessage)
+    playerIssue = nil
+    bufferIssue = nil
+
     if let timeline {
       playerStateTitle = timeline.state.title
       playerStateDetail = timeline.unavailableRangeMessage ?? timeline.lastMessage
@@ -405,6 +432,8 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
         canSeekToLive = false
         canScrubBufferedRange = false
       }
+      playerIssue = Self.playerIssue(for: timeline)
+      bufferIssue = Self.bufferIssue(for: timeline)
     } else {
       bufferedRangeTitle = "Rolling buffer waiting for decoded PCM"
       scrubPositionFraction = 1
@@ -443,6 +472,63 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
     self.searchErrorMessage = searchErrorMessage.map(IngestRedaction.redact)
     self.searchJumpMessage = searchJumpMessage.map(IngestRedaction.redact)
   }
+
+  private static func runtimeIssue(
+    for status: StreamAppStatus,
+    eventMessage: String?
+  ) -> StreamAppVisibleIssue? {
+    switch status {
+    case .error:
+      return StreamAppVisibleIssue(
+        id: "runtime.error",
+        severity: .blocking,
+        message: eventMessage ?? status.detail,
+        actionLabel: "Check stream access and retry Start"
+      )
+    case .reconnecting:
+      return StreamAppVisibleIssue(
+        id: "runtime.reconnecting",
+        severity: .warning,
+        message: eventMessage ?? status.detail,
+        actionLabel: "Wait for reconnect or stop the stream"
+      )
+    case .ready, .connecting, .running, .paused, .stopped, .removed:
+      return nil
+    }
+  }
+
+  private static func playerIssue(for timeline: AppPlayerTimelineSnapshot) -> StreamAppVisibleIssue? {
+    switch timeline.state {
+    case .failed(let message):
+      return StreamAppVisibleIssue(
+        id: "player.failed",
+        severity: .warning,
+        message: message.isEmpty ? timeline.lastMessage : message,
+        actionLabel: "Check audio output and restart playback"
+      )
+    case .idle, .buffering, .playing, .paused, .stopped:
+      return nil
+    }
+  }
+
+  private static func bufferIssue(for timeline: AppPlayerTimelineSnapshot) -> StreamAppVisibleIssue? {
+    if let message = timeline.unavailableRangeMessage {
+      return StreamAppVisibleIssue(
+        id: "buffer.seek-unavailable",
+        severity: .warning,
+        message: message,
+        actionLabel: "Choose a buffered time or return to Live"
+      )
+    }
+    guard timeline.rollingBuffer?.memoryOnlyFallback == true else { return nil }
+    return StreamAppVisibleIssue(
+      id: "buffer.memory-only-fallback",
+      severity: .warning,
+      message: timeline.rollingBuffer?.lastMessage
+        ?? "Rolling buffer is using memory-only fallback; spill storage is unavailable.",
+      actionLabel: "Choose a writable buffer location or reduce duration"
+    )
+  }
 }
 
 public struct StreamAppViewModel: Equatable, Sendable {
@@ -455,6 +541,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
     }
   }
   public private(set) var playerTimelines: [Int64: AppPlayerTimelineSnapshot]
+  public private(set) var runtimeEventMessages: [Int64: String]
   public private(set) var timelineSnapshots: [Int64: StreamAppTimelineSnapshot]
   public private(set) var timelineRefreshErrors: [Int64: String]
   public private(set) var speakerEditErrors: [Int64: String]
@@ -474,6 +561,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
     streams: [StreamAppListItem] = [],
     selectedStreamID: Int64? = nil,
     playerTimelines: [Int64: AppPlayerTimelineSnapshot] = [:],
+    runtimeEventMessages: [Int64: String] = [:],
     timelineSnapshots: [Int64: StreamAppTimelineSnapshot] = [:],
     timelineRefreshErrors: [Int64: String] = [:],
     speakerEditErrors: [Int64: String] = [:],
@@ -492,6 +580,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
     self.streams = streams
     self.selectedStreamID = selectedStreamID
     self.playerTimelines = playerTimelines
+    self.runtimeEventMessages = runtimeEventMessages.mapValues(IngestRedaction.redact)
     self.timelineSnapshots = timelineSnapshots
     self.timelineRefreshErrors = timelineRefreshErrors.mapValues(IngestRedaction.redact)
     self.speakerEditErrors = speakerEditErrors.mapValues(IngestRedaction.redact)
@@ -515,6 +604,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
     return StreamAppSelectedStream(
       item: item,
       timeline: playerTimelines[selectedStreamID],
+      runtimeEventMessage: runtimeEventMessages[selectedStreamID],
       snapshot: timelineSnapshots[selectedStreamID],
       timelineRefreshErrorMessage: timelineRefreshErrors[selectedStreamID],
       speakerEditErrorMessage: speakerEditErrors[selectedStreamID],
@@ -577,6 +667,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
       clearSelectedSearchResult()
     }
     playerTimelines = playerTimelines.filter { activeIDs.contains($0.key) }
+    runtimeEventMessages = runtimeEventMessages.filter { activeIDs.contains($0.key) }
     timelineSnapshots = timelineSnapshots.filter { activeIDs.contains($0.key) }
     timelineRefreshErrors = timelineRefreshErrors.filter { activeIDs.contains($0.key) }
     speakerEditErrors = speakerEditErrors.filter { activeIDs.contains($0.key) }
@@ -648,6 +739,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
     for index in streams.indices where streams[index].id == event.streamID {
       streams[index].status = event.phase.appStatus
     }
+    runtimeEventMessages[event.streamID] = event.message
     if let playerTimeline = event.result?.playerTimeline {
       playerTimelines[event.streamID] = playerTimeline
       refreshSearchSeekability()

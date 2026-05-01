@@ -567,6 +567,9 @@ private struct RuntimeStatusCard: View {
                         .font(.headline)
                     Text(selected.item.status.detail)
                         .foregroundStyle(.secondary)
+                    if let issue = selected.runtimeIssue {
+                        VisibleIssueRow(issue: issue)
+                    }
                 }
                 Spacer()
             }
@@ -593,6 +596,14 @@ private struct PlayerCard: View {
                     .font(.headline)
                 Text(selected.playerStateDetail)
                     .foregroundStyle(.secondary)
+
+                if let issue = selected.playerIssue {
+                    VisibleIssueRow(issue: issue)
+                }
+
+                if let issue = selected.bufferIssue {
+                    VisibleIssueRow(issue: issue)
+                }
 
                 HStack(spacing: 12) {
                     Button("Start", systemImage: "play.fill", action: startRuntime)
@@ -621,6 +632,48 @@ private struct PlayerCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
+        }
+    }
+}
+
+private struct VisibleIssueRow: View {
+    var issue: StreamAppVisibleIssue
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Label(issue.message, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(color)
+            Text("Action: \(issue.actionLabel)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(issue.severity.rawValue) issue: \(issue.message). Action: \(issue.actionLabel)")
+    }
+
+    private var systemImage: String {
+        switch issue.severity {
+        case .info:
+            return "info.circle"
+        case .warning:
+            return "exclamationmark.triangle"
+        case .blocking:
+            return "exclamationmark.octagon.fill"
+        }
+    }
+
+    private var color: Color {
+        switch issue.severity {
+        case .info:
+            return .secondary
+        case .warning:
+            return .orange
+        case .blocking:
+            return .red
         }
     }
 }

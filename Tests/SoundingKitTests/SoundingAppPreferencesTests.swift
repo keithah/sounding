@@ -37,7 +37,7 @@ final class SoundingAppPreferencesTests: XCTestCase {
         XCTAssertEqual(configuration.rollingBuffer.targetDurationSeconds, 120)
         XCTAssertFalse(configuration.hasBlockingIssues)
         XCTAssertEqual(configuration.issues.map(\.id), ["acoustid.key-missing"])
-        XCTAssertEqual(configuration.issues.first?.severity, .info)
+        XCTAssertEqual(configuration.issues.first?.severity, .warning)
         XCTAssertEqual(configuration.issues.first?.action.kind, .addAcoustIDKey)
     }
 

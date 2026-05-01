@@ -154,6 +154,28 @@ final class RollingBufferTests: XCTestCase {
         XCTAssertEqual(snapshot.unavailableRangeMessage, "Requested 10.0s is unavailable (available range 20.0-30.0s).")
     }
 
+
+    func testPlayerTimelineSnapshotRedactsFailureStateAndMessages() async throws {
+        let timeline = AppPlayerTimelineSnapshot(
+            streamID: 16,
+            state: .failed(message: "Audio failed at /Users/example/private/device.raw?token=secret"),
+            unavailableRangeMessage: "Requested file:///Users/example/private/audio.raw?token=secret",
+            lastMessage: "Audio failed at /Users/example/private/device.raw?token=secret"
+        )
+
+        if case .failed(let message) = timeline.state {
+            XCTAssertFalse(message.contains("/Users/example"), message)
+            XCTAssertFalse(message.contains("token=secret"), message)
+            XCTAssertTrue(message.contains("[redacted-path]"), message)
+        } else {
+            XCTFail("Expected failed player state")
+        }
+        XCTAssertFalse(timeline.lastMessage.contains("/Users/example"), timeline.lastMessage)
+        XCTAssertFalse(timeline.lastMessage.contains("token=secret"), timeline.lastMessage)
+        XCTAssertFalse(timeline.unavailableRangeMessage?.contains("/Users/example") ?? true)
+        XCTAssertFalse(timeline.unavailableRangeMessage?.contains("token=secret") ?? true)
+    }
+
     private func frame(
         streamID: Int64 = 11,
         sequence: Int,

@@ -328,7 +328,7 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
             return [
                 SoundingAppConfigurationIssue(
                     id: "acoustid.key-missing",
-                    severity: .info,
+                    severity: .warning,
                     phase: .preferences,
                     category: .acoustID,
                     message: "AcoustID enrichment is disabled until an API key is added.",
