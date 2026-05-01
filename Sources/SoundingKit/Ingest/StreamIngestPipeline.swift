@@ -206,11 +206,12 @@ public struct StreamIngestPipeline {
             )
             return StreamIngestResult(streamID: streamID, runID: runID, processedChunks: processedChunks, diagnostics: diagnostics)
         } catch {
+            let decodingDiagnostic = error as? AudioDecodingDiagnosticError
             let diagnostic = self.diagnostic(
                 streamID: streamID,
-                phase: .decode,
+                phase: decodingDiagnostic?.ingestDiagnosticPhase ?? .decode,
                 severity: .error,
-                reason: "decoder-failed",
+                reason: decodingDiagnostic?.ingestDiagnosticReason ?? "decoder-failed",
                 source: redactedSource,
                 streamType: streamType,
                 context: ["error": .string(MonitorError.redactedSourceDescription(String(describing: error)))]

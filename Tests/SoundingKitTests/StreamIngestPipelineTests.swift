@@ -174,6 +174,36 @@ final class StreamIngestPipelineTests: XCTestCase {
         XCTAssertFalse(context?.contains("token=secret") ?? true, context ?? "nil")
     }
 
+    func testNativeDecoderSourceOpenFailurePersistsSourceOpenDiagnostic() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: AVFoundationAudioDecoder(),
+            transcriber: FakeTranscriber(),
+            diarizer: FakeDiarizer()
+        )
+
+        do {
+            _ = try await pipeline.run(source: "/tmp/missing-token=secret.wav", streamType: .icecast, maxChunks: 1)
+            XCTFail("Expected native source-open failure")
+        } catch let error as AVFoundationAudioDecoderError {
+            XCTAssertEqual(error.ingestDiagnosticReason, "source-open-failed")
+        } catch {
+            XCTFail("Expected AVFoundationAudioDecoderError, got \(error)")
+        }
+
+        let row = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT phase, reason, context_json
+                FROM ingest_diagnostics
+                """)
+        }
+        XCTAssertEqual(row?["phase"] as String?, "sourceOpen")
+        XCTAssertEqual(row?["reason"] as String?, "source-open-failed")
+        let context: String? = row?["context_json"]
+        XCTAssertFalse(context?.contains("secret") ?? true, context ?? "nil")
+    }
+
     private static func chunk(sequence: Int, audio: Data = Data([0x01, 0x02, 0x03])) -> DecodedAudioChunk {
         DecodedAudioChunk(
             sequence: sequence,

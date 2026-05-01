@@ -202,7 +202,7 @@ func assertNoTopLevelBreakDurationKeys(
     }
 }
 
-func value(at keyPath: String, in object: [String: Any]) -> Any? {
+func semanticValue(at keyPath: String, in object: [String: Any]) -> Any? {
     keyPath.split(separator: ".").reduce(Optional<Any>(object)) { current, key in
         guard let dictionary = current as? [String: Any] else {
             return nil

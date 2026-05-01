@@ -79,7 +79,8 @@ final class MonitorPipelineTimeoutTests: XCTestCase {
             XCTFail("Expected MonitorError, got \(error)")
         }
 
-        XCTAssertTrue(await cancellation.waitUntilCancelled(), "Timed-out adapter task was not cancelled")
+        let wasCancelled = await cancellation.waitUntilCancelled()
+        XCTAssertTrue(wasCancelled, "Timed-out adapter task was not cancelled")
     }
 
     func testVerySmallPositiveTimeoutDoesNotHang() async throws {

@@ -7,7 +7,7 @@ import FoundationNetworking
 ///
 /// The default implementation supports deterministic local file resolution for fixture tests and
 /// URLSession-backed HTTP(S) reads for real HLS sources. Callers own timeout/cancellation policy.
-public protocol HLSSegmentLoading {
+public protocol HLSSegmentLoading: Sendable {
     func loadSegment(uri: String, relativeTo manifestSource: String) async throws -> Data
 }
 

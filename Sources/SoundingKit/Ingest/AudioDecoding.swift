@@ -55,6 +55,12 @@ public struct DecodedAudioChunk: Equatable, Sendable {
     }
 }
 
+/// Optional error metadata used by the ingest pipeline to persist phase-specific decoder diagnostics.
+public protocol AudioDecodingDiagnosticError: Error {
+    var ingestDiagnosticPhase: IngestDiagnosticPhase { get }
+    var ingestDiagnosticReason: String { get }
+}
+
 /// SoundingKit-owned decoding seam. Real AVFoundation/network implementations plug in later;
 /// tests can use deterministic fakes without global mutable factories.
 public protocol AudioDecoding: Sendable {

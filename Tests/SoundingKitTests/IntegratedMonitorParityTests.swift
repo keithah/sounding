@@ -43,16 +43,16 @@ final class IntegratedMonitorParityTests: XCTestCase {
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "hls-scte35")
 
         XCTAssertEqual(objects[0]["Segment"] as? String, "7")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
-        XCTAssertEqual(value(at: "Fields.CommandName", in: objects[0]) as? String, "SPLICE_NULL")
-        XCTAssertEqual(value(at: "Tags.MediaSequence", in: objects[0]) as? String, "7")
-        XCTAssertEqual(value(at: "Tags.SegmentURI", in: objects[0]) as? String, "segments/segment7.ts")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
+        XCTAssertEqual(semanticValue(at: "Fields.CommandName", in: objects[0]) as? String, "SPLICE_NULL")
+        XCTAssertEqual(semanticValue(at: "Tags.MediaSequence", in: objects[0]) as? String, "7")
+        XCTAssertEqual(semanticValue(at: "Tags.SegmentURI", in: objects[0]) as? String, "segments/segment7.ts")
 
         XCTAssertEqual(objects[1]["Segment"] as? String, "7")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[1]) as? String, "Splice Insert")
-        XCTAssertEqual(value(at: "Fields.CommandName", in: objects[1]) as? String, "SPLICE_INSERT_OON_TRUE")
-        XCTAssertEqual(value(at: "Tags.SourceClass", in: objects[1]) as? String, "hls_segment")
-        XCTAssertEqual(value(at: "Tags.MediaSequence", in: objects[1]) as? String, "7")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[1]) as? String, "Splice Insert")
+        XCTAssertEqual(semanticValue(at: "Fields.CommandName", in: objects[1]) as? String, "SPLICE_INSERT_OON_TRUE")
+        XCTAssertEqual(semanticValue(at: "Tags.SourceClass", in: objects[1]) as? String, "hls_segment")
+        XCTAssertEqual(semanticValue(at: "Tags.MediaSequence", in: objects[1]) as? String, "7")
     }
 
     func testHLSID3FixtureEmitsSafeAdStartEvidence() async throws {
@@ -80,17 +80,17 @@ final class IntegratedMonitorParityTests: XCTestCase {
         XCTAssertEqual(marker["PTS"] as? Double, 2.0)
         XCTAssertTrue(marker["RawBase64"] is NSNull, "ID3 marker must not expose raw private payload")
         XCTAssertTrue(marker["Timestamp"] is NSNull)
-        XCTAssertEqual(value(at: "Tags.TIT2", in: marker) as? String, "Primary Cue")
-        XCTAssertEqual(value(at: "Tags.TIT3", in: marker) as? String, "Subtitle Cue")
-        XCTAssertEqual(value(at: "Tags.TXXX:TIDEMARK", in: marker) as? String, "AD|START")
-        XCTAssertEqual(value(at: "Fields.PrivateFrameCount", in: marker) as? Int, 1)
-        XCTAssertEqual(value(at: "Fields.TimestampTicks", in: marker) as? Int, 180_000)
-        XCTAssertEqual(value(at: "Fields.TimestampSeconds", in: marker) as? Double, 2.0)
-        XCTAssertEqual(value(at: "Fields.MediaSequence", in: marker) as? String, "42")
-        XCTAssertEqual(value(at: "Fields.SourceClass", in: marker) as? String, "hls_segment")
-        XCTAssertEqual(value(at: "Fields.SegmentURI", in: marker) as? String, "segments/id3-segment.aac")
-        XCTAssertEqual(value(at: "Fields.PrivateOwners", in: marker) as? [String], ["com.apple.streaming.transportStreamTimestamp"])
-        XCTAssertEqual(value(at: "Fields.FrameIDs", in: marker) as? [String], ["PRIV", "TIT2", "TIT3", "TXXX"])
+        XCTAssertEqual(semanticValue(at: "Tags.TIT2", in: marker) as? String, "Primary Cue")
+        XCTAssertEqual(semanticValue(at: "Tags.TIT3", in: marker) as? String, "Subtitle Cue")
+        XCTAssertEqual(semanticValue(at: "Tags.TXXX:TIDEMARK", in: marker) as? String, "AD|START")
+        XCTAssertEqual(semanticValue(at: "Fields.PrivateFrameCount", in: marker) as? Int, 1)
+        XCTAssertEqual(semanticValue(at: "Fields.TimestampTicks", in: marker) as? Int, 180_000)
+        XCTAssertEqual(semanticValue(at: "Fields.TimestampSeconds", in: marker) as? Double, 2.0)
+        XCTAssertEqual(semanticValue(at: "Fields.MediaSequence", in: marker) as? String, "42")
+        XCTAssertEqual(semanticValue(at: "Fields.SourceClass", in: marker) as? String, "hls_segment")
+        XCTAssertEqual(semanticValue(at: "Fields.SegmentURI", in: marker) as? String, "segments/id3-segment.aac")
+        XCTAssertEqual(semanticValue(at: "Fields.PrivateOwners", in: marker) as? [String], ["com.apple.streaming.transportStreamTimestamp"])
+        XCTAssertEqual(semanticValue(at: "Fields.FrameIDs", in: marker) as? [String], ["PRIV", "TIT2", "TIT3", "TXXX"])
     }
 
     func testInjectedICYStreamEmitsPerRunAdStartAndAdEndTransitions() async throws {
@@ -110,8 +110,8 @@ final class IntegratedMonitorParityTests: XCTestCase {
         XCTAssertEqual(objects.count, 2)
         assertSemanticMarker(objects, at: 0, sourceClass: "icy", type: "ICY", source: "icy_stream", classification: "AD_START")
         assertSemanticMarker(objects, at: 1, sourceClass: "icy", type: "ICY", source: "icy_stream", classification: "AD_END")
-        XCTAssertEqual(value(at: "Fields.StreamTitle", in: objects[0]) as? String, "Promo Spot")
-        XCTAssertEqual(value(at: "Fields.StreamTitle", in: objects[1]) as? String, "Regular Content")
+        XCTAssertEqual(semanticValue(at: "Fields.StreamTitle", in: objects[0]) as? String, "Promo Spot")
+        XCTAssertEqual(semanticValue(at: "Fields.StreamTitle", in: objects[1]) as? String, "Regular Content")
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "icy")
     }
 
@@ -126,10 +126,10 @@ final class IntegratedMonitorParityTests: XCTestCase {
         XCTAssertEqual(objects.count, 1)
         assertSemanticMarker(objects, at: 0, sourceClass: "mpegts", type: "SCTE35", source: "mpegts", classification: "UNKNOWN")
         XCTAssertEqual(objects[0]["Tag"] as? String, "mpegts_scte35_section")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
-        XCTAssertEqual(value(at: "Fields.CommandName", in: objects[0]) as? String, "SPLICE_NULL")
-        XCTAssertEqual(value(at: "Tags.SourceClass", in: objects[0]) as? String, "mpegts_stream")
-        XCTAssertEqual(value(at: "Tags.StreamType", in: objects[0]) as? String, "mpegts")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
+        XCTAssertEqual(semanticValue(at: "Fields.CommandName", in: objects[0]) as? String, "SPLICE_NULL")
+        XCTAssertEqual(semanticValue(at: "Tags.SourceClass", in: objects[0]) as? String, "mpegts_stream")
+        XCTAssertEqual(semanticValue(at: "Tags.StreamType", in: objects[0]) as? String, "mpegts")
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "mpegts")
     }
 
@@ -144,10 +144,10 @@ final class IntegratedMonitorParityTests: XCTestCase {
         XCTAssertEqual(objects.count, 1)
         assertSemanticMarker(objects, at: 0, sourceClass: "udp", type: "SCTE35", source: "udp", classification: "UNKNOWN")
         XCTAssertEqual(objects[0]["Tag"] as? String, "mpegts_scte35_section")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
-        XCTAssertEqual(value(at: "Fields.CommandName", in: objects[0]) as? String, "SPLICE_NULL")
-        XCTAssertEqual(value(at: "Tags.SourceClass", in: objects[0]) as? String, "udp_datagram_replay")
-        XCTAssertEqual(value(at: "Tags.StreamType", in: objects[0]) as? String, "udp")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
+        XCTAssertEqual(semanticValue(at: "Fields.CommandName", in: objects[0]) as? String, "SPLICE_NULL")
+        XCTAssertEqual(semanticValue(at: "Tags.SourceClass", in: objects[0]) as? String, "udp_datagram_replay")
+        XCTAssertEqual(semanticValue(at: "Tags.StreamType", in: objects[0]) as? String, "udp")
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "udp")
     }
 

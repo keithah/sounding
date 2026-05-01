@@ -17,9 +17,9 @@ final class MonitorCommandSmokeTests: XCTestCase {
         assertSemanticMarker(objects, at: 0, sourceClass: "cli-hls-scte35", type: "SCTE35", source: "hls_manifest", classification: "UNKNOWN")
         assertSemanticMarker(objects, at: 1, sourceClass: "cli-hls-scte35", type: "SCTE35", source: "hls_segment", classification: "AD_START")
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "cli-hls-scte35")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[1]) as? String, "Splice Insert")
-        XCTAssertEqual(value(at: "Tags.MediaSequence", in: objects[1]) as? String, "7")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[1]) as? String, "Splice Insert")
+        XCTAssertEqual(semanticValue(at: "Tags.MediaSequence", in: objects[1]) as? String, "7")
     }
 
     func testHLSID3CLIEmitsFilteredAdStart() throws {
@@ -37,8 +37,8 @@ final class MonitorCommandSmokeTests: XCTestCase {
         assertSemanticMarker(objects, at: 0, sourceClass: "cli-hls-id3", type: "ID3", source: "hls_segment", classification: "AD_START")
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "cli-hls-id3")
         XCTAssertEqual(objects[0]["Segment"] as? String, "42")
-        XCTAssertEqual(value(at: "Tags.TXXX:TIDEMARK", in: objects[0]) as? String, "AD|START")
-        XCTAssertEqual(value(at: "Fields.SourceClass", in: objects[0]) as? String, "hls_segment")
+        XCTAssertEqual(semanticValue(at: "Tags.TXXX:TIDEMARK", in: objects[0]) as? String, "AD|START")
+        XCTAssertEqual(semanticValue(at: "Fields.SourceClass", in: objects[0]) as? String, "hls_segment")
     }
 
     func testMPEGTSCLIEmitsFilteredUnknownMarker() throws {
@@ -55,9 +55,9 @@ final class MonitorCommandSmokeTests: XCTestCase {
         XCTAssertEqual(objects.count, 1, result.diagnosticSummary)
         assertSemanticMarker(objects, at: 0, sourceClass: "cli-mpegts", type: "SCTE35", source: "mpegts", classification: "UNKNOWN")
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "cli-mpegts")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
-        XCTAssertEqual(value(at: "Tags.SourceClass", in: objects[0]) as? String, "mpegts_stream")
-        XCTAssertEqual(value(at: "Tags.StreamType", in: objects[0]) as? String, "mpegts")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
+        XCTAssertEqual(semanticValue(at: "Tags.SourceClass", in: objects[0]) as? String, "mpegts_stream")
+        XCTAssertEqual(semanticValue(at: "Tags.StreamType", in: objects[0]) as? String, "mpegts")
     }
 
     func testUDPReplayCLIEmitsFilteredUnknownMarkerWithDistinctSourceClass() throws {
@@ -74,9 +74,9 @@ final class MonitorCommandSmokeTests: XCTestCase {
         XCTAssertEqual(objects.count, 1, result.diagnosticSummary)
         assertSemanticMarker(objects, at: 0, sourceClass: "cli-udp", type: "SCTE35", source: "udp", classification: "UNKNOWN")
         try assertNoTopLevelBreakDurationKeys(objects, sourceClass: "cli-udp")
-        XCTAssertEqual(value(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
-        XCTAssertEqual(value(at: "Tags.SourceClass", in: objects[0]) as? String, "udp_datagram_replay")
-        XCTAssertEqual(value(at: "Tags.StreamType", in: objects[0]) as? String, "udp")
+        XCTAssertEqual(semanticValue(at: "Command.Name", in: objects[0]) as? String, "Splice Null")
+        XCTAssertEqual(semanticValue(at: "Tags.SourceClass", in: objects[0]) as? String, "udp_datagram_replay")
+        XCTAssertEqual(semanticValue(at: "Tags.StreamType", in: objects[0]) as? String, "udp")
     }
 
     func testJSONOutWritesSemanticMarkerNDJSONToTemporaryFile() throws {

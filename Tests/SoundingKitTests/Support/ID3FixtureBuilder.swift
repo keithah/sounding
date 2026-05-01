@@ -71,7 +71,7 @@ enum ID3FixtureBuilder {
     }
 
     private static func bigEndian64(_ value: UInt64) -> Data {
-        Data([
+        let bytes: [UInt8] = [
             UInt8((value >> 56) & 0xFF),
             UInt8((value >> 48) & 0xFF),
             UInt8((value >> 40) & 0xFF),
@@ -80,6 +80,7 @@ enum ID3FixtureBuilder {
             UInt8((value >> 16) & 0xFF),
             UInt8((value >> 8) & 0xFF),
             UInt8(value & 0xFF)
-        ])
+        ]
+        return Data(bytes)
     }
 }
