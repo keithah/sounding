@@ -7,6 +7,9 @@ public struct TranscriptQuery {
         case emptyPhrase
         case invalidLimit
         case invalidContext
+        case invalidStreamIDs
+        case invalidSpeakerLabels
+        case invalidRunStartedAtRange
         case malformedRow(String)
         case databaseReadFailed
 
@@ -18,6 +21,12 @@ public struct TranscriptQuery {
                 return "Search limit must be greater than zero."
             case .invalidContext:
                 return "Context segment count must not be negative."
+            case .invalidStreamIDs:
+                return "Transcript stream filters must contain positive stream IDs."
+            case .invalidSpeakerLabels:
+                return "Transcript speaker filters must contain non-empty labels."
+            case .invalidRunStartedAtRange:
+                return "Transcript run date filters must be non-empty and ordered."
             case .malformedRow(let field):
                 return "Transcript query returned an unexpected row value for \(field)."
             case .databaseReadFailed:
@@ -172,6 +181,51 @@ public struct TranscriptQuery {
         }
     }
 
+    public struct SearchOptions: Equatable, Sendable {
+        public var limit: Int
+        public var contextSegments: Int
+        public var streamIDs: [Int64]?
+        public var speakerLabels: [String]?
+        public var runStartedAtFrom: String?
+        public var runStartedAtThrough: String?
+
+        public init(
+            limit: Int = 20,
+            contextSegments: Int = 0,
+            streamIDs: [Int64]? = nil,
+            speakerLabels: [String]? = nil,
+            runStartedAtFrom: String? = nil,
+            runStartedAtThrough: String? = nil
+        ) {
+            self.limit = limit
+            self.contextSegments = contextSegments
+            self.streamIDs = streamIDs
+            self.speakerLabels = speakerLabels
+            self.runStartedAtFrom = runStartedAtFrom
+            self.runStartedAtThrough = runStartedAtThrough
+        }
+    }
+
+    private struct SearchFilters {
+        var streamIDs: [Int64]
+        var speakerLabels: [String]
+        var runStartedAtFrom: String?
+        var runStartedAtThrough: String?
+
+        static let none = SearchFilters(
+            streamIDs: [],
+            speakerLabels: [],
+            runStartedAtFrom: nil,
+            runStartedAtThrough: nil
+        )
+    }
+
+    private struct ValidatedSearchOptions {
+        var limit: Int
+        var contextSegments: Int
+        var filters: SearchFilters
+    }
+
     private struct SegmentRow {
         var identity: SegmentIdentity
         var startSeconds: Double
@@ -195,23 +249,36 @@ public struct TranscriptQuery {
         self.database = database
     }
 
-    public func search(phrase: String, limit: Int = 20, contextSegments: Int = 0) throws -> [SearchResult] {
+    public func search(phrase: String, limit: Int = 20, contextSegments: Int = 0) throws
+        -> [SearchResult]
+    {
+        try search(
+            phrase: phrase,
+            options: SearchOptions(limit: limit, contextSegments: contextSegments)
+        )
+    }
+
+    public func search(phrase: String, options: SearchOptions = SearchOptions()) throws
+        -> [SearchResult]
+    {
         let normalizedPhrase = try normalizePhrase(phrase)
-        guard limit > 0 else { throw QueryError.invalidLimit }
-        guard contextSegments >= 0 else { throw QueryError.invalidContext }
+        let options = try validate(options)
 
         do {
             return try database.read { db in
                 let candidates = try fetchCandidateSegments(
                     db,
                     phraseExpression: ftsPhraseExpression(for: normalizedPhrase),
-                    limit: limit
+                    limit: options.limit,
+                    filters: options.filters
                 )
-                let matchingSegments = candidates.filter { exactOccurrenceCount(of: normalizedPhrase, in: $0.text) > 0 }
-                let limitedSegments = Array(matchingSegments.prefix(limit))
+                let matchingSegments = candidates.filter {
+                    exactOccurrenceCount(of: normalizedPhrase, in: $0.text) > 0
+                }
+                let limitedSegments = Array(matchingSegments.prefix(options.limit))
                 let wordsBySegmentID = try fetchWordsBySegmentID(
                     db,
-                    segmentIDs: limitedSegments.map(\ .identity.segmentID)
+                    segmentIDs: limitedSegments.map(\.identity.segmentID)
                 )
 
                 return try limitedSegments.map { segment in
@@ -221,9 +288,11 @@ public struct TranscriptQuery {
                         endSeconds: segment.endSeconds,
                         text: segment.text,
                         confidence: segment.confidence,
-                        context: try fetchContextSegments(db, around: segment, contextSegments: contextSegments),
+                        context: try fetchContextSegments(
+                            db, around: segment, contextSegments: options.contextSegments),
                         words: wordsBySegmentID[segment.identity.segmentID] ?? [],
-                        occurrenceCount: exactOccurrenceCount(of: normalizedPhrase, in: segment.text)
+                        occurrenceCount: exactOccurrenceCount(
+                            of: normalizedPhrase, in: segment.text)
                     )
                 }
             }
@@ -242,7 +311,8 @@ public struct TranscriptQuery {
                 let candidates = try fetchCandidateSegments(
                     db,
                     phraseExpression: ftsPhraseExpression(for: normalizedPhrase),
-                    limit: nil
+                    limit: nil,
+                    filters: .none
                 )
                 var aggregates: [CountKey: (occurrences: Int, segments: Int)] = [:]
 
@@ -272,8 +342,11 @@ public struct TranscriptQuery {
                     )
                 }
                 .sorted {
-                    ($0.streamID, $0.runID, $0.speakerLabel ?? "", $0.streamType, $0.streamSource) <
-                        ($1.streamID, $1.runID, $1.speakerLabel ?? "", $1.streamType, $1.streamSource)
+                    ($0.streamID, $0.runID, $0.speakerLabel ?? "", $0.streamType, $0.streamSource)
+                        < (
+                            $1.streamID, $1.runID, $1.speakerLabel ?? "", $1.streamType,
+                            $1.streamSource
+                        )
                 }
             }
         } catch let error as QueryError {
@@ -286,10 +359,41 @@ public struct TranscriptQuery {
     private func fetchCandidateSegments(
         _ db: Database,
         phraseExpression: String,
-        limit: Int?
+        limit: Int?,
+        filters: SearchFilters
     ) throws -> [SegmentRow] {
-        let limitClause = limit == nil ? "" : "LIMIT ?"
+        var whereClauses = ["transcript_segments_fts MATCH ?"]
         var arguments: StatementArguments = [phraseExpression]
+
+        if !filters.streamIDs.isEmpty {
+            whereClauses.append(
+                "streams.id IN (\(sqlPlaceholders(count: filters.streamIDs.count)))")
+            for streamID in filters.streamIDs {
+                arguments += [streamID]
+            }
+        }
+
+        if !filters.speakerLabels.isEmpty {
+            whereClauses.append(
+                "transcript_segments.speaker_label IN (\(sqlPlaceholders(count: filters.speakerLabels.count)))"
+            )
+            for speakerLabel in filters.speakerLabels {
+                arguments += [speakerLabel]
+            }
+        }
+
+        if let runStartedAtFrom = filters.runStartedAtFrom {
+            whereClauses.append("ingest_runs.started_at >= ?")
+            arguments += [runStartedAtFrom]
+        }
+
+        if let runStartedAtThrough = filters.runStartedAtThrough {
+            whereClauses.append("ingest_runs.started_at <= ?")
+            arguments += [runStartedAtThrough]
+        }
+
+        let whereClause = whereClauses.joined(separator: " AND ")
+        let limitClause = limit == nil ? "" : "LIMIT ?"
         if let limit {
             arguments += [limit]
         }
@@ -315,7 +419,7 @@ public struct TranscriptQuery {
                 JOIN transcript_segments ON transcript_segments.id = transcript_segments_fts.rowid
                 JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
                 JOIN streams ON streams.id = ingest_runs.stream_id
-                WHERE transcript_segments_fts MATCH ?
+                WHERE \(whereClause)
                 ORDER BY rank, streams.id, ingest_runs.id, transcript_segments.sequence
                 \(limitClause)
                 """,
@@ -381,7 +485,9 @@ public struct TranscriptQuery {
         }
     }
 
-    private func fetchWordsBySegmentID(_ db: Database, segmentIDs: [Int64]) throws -> [Int64: [TranscriptWord]] {
+    private func fetchWordsBySegmentID(_ db: Database, segmentIDs: [Int64]) throws -> [Int64:
+        [TranscriptWord]]
+    {
         guard !segmentIDs.isEmpty else { return [:] }
         let placeholders = Array(repeating: "?", count: segmentIDs.count).joined(separator: ", ")
         let rows = try Row.fetchAll(
@@ -397,7 +503,9 @@ public struct TranscriptQuery {
 
         var wordsBySegmentID: [Int64: [TranscriptWord]] = [:]
         for row in rows {
-            guard let segmentID: Int64 = row["segment_id"] else { throw QueryError.malformedRow("segment_id") }
+            guard let segmentID: Int64 = row["segment_id"] else {
+                throw QueryError.malformedRow("segment_id")
+            }
             let word = try transcriptWord(row)
             wordsBySegmentID[segmentID, default: []].append(word)
         }
@@ -405,15 +513,29 @@ public struct TranscriptQuery {
     }
 
     private func segmentRow(_ row: Row) throws -> SegmentRow {
-        guard let streamID: Int64 = row["stream_id"] else { throw QueryError.malformedRow("stream_id") }
-        guard let streamType: String = row["stream_type"] else { throw QueryError.malformedRow("stream_type") }
-        guard let streamSource: String = row["stream_source"] else { throw QueryError.malformedRow("stream_source") }
+        guard let streamID: Int64 = row["stream_id"] else {
+            throw QueryError.malformedRow("stream_id")
+        }
+        guard let streamType: String = row["stream_type"] else {
+            throw QueryError.malformedRow("stream_type")
+        }
+        guard let streamSource: String = row["stream_source"] else {
+            throw QueryError.malformedRow("stream_source")
+        }
         guard let runID: Int64 = row["run_id"] else { throw QueryError.malformedRow("run_id") }
-        guard let chunkID: Int64 = row["chunk_id"] else { throw QueryError.malformedRow("chunk_id") }
-        guard let segmentID: Int64 = row["segment_id"] else { throw QueryError.malformedRow("segment_id") }
+        guard let chunkID: Int64 = row["chunk_id"] else {
+            throw QueryError.malformedRow("chunk_id")
+        }
+        guard let segmentID: Int64 = row["segment_id"] else {
+            throw QueryError.malformedRow("segment_id")
+        }
         guard let sequence: Int = row["sequence"] else { throw QueryError.malformedRow("sequence") }
-        guard let startSeconds: Double = row["start_seconds"] else { throw QueryError.malformedRow("start_seconds") }
-        guard let endSeconds: Double = row["end_seconds"] else { throw QueryError.malformedRow("end_seconds") }
+        guard let startSeconds: Double = row["start_seconds"] else {
+            throw QueryError.malformedRow("start_seconds")
+        }
+        guard let endSeconds: Double = row["end_seconds"] else {
+            throw QueryError.malformedRow("end_seconds")
+        }
         guard let text: String = row["text"] else { throw QueryError.malformedRow("text") }
         let speakerLabel: String? = row["speaker_label"]
         let confidence: Double? = row["confidence"]
@@ -440,9 +562,15 @@ public struct TranscriptQuery {
 
     private func transcriptWord(_ row: Row) throws -> TranscriptWord {
         guard let id: Int64 = row["id"] else { throw QueryError.malformedRow("word_id") }
-        guard let sequence: Int = row["sequence"] else { throw QueryError.malformedRow("word_sequence") }
-        guard let startSeconds: Double = row["start_seconds"] else { throw QueryError.malformedRow("word_start_seconds") }
-        guard let endSeconds: Double = row["end_seconds"] else { throw QueryError.malformedRow("word_end_seconds") }
+        guard let sequence: Int = row["sequence"] else {
+            throw QueryError.malformedRow("word_sequence")
+        }
+        guard let startSeconds: Double = row["start_seconds"] else {
+            throw QueryError.malformedRow("word_start_seconds")
+        }
+        guard let endSeconds: Double = row["end_seconds"] else {
+            throw QueryError.malformedRow("word_end_seconds")
+        }
         guard let text: String = row["text"] else { throw QueryError.malformedRow("word_text") }
         let speakerLabel: String? = row["speaker_label"]
         let confidence: Double? = row["confidence"]
@@ -458,6 +586,44 @@ public struct TranscriptQuery {
         )
     }
 
+    private func validate(_ options: SearchOptions) throws -> ValidatedSearchOptions {
+        guard options.limit > 0 else { throw QueryError.invalidLimit }
+        guard options.contextSegments >= 0 else { throw QueryError.invalidContext }
+
+        let streamIDs = options.streamIDs ?? []
+        guard streamIDs.allSatisfy({ $0 > 0 }) else { throw QueryError.invalidStreamIDs }
+
+        let speakerLabels = try (options.speakerLabels ?? []).map { label in
+            let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { throw QueryError.invalidSpeakerLabels }
+            return trimmed
+        }
+
+        let runStartedAtFrom = try normalizedDateFilter(options.runStartedAtFrom)
+        let runStartedAtThrough = try normalizedDateFilter(options.runStartedAtThrough)
+        if let runStartedAtFrom, let runStartedAtThrough, runStartedAtFrom > runStartedAtThrough {
+            throw QueryError.invalidRunStartedAtRange
+        }
+
+        return ValidatedSearchOptions(
+            limit: options.limit,
+            contextSegments: options.contextSegments,
+            filters: SearchFilters(
+                streamIDs: streamIDs,
+                speakerLabels: speakerLabels,
+                runStartedAtFrom: runStartedAtFrom,
+                runStartedAtThrough: runStartedAtThrough
+            )
+        )
+    }
+
+    private func normalizedDateFilter(_ value: String?) throws -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw QueryError.invalidRunStartedAtRange }
+        return trimmed
+    }
+
     private func normalizePhrase(_ phrase: String) throws -> String {
         let normalized = phrase.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard !normalized.isEmpty else { throw QueryError.emptyPhrase }
@@ -466,6 +632,10 @@ public struct TranscriptQuery {
 
     private func ftsPhraseExpression(for normalizedPhrase: String) -> String {
         "\"\(normalizedPhrase.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    private func sqlPlaceholders(count: Int) -> String {
+        Array(repeating: "?", count: count).joined(separator: ", ")
     }
 
     private func exactOccurrenceCount(of normalizedPhrase: String, in text: String) -> Int {
