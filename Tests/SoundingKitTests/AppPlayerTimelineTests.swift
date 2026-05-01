@@ -115,7 +115,7 @@ final class AppPlayerTimelineTests: XCTestCase {
         } catch let error as AppPlayerAdapterError {
             XCTAssertEqual(
                 error,
-                .decodeFailed("Playback adapter failed: device exploded token=[redacted-query]."))
+                .decodeFailed("Playback adapter failed: device exploded token=[redacted]."))
         } catch {
             XCTFail("Expected AppPlayerAdapterError, got \(error)")
         }
@@ -125,7 +125,7 @@ final class AppPlayerTimelineTests: XCTestCase {
         let snapshot = await timeline.snapshot()
         XCTAssertEqual(
             snapshot.state,
-            .failed(message: "Playback adapter failed: device exploded token=[redacted-query]."))
+            .failed(message: "Playback adapter failed: device exploded token=[redacted]."))
         XCTAssertFalse(snapshot.lastMessage.contains("secret"), snapshot.lastMessage)
     }
 

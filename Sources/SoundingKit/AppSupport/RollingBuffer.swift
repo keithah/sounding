@@ -162,7 +162,11 @@ public actor RollingPCMBuffer {
 
         spillColdFramesIfPossible()
         evictExpiredFrames()
-        lastMessage = "Rolling buffer stored \(frames.count) frame(s); \(entries.count) retained."
+        if memoryOnlyFallback && !spillAvailable {
+            lastMessage = "Rolling buffer stored \(frames.count) frame(s) in memory-only fallback; \(entries.count) retained."
+        } else {
+            lastMessage = "Rolling buffer stored \(frames.count) frame(s); \(entries.count) retained."
+        }
         return snapshot()
     }
 
@@ -249,14 +253,14 @@ public actor RollingPCMBuffer {
 
     private func prepareSpillRoot() -> Bool {
         guard configuration.maximumSpillBytes > 0 else { return false }
-        let base: URL
+        let root: URL
         if let configured = configuration.spillDirectory {
-            base = configured
+            root = configured
         } else {
-            base = fileManager.temporaryDirectory.appendingPathComponent(
-                "SoundingRollingBuffer", isDirectory: true)
+            root = fileManager.temporaryDirectory
+                .appendingPathComponent("SoundingRollingBuffer", isDirectory: true)
+                .appendingPathComponent(runID.uuidString, isDirectory: true)
         }
-        let root = base.appendingPathComponent(runID.uuidString, isDirectory: true)
         do {
             try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
             spillRoot = root
@@ -294,7 +298,7 @@ public actor RollingPCMBuffer {
         guard let liveEdge = entries.last?.frame.endSeconds else { return }
         let earliestAllowed = liveEdge - configuration.targetDurationSeconds
         while let first = entries.first,
-            first.frame.endSeconds < earliestAllowed || spillBytes > configuration.maximumSpillBytes
+            first.frame.endSeconds <= earliestAllowed || spillBytes > configuration.maximumSpillBytes
         {
             removeFirstEntry()
         }

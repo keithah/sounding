@@ -3,7 +3,7 @@ name: Sounding
 options:
   minimumXcodeGenVersion: 2.40.0
   deploymentTarget:
-    macOS: "13.0"
+    macOS: "14.0"
 
 packages:
   SoundingPackage:
@@ -13,7 +13,7 @@ targets:
   Sounding:
     type: application
     platform: macOS
-    deploymentTarget: "13.0"
+    deploymentTarget: "14.0"
     sources:
       - path: App
     dependencies:

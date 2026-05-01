@@ -400,10 +400,11 @@ public struct SinglePathPCMDecoder: AudioDecoding {
         do {
             try await player.play(frames, timeline: timeline)
         } catch {
+            let failureMessage = "Playback adapter failed: \(error)."
             await timeline.updatePlayerState(
-                .failed(message: String(describing: error)),
-                message: "Playback adapter failed: \(error).")
-            throw AppPlayerAdapterError.decodeFailed("Playback adapter failed: \(error).")
+                .failed(message: failureMessage),
+                message: failureMessage)
+            throw AppPlayerAdapterError.decodeFailed(failureMessage)
         }
         return chunks
     }
