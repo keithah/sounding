@@ -293,6 +293,35 @@ enum SoundingDatabaseMigrator {
             }
         }
 
+        migrator.registerMigration("addStreamAppSpeakerOverrides") { db in
+            try db.create(table: "stream_app_speaker_overrides") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("stream_id", .integer)
+                    .notNull()
+                    .references("streams", onDelete: .cascade)
+                table.column("raw_label", .text).notNull()
+                    .check(sql: "length(trim(raw_label)) > 0")
+                table.column("display_label", .text).notNull()
+                    .check(sql: "length(trim(display_label)) > 0")
+                    .check(sql: "length(display_label) <= 64")
+                table.column("color_token", .text).notNull()
+                    .check(sql: "length(trim(color_token)) > 0")
+                table.column("created_at", .text).notNull()
+                table.column("updated_at", .text).notNull()
+                table.uniqueKey(["stream_id", "raw_label"])
+            }
+            try db.create(
+                index: "stream_app_speaker_overrides_on_stream_label",
+                on: "stream_app_speaker_overrides",
+                columns: ["stream_id", "raw_label"]
+            )
+            try db.create(
+                index: "stream_app_speaker_overrides_on_stream_id",
+                on: "stream_app_speaker_overrides",
+                columns: ["stream_id"]
+            )
+        }
+
         try migrator.migrate(writer)
     }
 }
