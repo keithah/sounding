@@ -39,9 +39,9 @@ public enum MLProviderError: Error, Equatable, CustomStringConvertible, IngestDi
         case let .emptyAudio(provider):
             return "\(provider) received empty audio."
         case let .temporaryFileFailed(provider, reason):
-            return "\(provider) temporary audio file failed: \(MonitorError.redactedSourceDescription(reason))."
+            return "\(provider) temporary audio file failed: \(IngestRedaction.redact(reason))."
         case let .providerFailed(provider, _, reason):
-            return "\(provider) failed: \(MonitorError.redactedSourceDescription(reason))."
+            return "\(provider) failed: \(IngestRedaction.redact(reason))."
         }
     }
 }

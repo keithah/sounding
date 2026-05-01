@@ -82,6 +82,66 @@ final class StreamIngestPipelineTests: XCTestCase {
         XCTAssertEqual(completed, 1)
     }
 
+    func testIngestRedactionRemovesSecretsAndLocalPathsFromPersistedOperationalFields() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let source = "https://viewer:letmein@example.test/live.m3u8?token=synthetic-secret#private-fragment"
+        let providerAudioPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SoundingProviderAudio")
+            .appendingPathComponent("provider-token=synthetic-secret.wav")
+            .path
+        let modelCacheRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Sounding")
+            .appendingPathComponent("Models")
+            .appendingPathComponent("whisperkit")
+            .path
+        let databasePath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ingest-token=synthetic-secret.sqlite")
+            .path
+        let malformedURLLike = "https://viewer:letmein@ token=synthetic-secret#private-fragment"
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeTranscriber(errorBySequence: [
+                0: FakeIngestError(
+                    "provider failed for \(source) db=\(databasePath) cache=\(modelCacheRoot) audio=\(providerAudioPath) \(malformedURLLike)")
+            ]),
+            diarizer: FakeDiarizer()
+        )
+
+        _ = try await pipeline.run(source: source, streamType: .hls, maxChunks: 1)
+
+        let row = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT streams.source AS stream_source,
+                       ingest_chunks.segment_uri AS segment_uri,
+                       ingest_diagnostics.source AS diagnostic_source,
+                       ingest_diagnostics.context_json AS context
+                FROM streams
+                JOIN ingest_runs ON ingest_runs.stream_id = streams.id
+                JOIN ingest_chunks ON ingest_chunks.run_id = ingest_runs.id AND ingest_chunks.sequence = 0
+                JOIN ingest_diagnostics ON ingest_diagnostics.chunk_id = ingest_chunks.id
+                """)
+        }
+        let combined = [
+            row?["stream_source"] as String?,
+            row?["segment_uri"] as String?,
+            row?["diagnostic_source"] as String?,
+            row?["context"] as String?,
+        ].compactMap { $0 }.joined(separator: "\n")
+
+        XCTAssertTrue(combined.contains("https://example.test/live.m3u8"), combined)
+        XCTAssertTrue(combined.contains("https://example.test/segment-000.ts"), combined)
+        XCTAssertTrue(combined.contains("[redacted-path]"), combined)
+        Self.assertNoForbiddenLiterals(
+            in: combined,
+            forbidden: [
+                "viewer", "letmein", "synthetic-secret", "private-fragment",
+                "token=synthetic-secret", databasePath, modelCacheRoot, providerAudioPath,
+                FileManager.default.temporaryDirectory.path,
+            ]
+        )
+    }
+
     func testEmptyChunksAreDiagnosedWithoutTranscriptRows() async throws {
         let temporary = try TemporarySoundingDatabase()
         let pipeline = StreamIngestPipeline(
@@ -104,6 +164,19 @@ final class StreamIngestPipelineTests: XCTestCase {
             ]
         }
         XCTAssertEqual(counts, ["chunks": 1, "segments": 0, "diagnostics": 1])
+    }
+
+    func testIngestRedactionHandlesMalformedURLLikeTextWithoutLeakingSecrets() {
+        let text = IngestRedaction.redact(
+            "failed opening https://viewer:letmein@ token=synthetic-secret#private-fragment path=/tmp/audio-token=synthetic-secret.wav"
+        )
+
+        XCTAssertTrue(text.contains("https://[redacted-source]"), text)
+        XCTAssertTrue(text.contains("[redacted-path]"), text)
+        Self.assertNoForbiddenLiterals(
+            in: text,
+            forbidden: ["viewer", "letmein", "synthetic-secret", "private-fragment", "/tmp/audio-token=synthetic-secret.wav"]
+        )
     }
 
     func testNonMonotonicWordTimestampsAreDiagnosedAndInvalidWordsAreRejected() async throws {
@@ -364,6 +437,21 @@ final class StreamIngestPipelineTests: XCTestCase {
                 TranscriptWordDraft(sequence: 1, speakerLabel: "speaker-1", startSeconds: 0.6, endSeconds: 1.2, text: "world", confidence: 0.9)
             ]
         )
+    }
+    private static func assertNoForbiddenLiterals(
+        in text: String,
+        forbidden literals: [String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for literal in literals where !literal.isEmpty {
+            XCTAssertFalse(
+                text.contains(literal),
+                "Expected redacted text to omit forbidden literal '\(literal)', got: \(text)",
+                file: file,
+                line: line
+            )
+        }
     }
 }
 

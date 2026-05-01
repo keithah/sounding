@@ -129,6 +129,8 @@ final class IngestCommandSmokeTests: XCTestCase {
         XCTAssertFalse(source?.contains("synthetic-secret") ?? true, source ?? "nil")
         XCTAssertFalse(context?.contains("synthetic-secret") ?? true, context ?? "nil")
         assertSanitized(stderr, forbiddenLiteral: "synthetic-secret")
+        assertSanitized(stderr, forbiddenLiteral: "/tmp/sounding-missing-audio-token=synthetic-secret.wav")
+        assertSanitized(stderr, forbiddenLiteral: dbURL.path)
     }
 
     private func runSounding(

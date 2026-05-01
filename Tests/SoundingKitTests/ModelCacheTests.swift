@@ -38,6 +38,8 @@ final class ModelCacheTests: XCTestCase {
         XCTAssertEqual(first, second)
         XCTAssertEqual(recorder.downloads, 1)
         XCTAssertEqual(recorder.events.map(\.event), [.downloadStarted, .downloadProgress, .downloadCompleted, .cacheHit])
+        XCTAssertEqual(recorder.events.map(\.provider), ["whisperkit", "whisperkit", "whisperkit", "whisperkit"])
+        XCTAssertEqual(recorder.events.map(\.model), ["tiny", "tiny", "tiny", "tiny"])
         let progressDescription = String(describing: recorder.events)
         XCTAssertFalse(progressDescription.contains(root.path), "progress must not expose raw cache paths")
     }
@@ -64,13 +66,21 @@ final class ModelCacheTests: XCTestCase {
 
         do {
             _ = try await cache.prepare(provider: "fluidaudio", modelName: "offline-diarizer") { _, _ in
-                throw NSError(domain: "test", code: 7, userInfo: [NSLocalizedDescriptionKey: "download failed token=secret"])
+                throw NSError(
+                    domain: "test",
+                    code: 7,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "download failed token=secret at \(root.path)/model.bin password=hunter2"
+                    ]
+                )
             }
             XCTFail("Expected setup failure")
         } catch let error as ModelCacheError {
             XCTAssertEqual(error.ingestDiagnosticPhase, .modelSetup)
             XCTAssertEqual(error.ingestDiagnosticReason, "model-setup-failed")
             XCTAssertFalse(error.description.contains("secret"), error.description)
+            XCTAssertFalse(error.description.contains("hunter2"), error.description)
+            XCTAssertFalse(error.description.contains(root.path), error.description)
         } catch {
             XCTFail("Unexpected error: \(error)")
         }

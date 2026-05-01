@@ -57,7 +57,7 @@ public struct StreamIngestPipeline {
         let streamType = resolvedStreamType(for: source, requested: requestedStreamType)
         let persistence = IngestPersistence(database: database)
         let createdAt = now()
-        let redactedSource = MonitorError.redactedSourceDescription(source)
+        let redactedSource = IngestRedaction.sourceDescription(source)
         let streamID = try persistence.createStream(
             streamType: streamType.rawValue,
             source: redactedSource,
@@ -120,7 +120,7 @@ public struct StreamIngestPipeline {
                 context["terminalPhase"] = .string(phase.rawValue)
             }
             if let reason {
-                context["terminalReason"] = .string(MonitorError.redactedSourceDescription(reason))
+                context["terminalReason"] = .string(IngestRedaction.redact(reason))
             }
             return context
         }
@@ -315,7 +315,7 @@ public struct StreamIngestPipeline {
                 reason: reason,
                 source: redactedSource,
                 streamType: streamType,
-                context: ["error": .string(MonitorError.redactedSourceDescription(String(describing: error)))]
+                context: ["error": .string(IngestRedaction.redact(String(describing: error)))]
             )
             try finishRunOnce(
                 status: .failed,
@@ -419,7 +419,7 @@ public struct StreamIngestPipeline {
             source: source,
             sourceClass: sourceClass(for: streamType),
             streamType: streamType.rawValue,
-            context: context,
+            context: IngestRedaction.context(context),
             createdAt: now()
         )
     }
@@ -427,7 +427,7 @@ public struct StreamIngestPipeline {
     private func errorContext(_ error: Error, chunk: DecodedAudioChunk) -> [String: JSONValue] {
         [
             "chunkSequence": .number(Double(chunk.sequence)),
-            "error": .string(MonitorError.redactedSourceDescription(String(describing: error)))
+            "error": .string(IngestRedaction.redact(String(describing: error)))
         ]
     }
 
@@ -460,7 +460,7 @@ public struct StreamIngestPipeline {
 
     private func redactedSourceDescription(_ value: String?) -> String? {
         guard let value else { return nil }
-        return MonitorError.redactedSourceDescription(value)
+        return IngestRedaction.sourceDescription(value)
     }
 
     private func resolvedStreamType(for source: String, requested streamType: StreamType) -> StreamType {

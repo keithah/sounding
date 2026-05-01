@@ -47,7 +47,7 @@ public enum ModelCacheError: Error, Equatable, CustomStringConvertible, IngestDi
     }
 
     static func redacted(_ value: String) -> String {
-        MonitorError.redactedSourceDescription(value)
+        IngestRedaction.redact(value)
     }
 }
 
@@ -108,7 +108,7 @@ public actor ModelCache {
             throw ModelCacheError.setupFailed(
                 provider: safeProvider,
                 model: safeModel,
-                reason: MonitorError.redactedSourceDescription(String(describing: error))
+                reason: IngestRedaction.redact(String(describing: error))
             )
         }
     }

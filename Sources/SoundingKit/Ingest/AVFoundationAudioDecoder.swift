@@ -107,7 +107,7 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
             let end = min(start + chunkDurationSeconds, effectiveDuration)
             return DecodedAudioChunk(
                 sequence: index,
-                segmentURI: MonitorError.redactedSourceDescription(request.source),
+                segmentURI: IngestRedaction.sourceDescription(request.source),
                 audio: data,
                 byteCount: data.count,
                 startSeconds: start,
@@ -180,18 +180,18 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
 
     private func resolvedSegmentDescription(_ uri: String, relativeTo manifestSource: String) -> String {
         if let absoluteURL = URL(string: uri), absoluteURL.scheme != nil {
-            return MonitorError.redactedSourceDescription(absoluteURL.absoluteString)
+            return IngestRedaction.sourceDescription(absoluteURL.absoluteString)
         }
         if let manifestURL = URL(string: manifestSource), manifestURL.scheme != nil,
            let resolved = URL(string: uri, relativeTo: manifestURL.deletingLastPathComponent())?.absoluteString {
-            return MonitorError.redactedSourceDescription(resolved)
+            return IngestRedaction.sourceDescription(resolved)
         }
         let manifestURL = URL(fileURLWithPath: manifestSource)
-        return MonitorError.redactedSourceDescription(manifestURL.deletingLastPathComponent().appendingPathComponent(uri).path)
+        return IngestRedaction.sourceDescription(manifestURL.deletingLastPathComponent().appendingPathComponent(uri).path)
     }
 
     private func sanitized(_ error: Error) -> String {
-        MonitorError.redactedSourceDescription(String(describing: error))
+        IngestRedaction.redact(String(describing: error))
     }
 }
 
@@ -223,7 +223,7 @@ public enum AVFoundationAudioDecoderError: Error, Equatable, CustomStringConvert
     public var description: String {
         switch self {
         case let .sourceOpenFailed(message), let .decodeFailed(message), let .unsupportedMedia(message):
-            return MonitorError.redactedSourceDescription(message)
+            return IngestRedaction.redact(message)
         }
     }
 }

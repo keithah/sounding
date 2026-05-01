@@ -106,7 +106,7 @@ struct IngestCommand: AsyncParsableCommand {
     }
 
     private func sanitize(_ value: String) -> String {
-        MonitorError.redactedSourceDescription(value)
+        IngestRedaction.redact(value)
     }
 
     private func standardErrorWrite(_ message: String) {
@@ -121,7 +121,7 @@ private enum IngestCommandError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .configuration(let reason):
-            return "Ingest configuration failed: \(MonitorError.redactedSourceDescription(reason))."
+            return "Ingest configuration failed: \(IngestRedaction.redact(reason))."
         case .databaseOpenFailed:
             return "Ingest database failed: could not open redacted database path."
         }
@@ -143,7 +143,7 @@ private final class CLIModelProgressSink: @unchecked Sendable {
             suffix = ""
         }
         let line =
-            "model \(progress.event.rawValue): provider=\(progress.provider) model=\(progress.model)\(suffix)"
+            "model \(progress.event.rawValue): provider=\(IngestRedaction.component(progress.provider)) model=\(IngestRedaction.component(progress.model))\(suffix)"
         FileHandle.standardError.write(Data((line + "\n").utf8))
     }
 }
