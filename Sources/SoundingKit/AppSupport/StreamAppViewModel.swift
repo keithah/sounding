@@ -210,14 +210,64 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
     public var playerStateDetail: String
     public var bufferedRangeTitle: String
     public var controlsEnabled: Bool
+    public var canStartRuntime: Bool
+    public var canPauseRuntime: Bool
+    public var canResumeRuntime: Bool
+    public var canStopRuntime: Bool
 
     public init(item: StreamAppListItem) {
         self.item = item
-        playerStateTitle = "Player pending runtime wiring"
-        playerStateDetail =
-            "Start, stop, volume, and rewind controls will enable when the in-process runtime and shared PCM player land."
-        bufferedRangeTitle = "No buffered audio yet"
-        controlsEnabled = false
+        switch item.status {
+        case .running:
+            playerStateTitle = "Runtime running"
+            playerStateDetail = "The in-process SoundingKit runtime is active for this stream."
+            controlsEnabled = true
+            canStartRuntime = false
+            canPauseRuntime = true
+            canResumeRuntime = false
+            canStopRuntime = true
+        case .paused:
+            playerStateTitle = "Runtime paused"
+            playerStateDetail = "Resume to continue the app-hosted runtime."
+            controlsEnabled = true
+            canStartRuntime = false
+            canPauseRuntime = false
+            canResumeRuntime = true
+            canStopRuntime = true
+        case .connecting, .reconnecting:
+            playerStateTitle = "Runtime connecting"
+            playerStateDetail = item.status.detail
+            controlsEnabled = true
+            canStartRuntime = false
+            canPauseRuntime = false
+            canResumeRuntime = false
+            canStopRuntime = true
+        case .ready, .stopped:
+            playerStateTitle = "Runtime ready"
+            playerStateDetail = "Start this stream through the in-process SoundingKit runtime."
+            controlsEnabled = true
+            canStartRuntime = true
+            canPauseRuntime = false
+            canResumeRuntime = false
+            canStopRuntime = false
+        case .error:
+            playerStateTitle = "Runtime error"
+            playerStateDetail = item.status.detail
+            controlsEnabled = true
+            canStartRuntime = true
+            canPauseRuntime = false
+            canResumeRuntime = false
+            canStopRuntime = true
+        case .removed:
+            playerStateTitle = "Runtime unavailable"
+            playerStateDetail = "Removed streams cannot be started."
+            controlsEnabled = false
+            canStartRuntime = false
+            canPauseRuntime = false
+            canResumeRuntime = false
+            canStopRuntime = false
+        }
+        bufferedRangeTitle = "Rolling buffer pending playback wiring"
     }
 }
 
@@ -340,6 +390,13 @@ public struct StreamAppViewModel: Equatable, Sendable {
             transport: draft.transport,
             redactedSourceDescription: redacted
         )
+    }
+
+    public mutating func applyRuntimeEvent(_ event: AppStreamRuntimeEvent) {
+        for index in streams.indices where streams[index].id == event.streamID {
+            streams[index].status = event.phase.appStatus
+        }
+        lastLifecycleMessage = event.message
     }
 
     public static func validateRegistryStreamType(_ streamType: String) throws -> StreamAppTransport

@@ -3,12 +3,14 @@ import SwiftUI
 
 struct ContentView: View {
     private let registry: StreamRegistry?
+    private let runtime: (any AppStreamRuntimeControlling)?
     @State private var viewModel: StreamAppViewModel
     @State private var persistenceError: String?
 
     init() {
         let initial = Self.makeInitialState()
         registry = initial.registry
+        runtime = initial.runtime
         _viewModel = State(initialValue: initial.viewModel)
         _persistenceError = State(initialValue: initial.persistenceError)
     }
@@ -21,6 +23,9 @@ struct ContentView: View {
             detail
         }
         .frame(minWidth: 920, minHeight: 560)
+        .task {
+            await observeRuntime()
+        }
     }
 
     private var sidebar: some View {
@@ -120,13 +125,19 @@ struct ContentView: View {
     @ViewBuilder
     private var detail: some View {
         if let selected = viewModel.selectedStream {
-            StreamDetail(selected: selected)
+            StreamDetail(
+                selected: selected,
+                startRuntime: { startRuntime(for: selected.item.id) },
+                pauseRuntime: { pauseRuntime() },
+                resumeRuntime: { resumeRuntime() },
+                stopRuntime: { stopRuntime() }
+            )
         } else {
             ContentUnavailableView(
                 viewModel.emptyStateTitle,
                 systemImage: "waveform.badge.magnifyingglass",
                 description: Text(
-                    "Select or add a supported stream. Runtime, player, and rewind controls are staged but disabled until the next slice tasks wire the in-process SoundingKit runtime."
+                    "Select or add a supported stream. Start, stop, pause, and resume controls use the in-process SoundingKit runtime; shared PCM playback and rewind controls land in the next S01 tasks."
                 )
             )
         }
@@ -147,8 +158,46 @@ struct ContentView: View {
         }
     }
 
+    private func startRuntime(for streamID: Int64) {
+        guard let runtime else {
+            persistenceError = "Sounding runtime unavailable."
+            return
+        }
+        Task {
+            do {
+                try await runtime.start(streamID: streamID)
+                persistenceError = nil
+            } catch {
+                persistenceError = IngestRedaction.redact(String(describing: error))
+            }
+        }
+    }
+
+    private func pauseRuntime() {
+        guard let runtime else { return }
+        Task { await runtime.pause() }
+    }
+
+    private func resumeRuntime() {
+        guard let runtime else { return }
+        Task { await runtime.resume() }
+    }
+
+    private func stopRuntime() {
+        guard let runtime else { return }
+        Task { await runtime.stop() }
+    }
+
+    private func observeRuntime() async {
+        guard let runtime else { return }
+        for await event in await runtime.events() {
+            viewModel.applyRuntimeEvent(event)
+        }
+    }
+
     private static func makeInitialState() -> (
         registry: StreamRegistry?,
+        runtime: (any AppStreamRuntimeControlling)?,
         viewModel: StreamAppViewModel,
         persistenceError: String?
     ) {
@@ -156,11 +205,21 @@ struct ContentView: View {
             let databaseURL = try defaultDatabaseURL()
             let database = try SoundingDatabase(fileURL: databaseURL)
             let registry = StreamRegistry(database: database)
+            let queue = InferenceQueue()
+            let cache = ModelCache()
+            let runner = StreamIngestAppRuntimeRunner(
+                database: database,
+                decoder: AVFoundationAudioDecoder(),
+                transcriber: QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
+                diarizer: QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue)
+            )
+            let runtime = AppStreamRuntimeService(registry: registry, ingester: runner)
             var viewModel = StreamAppViewModel()
             try viewModel.reload(from: registry)
-            return (registry, viewModel, nil)
+            return (registry, runtime, viewModel, nil)
         } catch {
             return (
+                nil,
                 nil,
                 StreamAppViewModel(),
                 "Sounding database failed: \(IngestRedaction.redact(String(describing: error)))."
@@ -206,6 +265,10 @@ private struct StreamRow: View {
 
 private struct StreamDetail: View {
     var selected: StreamAppSelectedStream
+    var startRuntime: () -> Void
+    var pauseRuntime: () -> Void
+    var resumeRuntime: () -> Void
+    var stopRuntime: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -247,9 +310,16 @@ private struct StreamDetail: View {
                         .foregroundStyle(.secondary)
 
                     HStack(spacing: 12) {
-                        Button("Start", systemImage: "play.fill") {}
-                        Button("Stop", systemImage: "stop.fill") {}
+                        Button("Start", systemImage: "play.fill", action: startRuntime)
+                            .disabled(!selected.canStartRuntime)
+                        Button("Pause", systemImage: "pause.fill", action: pauseRuntime)
+                            .disabled(!selected.canPauseRuntime)
+                        Button("Resume", systemImage: "playpause.fill", action: resumeRuntime)
+                            .disabled(!selected.canResumeRuntime)
+                        Button("Stop", systemImage: "stop.fill", action: stopRuntime)
+                            .disabled(!selected.canStopRuntime)
                         Button("Live", systemImage: "dot.radiowaves.forward") {}
+                            .disabled(true)
                     }
                     .disabled(!selected.controlsEnabled)
 

@@ -6,7 +6,7 @@ import GRDB
 /// Opening a `SoundingDatabase` creates a GRDB pool and runs all registered
 /// migrations synchronously, so callers either receive a migrated database or a
 /// thrown open/migration error with GRDB context.
-public final class SoundingDatabase {
+public final class SoundingDatabase: @unchecked Sendable {
     public let fileURL: URL
 
     private let pool: DatabasePool

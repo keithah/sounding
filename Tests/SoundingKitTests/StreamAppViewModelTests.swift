@@ -99,13 +99,41 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(item.status, .ready)
         XCTAssertEqual(viewModel.streams, [item])
         XCTAssertEqual(viewModel.selectedStreamID, item.id)
-        XCTAssertEqual(viewModel.selectedStream?.controlsEnabled, false)
-        XCTAssertEqual(viewModel.selectedStream?.playerStateTitle, "Player pending runtime wiring")
+        XCTAssertEqual(viewModel.selectedStream?.controlsEnabled, true)
+        XCTAssertEqual(viewModel.selectedStream?.canStartRuntime, true)
+        XCTAssertEqual(viewModel.selectedStream?.playerStateTitle, "Runtime ready")
 
         let stored = try registry.list()
         XCTAssertEqual(stored.count, 1)
         XCTAssertEqual(stored[0].streamType, "hls")
         XCTAssertEqual(stored[0].sourceDescription, "https://example.test/live.m3u8")
+    }
+
+    func testRuntimeEventsUpdateSelectedStatusAndControls() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        var viewModel = StreamAppViewModel()
+        viewModel.addDraft = StreamAppAddDraft(
+            name: "Fixture HLS",
+            source: "https://user:pass@example.test/live.m3u8?token=secret",
+            transport: .hls
+        )
+        let item = try viewModel.addStream(using: registry)
+
+        viewModel.applyRuntimeEvent(
+            AppStreamRuntimeEvent(
+                streamID: item.id,
+                phase: .running,
+                message: "Running https://user:pass@example.test/live.m3u8?token=secret"
+            )
+        )
+
+        XCTAssertEqual(viewModel.streams.first?.status, .running)
+        XCTAssertEqual(viewModel.selectedStream?.playerStateTitle, "Runtime running")
+        XCTAssertEqual(viewModel.selectedStream?.canPauseRuntime, true)
+        XCTAssertEqual(viewModel.selectedStream?.canStopRuntime, true)
+        XCTAssertFalse(viewModel.lastLifecycleMessage.contains("user:pass"))
+        XCTAssertFalse(viewModel.lastLifecycleMessage.contains("token=secret"))
     }
 
     func testDuplicateNamesMapToActionableAddError() throws {
