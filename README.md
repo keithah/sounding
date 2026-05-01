@@ -74,6 +74,33 @@ swift run --package-path sounding sounding ingest \
 
 Real ML/live proof is intentionally local-only: provide an authorized `SOUNDING_LIVE_URL`, let WhisperKit/FluidAudio download or reuse cached models, then inspect the SQLite counts with `sqlite3` or GRDB. Do not commit live URLs, model cache paths, generated databases, or runtime evidence files.
 
+After ingest writes transcript rows, use `search` for timestamped transcript blocks with stream/run/chunk/segment identity, speaker labels, context, and word ranges:
+
+```sh
+swift run --package-path sounding sounding search "sponsor message" \
+  --db /tmp/sounding-ingest.sqlite \
+  --limit 10 \
+  --context 1
+
+swift run --package-path sounding sounding search "sponsor message" \
+  --db /tmp/sounding-ingest.sqlite \
+  --context 1 \
+  --json
+```
+
+Use `count` for stream-aware phrase aggregates grouped by stream, run, and speaker:
+
+```sh
+swift run --package-path sounding sounding count "sponsor message" \
+  --db /tmp/sounding-ingest.sqlite
+
+swift run --package-path sounding sounding count "sponsor message" \
+  --db /tmp/sounding-ingest.sqlite \
+  --json
+```
+
+Both commands validate empty phrases and invalid search bounds before opening the database, and database-open failures report redacted paths.
+
 ## Local-only live verification
 
 Live stream verification is available through:

@@ -103,18 +103,38 @@ final class SearchCountCommandSmokeTests: XCTestCase {
             "--json",
         ])
         XCTAssertEqual(search.exitCode, 0, search.diagnosticSummary)
-        let searchObject = try parseJSONObject(search.stdout, context: search.diagnosticSummary)
-        let searchResults = try XCTUnwrap(
-            searchObject["results"] as? [[String: Any]], search.diagnosticSummary)
-        XCTAssertEqual(searchResults.count, 2, search.diagnosticSummary)
-        let firstIdentity = try XCTUnwrap(
-            searchResults.first?["identity"] as? [String: Any], search.diagnosticSummary)
-        XCTAssertNotNil(firstIdentity["streamID"], search.diagnosticSummary)
-        XCTAssertNotNil(firstIdentity["runID"], search.diagnosticSummary)
-        XCTAssertNotNil(firstIdentity["chunkID"], search.diagnosticSummary)
-        XCTAssertNotNil(firstIdentity["segmentID"], search.diagnosticSummary)
-        XCTAssertNotNil(firstIdentity["speakerLabel"], search.diagnosticSummary)
-        XCTAssertNotNil(searchResults.first?["context"], search.diagnosticSummary)
+        let searchPayload = try decodeJSON(
+            SearchPayload.self, from: search.stdout, context: search.diagnosticSummary)
+        XCTAssertEqual(searchPayload.results.count, 2, search.diagnosticSummary)
+
+        let hlsSearch = try XCTUnwrap(
+            searchPayload.results.first { $0.identity.streamID == fixture.hlsStreamID },
+            search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.identity.streamType, "hls", search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.identity.streamSource, "https://example.test/live.m3u8")
+        XCTAssertEqual(hlsSearch.identity.runID, fixture.hlsRunID, search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.identity.chunkID, fixture.hlsChunkID, search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.identity.speakerLabel, "host", search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.startSeconds, 1.0, accuracy: 0.001, search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.endSeconds, 2.0, accuracy: 0.001, search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.text, "Alpha beta alpha beta.", search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.occurrenceCount, 2, search.diagnosticSummary)
+        XCTAssertEqual(hlsSearch.words.map(\.text), ["Alpha", "beta", "alpha", "beta"])
+        XCTAssertEqual(hlsSearch.words.map(\.sequence), [0, 1, 2, 3])
+        XCTAssertEqual(hlsSearch.context.map(\.role), [.before, .match, .after])
+        XCTAssertEqual(
+            hlsSearch.context.map { $0.identity.speakerLabel },
+            ["host" as String?, "host", "guest"]
+        )
+
+        let icySearch = try XCTUnwrap(
+            searchPayload.results.first { $0.identity.streamID == fixture.icyStreamID },
+            search.diagnosticSummary)
+        XCTAssertEqual(icySearch.identity.streamType, "icy", search.diagnosticSummary)
+        XCTAssertEqual(icySearch.identity.streamSource, "https://example.test/radio")
+        XCTAssertEqual(icySearch.identity.speakerLabel, "caller", search.diagnosticSummary)
+        XCTAssertEqual(icySearch.words.map(\.text), ["callers", "say", "ALPHA", "BETA"])
+        XCTAssertEqual(icySearch.context.map(\.role), [.before, .match])
         let searchText = String(data: search.stdout, encoding: .utf8) ?? ""
         XCTAssertTrue(
             searchText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{"),
@@ -127,15 +147,28 @@ final class SearchCountCommandSmokeTests: XCTestCase {
             "--json",
         ])
         XCTAssertEqual(count.exitCode, 0, count.diagnosticSummary)
-        let countObject = try parseJSONObject(count.stdout, context: count.diagnosticSummary)
-        let countResults = try XCTUnwrap(
-            countObject["results"] as? [[String: Any]], count.diagnosticSummary)
-        XCTAssertEqual(countResults.count, 2, count.diagnosticSummary)
-        XCTAssertNotNil(countResults.first?["streamID"], count.diagnosticSummary)
-        XCTAssertNotNil(countResults.first?["runID"], count.diagnosticSummary)
-        XCTAssertNotNil(countResults.first?["speakerLabel"], count.diagnosticSummary)
-        XCTAssertNotNil(countResults.first?["occurrenceCount"], count.diagnosticSummary)
-        XCTAssertNotNil(countResults.first?["matchingSegmentCount"], count.diagnosticSummary)
+        let countPayload = try decodeJSON(
+            CountPayload.self, from: count.stdout, context: count.diagnosticSummary)
+        XCTAssertEqual(countPayload.results.count, 2, count.diagnosticSummary)
+
+        let hlsCount = try XCTUnwrap(
+            countPayload.results.first { $0.streamID == fixture.hlsStreamID },
+            count.diagnosticSummary)
+        XCTAssertEqual(hlsCount.streamType, "hls", count.diagnosticSummary)
+        XCTAssertEqual(hlsCount.streamSource, "https://example.test/live.m3u8")
+        XCTAssertEqual(hlsCount.runID, fixture.hlsRunID, count.diagnosticSummary)
+        XCTAssertEqual(hlsCount.speakerLabel, "host", count.diagnosticSummary)
+        XCTAssertEqual(hlsCount.occurrenceCount, 2, count.diagnosticSummary)
+        XCTAssertEqual(hlsCount.matchingSegmentCount, 1, count.diagnosticSummary)
+
+        let icyCount = try XCTUnwrap(
+            countPayload.results.first { $0.streamID == fixture.icyStreamID },
+            count.diagnosticSummary)
+        XCTAssertEqual(icyCount.streamType, "icy", count.diagnosticSummary)
+        XCTAssertEqual(icyCount.streamSource, "https://example.test/radio")
+        XCTAssertEqual(icyCount.speakerLabel, "caller", count.diagnosticSummary)
+        XCTAssertEqual(icyCount.occurrenceCount, 1, count.diagnosticSummary)
+        XCTAssertEqual(icyCount.matchingSegmentCount, 1, count.diagnosticSummary)
         let countText = String(data: count.stdout, encoding: .utf8) ?? ""
         XCTAssertTrue(
             countText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{"),
@@ -202,6 +235,14 @@ final class SearchCountCommandSmokeTests: XCTestCase {
         assertSanitized(stderr, forbiddenLiteral: missingDirectory.path)
         assertSanitized(stderr, forbiddenLiteral: "synthetic-secret")
         assertSanitized(stderr, forbiddenLiteral: "user:pass")
+    }
+
+    private struct SearchPayload: Decodable {
+        var results: [TranscriptQuery.SearchResult]
+    }
+
+    private struct CountPayload: Decodable {
+        var results: [TranscriptQuery.CountResult]
     }
 
     private struct Fixture {
@@ -404,19 +445,22 @@ final class SearchCountCommandSmokeTests: XCTestCase {
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
-    private func parseJSONObject(
-        _ data: Data, context: String, file: StaticString = #filePath, line: UInt = #line
-    ) throws -> [String: Any] {
+    private func decodeJSON<T: Decodable>(
+        _ type: T.Type,
+        from data: Data,
+        context: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> T {
         do {
-            let object = try JSONSerialization.jsonObject(with: data)
-            guard let dictionary = object as? [String: Any] else {
-                XCTFail("Expected top-level JSON object. \(context)", file: file, line: line)
-                throw CLIError.invalidJSON
-            }
-            return dictionary
+            return try JSONDecoder().decode(type, from: data)
         } catch {
-            XCTFail("Failed to parse CLI JSON: \(error). \(context)", file: file, line: line)
-            throw error
+            XCTFail(
+                "Failed to decode CLI JSON as \(type): \(error). \(context); stdout=\(Self.sanitizedSnippet(from: data))",
+                file: file,
+                line: line
+            )
+            throw CLIError.invalidJSON
         }
     }
 
