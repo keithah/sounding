@@ -88,6 +88,75 @@ enum SoundingDatabaseMigrator {
             try db.create(index: "ingest_diagnostics_on_severity", on: "ingest_diagnostics", columns: ["severity"])
         }
 
+        migrator.registerMigration("addTranscriptTimeline") { db in
+            try db.create(table: "transcript_segments") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("run_id", .integer)
+                    .notNull()
+                    .references("ingest_runs", onDelete: .cascade)
+                table.column("chunk_id", .integer)
+                    .notNull()
+                    .references("ingest_chunks", onDelete: .cascade)
+                table.column("sequence", .integer).notNull()
+                table.column("speaker_label", .text)
+                table.column("start_seconds", .double).notNull()
+                table.column("end_seconds", .double).notNull()
+                table.column("text", .text).notNull()
+                table.column("confidence", .double)
+                table.column("created_at", .text).notNull()
+                table.uniqueKey(["run_id", "sequence"])
+            }
+            try db.create(index: "transcript_segments_on_run_id", on: "transcript_segments", columns: ["run_id"])
+            try db.create(index: "transcript_segments_on_chunk_id", on: "transcript_segments", columns: ["chunk_id"])
+            try db.create(index: "transcript_segments_on_speaker_label", on: "transcript_segments", columns: ["speaker_label"])
+            try db.create(index: "transcript_segments_on_start_seconds", on: "transcript_segments", columns: ["start_seconds"])
+
+            try db.create(table: "transcript_words") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("segment_id", .integer)
+                    .notNull()
+                    .references("transcript_segments", onDelete: .cascade)
+                table.column("chunk_id", .integer)
+                    .notNull()
+                    .references("ingest_chunks", onDelete: .cascade)
+                table.column("sequence", .integer).notNull()
+                table.column("speaker_label", .text)
+                table.column("start_seconds", .double).notNull()
+                table.column("end_seconds", .double).notNull()
+                table.column("text", .text).notNull()
+                table.column("confidence", .double)
+                table.uniqueKey(["segment_id", "sequence"])
+            }
+            try db.create(index: "transcript_words_on_segment_id", on: "transcript_words", columns: ["segment_id"])
+            try db.create(index: "transcript_words_on_chunk_id", on: "transcript_words", columns: ["chunk_id"])
+            try db.create(index: "transcript_words_on_speaker_label", on: "transcript_words", columns: ["speaker_label"])
+            try db.create(index: "transcript_words_on_start_seconds", on: "transcript_words", columns: ["start_seconds"])
+
+            try db.create(table: "speaker_turns") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("run_id", .integer)
+                    .notNull()
+                    .references("ingest_runs", onDelete: .cascade)
+                table.column("chunk_id", .integer)
+                    .notNull()
+                    .references("ingest_chunks", onDelete: .cascade)
+                table.column("speaker_label", .text).notNull()
+                table.column("start_seconds", .double).notNull()
+                table.column("end_seconds", .double).notNull()
+                table.column("confidence", .double)
+                table.column("created_at", .text).notNull()
+            }
+            try db.create(index: "speaker_turns_on_run_id", on: "speaker_turns", columns: ["run_id"])
+            try db.create(index: "speaker_turns_on_chunk_id", on: "speaker_turns", columns: ["chunk_id"])
+            try db.create(index: "speaker_turns_on_speaker_label", on: "speaker_turns", columns: ["speaker_label"])
+            try db.create(index: "speaker_turns_on_start_seconds", on: "speaker_turns", columns: ["start_seconds"])
+
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE transcript_segments_fts
+                USING fts5(text, speaker_label, content='transcript_segments', content_rowid='id')
+                """)
+        }
+
         try migrator.migrate(writer)
     }
 }
