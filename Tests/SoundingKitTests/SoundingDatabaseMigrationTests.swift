@@ -9,8 +9,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
         "fingerprints",
         "reports",
         "report_rows",
-        "songs_fts",
-        "acoustid_lookup_cache"
+        "songs_fts"
     ]
 
     func testMigrationsCreateIngestTranscriptAndSongTimelineTablesOnly() throws {
@@ -45,6 +44,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "audio_fingerprints",
                 "songs",
                 "song_plays",
+                "acoustid_lookup_cache",
                 "grdb_migrations"
             ]
         )
@@ -66,7 +66,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "speaker_turns": columnNames(in: "speaker_turns", db),
                 "audio_fingerprints": columnNames(in: "audio_fingerprints", db),
                 "songs": columnNames(in: "songs", db),
-                "song_plays": columnNames(in: "song_plays", db)
+                "song_plays": columnNames(in: "song_plays", db),
+                "acoustid_lookup_cache": columnNames(in: "acoustid_lookup_cache", db)
             ]
         }
 
@@ -195,6 +196,23 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "created_at",
             "updated_at"
         ])
+        XCTAssertEqual(columnsByTable["acoustid_lookup_cache"], [
+            "id",
+            "algorithm",
+            "algorithm_version",
+            "fingerprint_hash",
+            "acoustid_id",
+            "recording_id",
+            "title",
+            "artist",
+            "album",
+            "isrc",
+            "duration_seconds",
+            "score",
+            "response_json",
+            "created_at",
+            "updated_at"
+        ])
     }
 
     func testSongTimelineMigrationCreatesReportIndexes() throws {
@@ -205,7 +223,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'index'
-                  AND tbl_name IN ('audio_fingerprints', 'songs', 'song_plays')
+                  AND tbl_name IN ('audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache')
                 ORDER BY name
                 """))
         }
@@ -220,7 +238,11 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "song_plays_on_stream_run_time",
             "song_plays_on_run_time",
             "song_plays_on_song_id",
-            "song_plays_on_last_chunk_id"
+            "song_plays_on_last_chunk_id",
+            "acoustid_lookup_cache_on_identity",
+            "acoustid_lookup_cache_on_acoustid_id",
+            "acoustid_lookup_cache_on_recording_id",
+            "acoustid_lookup_cache_on_updated_at"
         ]))
     }
 
@@ -240,7 +262,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "transcript_segments_fts": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments_fts"),
                 "audio_fingerprints": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM audio_fingerprints"),
                 "songs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM songs"),
-                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays")
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+                "acoustid_lookup_cache": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM acoustid_lookup_cache")
             ]
         }
 
@@ -256,7 +279,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "transcript_segments_fts": 0,
             "audio_fingerprints": 0,
             "songs": 0,
-            "song_plays": 0
+            "song_plays": 0,
+            "acoustid_lookup_cache": 0
         ])
     }
 

@@ -238,6 +238,34 @@ enum SoundingDatabaseMigrator {
             try db.create(index: "song_plays_on_last_chunk_id", on: "song_plays", columns: ["last_chunk_id"])
         }
 
+        migrator.registerMigration("addAcoustIDLookupCache") { db in
+            try db.create(table: "acoustid_lookup_cache") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("algorithm", .text).notNull()
+                    .check(sql: "length(algorithm) > 0")
+                table.column("algorithm_version", .text).notNull()
+                    .check(sql: "length(algorithm_version) > 0")
+                table.column("fingerprint_hash", .text).notNull()
+                    .check(sql: "length(fingerprint_hash) > 0")
+                table.column("acoustid_id", .text)
+                table.column("recording_id", .text)
+                table.column("title", .text)
+                table.column("artist", .text)
+                table.column("album", .text)
+                table.column("isrc", .text)
+                table.column("duration_seconds", .double)
+                table.column("score", .double)
+                table.column("response_json", .text)
+                table.column("created_at", .text).notNull()
+                table.column("updated_at", .text).notNull()
+                table.uniqueKey(["algorithm", "algorithm_version", "fingerprint_hash"])
+            }
+            try db.create(index: "acoustid_lookup_cache_on_identity", on: "acoustid_lookup_cache", columns: ["algorithm", "algorithm_version", "fingerprint_hash"])
+            try db.create(index: "acoustid_lookup_cache_on_acoustid_id", on: "acoustid_lookup_cache", columns: ["acoustid_id"])
+            try db.create(index: "acoustid_lookup_cache_on_recording_id", on: "acoustid_lookup_cache", columns: ["recording_id"])
+            try db.create(index: "acoustid_lookup_cache_on_updated_at", on: "acoustid_lookup_cache", columns: ["updated_at"])
+        }
+
         try migrator.migrate(writer)
     }
 }
