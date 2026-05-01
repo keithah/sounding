@@ -18,15 +18,19 @@ final class ReportCommandSmokeTests: XCTestCase {
         let report = try runSounding(arguments: ["report", "--help"])
         XCTAssertEqual(report.exitCode, 0, report.diagnosticSummary)
         let reportHelp = String(data: report.stdout, encoding: .utf8) ?? ""
-        XCTAssertTrue(reportHelp.contains("plays"), report.diagnosticSummary)
+        for command in ["plays", "repeats", "ads"] {
+            XCTAssertTrue(reportHelp.contains(command), report.diagnosticSummary)
+        }
 
-        let plays = try runSounding(arguments: ["report", "plays", "--help"])
-        XCTAssertEqual(plays.exitCode, 0, plays.diagnosticSummary)
-        let playsHelp = String(data: plays.stdout, encoding: .utf8) ?? ""
-        for flag in ["--db", "--json", "--stream", "--start-seconds", "--end-seconds"] {
-            XCTAssertTrue(
-                playsHelp.contains(flag),
-                "Expected report plays help to advertise \(flag). \(plays.diagnosticSummary)")
+        for command in ["plays", "repeats", "ads"] {
+            let help = try runSounding(arguments: ["report", command, "--help"])
+            XCTAssertEqual(help.exitCode, 0, help.diagnosticSummary)
+            let helpText = String(data: help.stdout, encoding: .utf8) ?? ""
+            for flag in ["--db", "--json", "--stream", "--start-seconds", "--end-seconds"] {
+                XCTAssertTrue(
+                    helpText.contains(flag),
+                    "Expected report \(command) help to advertise \(flag). \(help.diagnosticSummary)")
+            }
         }
     }
 
@@ -84,6 +88,40 @@ final class ReportCommandSmokeTests: XCTestCase {
         XCTAssertFalse(jsonText.contains("Play 1:"), json.diagnosticSummary)
         assertSanitized(jsonText, forbiddenLiteral: fixture.path)
         assertSanitized(jsonText, forbiddenLiteral: dbURL.path)
+
+        let repeatsJSON = try runSounding(arguments: [
+            "report", "repeats",
+            "--db", dbURL.path,
+            "--json",
+        ])
+        XCTAssertEqual(repeatsJSON.exitCode, 0, repeatsJSON.diagnosticSummary)
+        XCTAssertEqual(repeatsJSON.stderr.count, 0, repeatsJSON.diagnosticSummary)
+        let repeatsPayload = try decodeJSON(
+            RepeatsPayload.self, from: repeatsJSON.stdout, context: repeatsJSON.diagnosticSummary)
+        XCTAssertEqual(repeatsPayload.results.count, 0, repeatsJSON.diagnosticSummary)
+        let repeatsText = String(data: repeatsJSON.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(repeatsText.hasSuffix("\n"), repeatsJSON.diagnosticSummary)
+        assertSanitized(repeatsText, forbiddenLiteral: fixture.path)
+        assertSanitized(repeatsText, forbiddenLiteral: dbURL.path)
+
+        let adsJSON = try runSounding(arguments: [
+            "report", "ads",
+            "--db", dbURL.path,
+            "--json",
+        ])
+        XCTAssertEqual(adsJSON.exitCode, 0, adsJSON.diagnosticSummary)
+        XCTAssertEqual(adsJSON.stderr.count, 0, adsJSON.diagnosticSummary)
+        let adsPayload = try decodeJSON(
+            AdsPayload.self, from: adsJSON.stdout, context: adsJSON.diagnosticSummary)
+        XCTAssertGreaterThanOrEqual(adsPayload.events.count, 1, adsJSON.diagnosticSummary)
+        XCTAssertEqual(
+            adsPayload.summary.adStart + adsPayload.summary.adEnd + adsPayload.summary.unknown,
+            adsPayload.events.count,
+            adsJSON.diagnosticSummary)
+        let adsText = String(data: adsJSON.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(adsText.hasSuffix("\n"), adsJSON.diagnosticSummary)
+        assertSanitized(adsText, forbiddenLiteral: fixture.path)
+        assertSanitized(adsText, forbiddenLiteral: dbURL.path)
     }
 
     func testAcoustIDStubIngestReportsEnrichedSongAndCachesLookup() throws {
@@ -306,6 +344,24 @@ final class ReportCommandSmokeTests: XCTestCase {
         XCTAssertEqual(payload.results.count, 0, json.diagnosticSummary)
         let jsonText = String(data: json.stdout, encoding: .utf8) ?? ""
         XCTAssertFalse(jsonText.contains("No song plays found"), json.diagnosticSummary)
+
+        let repeatsJSON = try runSounding(arguments: [
+            "report", "repeats", "--db", dbURL.path, "--json",
+        ])
+        XCTAssertEqual(repeatsJSON.exitCode, 0, repeatsJSON.diagnosticSummary)
+        XCTAssertEqual(
+            String(data: repeatsJSON.stdout, encoding: .utf8),
+            "{\"results\":[]}\n"
+        )
+
+        let adsJSON = try runSounding(arguments: [
+            "report", "ads", "--db", dbURL.path, "--json",
+        ])
+        XCTAssertEqual(adsJSON.exitCode, 0, adsJSON.diagnosticSummary)
+        XCTAssertEqual(
+            String(data: adsJSON.stdout, encoding: .utf8),
+            "{\"events\":[],\"summary\":{\"adEnd\":0,\"adStart\":0,\"unknown\":0}}\n"
+        )
     }
 
     func testValidationRejectsMalformedInputsBeforeOpeningDatabase() throws {
@@ -381,6 +437,27 @@ final class ReportCommandSmokeTests: XCTestCase {
 
     private struct PlaysPayload: Decodable {
         var results: [Play]
+    }
+
+    private struct RepeatsPayload: Decodable {
+        var results: [Repeat]
+    }
+
+    private struct Repeat: Decodable {
+        var repeatCount: Int
+    }
+
+    private struct AdsPayload: Decodable {
+        var events: [AdEvent]
+        var summary: AdSummary
+    }
+
+    private struct AdEvent: Decodable {}
+
+    private struct AdSummary: Decodable {
+        var unknown: Int
+        var adStart: Int
+        var adEnd: Int
     }
 
     private struct Play: Decodable {

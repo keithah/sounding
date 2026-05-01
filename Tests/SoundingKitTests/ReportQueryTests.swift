@@ -3,6 +3,7 @@ import GRDB
 import XCTest
 
 @testable import SoundingKit
+@testable import sounding
 
 final class ReportQueryTests: XCTestCase {
     func testAdsReturnEventsAndClassificationSummaryInDeterministicOrder() throws {
@@ -150,6 +151,197 @@ final class ReportQueryTests: XCTestCase {
         XCTAssertThrowsError(try fixture.query.events()) { error in
             XCTAssertEqual(error as? AdReportQuery.QueryError, .databaseReadFailed)
         }
+    }
+
+    func testRepeatAndAdReportOutputEmptyStatesAndStableJsonShapes() throws {
+        XCTAssertEqual(try ReportOutput.formatRepeatsHuman([]), "No repeated songs found.\n")
+        XCTAssertEqual(
+            try ReportOutput.encodeRepeatsJSON([]),
+            "{\"results\":[]}\n"
+        )
+
+        let emptyAds = AdReportQuery.Result(events: [], summary: .init())
+        XCTAssertEqual(try ReportOutput.formatAdsHuman(emptyAds), "No ad events found.\n")
+        XCTAssertEqual(
+            try ReportOutput.encodeAdsJSON(emptyAds),
+            "{\"events\":[],\"summary\":{\"adEnd\":0,\"adStart\":0,\"unknown\":0}}\n"
+        )
+    }
+
+    func testRepeatReportOutputIncludesIdentityAndRedactsNestedPlaySources() throws {
+        let repeatResult = makeRepeatOutputResult()
+
+        let human = try ReportOutput.formatRepeatsHuman([repeatResult])
+        XCTAssertTrue(human.contains("Repeat 1: group=artist-title:repeat artist:echo song"), human)
+        XCTAssertTrue(human.contains("count=2"), human)
+        XCTAssertTrue(human.contains("song=Repeat Artist — Echo Song"), human)
+        XCTAssertTrue(human.contains("window=00:00.000-00:30.000"), human)
+        XCTAssertTrue(human.contains("total_duration=00:20.000"), human)
+        XCTAssertTrue(human.contains("stream=101(hls source=https://example.test/repeats.m3u8)"), human)
+        XCTAssertTrue(human.contains("run=201 play=301"), human)
+        XCTAssertTrue(human.contains("chunks=401(seq=0)-402(seq=1)"), human)
+        XCTAssertFalse(human.contains("fixture-secret"), human)
+        XCTAssertFalse(human.contains("token="), human)
+        XCTAssertFalse(human.contains("password="), human)
+
+        let json = try ReportOutput.encodeRepeatsJSON([repeatResult])
+        XCTAssertTrue(json.hasPrefix("{\"results\":[{"), json)
+        XCTAssertTrue(json.hasSuffix("\n"), json)
+        XCTAssertTrue(json.contains("\"displayLabel\":\"Repeat Artist — Echo Song\""), json)
+        XCTAssertTrue(json.contains("\"repeatCount\":2"), json)
+        XCTAssertTrue(json.contains("\"streamSource\":\"https:\\/\\/example.test\\/repeats.m3u8\""), json)
+        XCTAssertFalse(json.contains("fixture-secret"), json)
+        XCTAssertFalse(json.contains("token="), json)
+        XCTAssertFalse(json.contains("password="), json)
+
+        let decoded = try JSONDecoder().decode(ReportOutput.RepeatsPayload.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.results.first?.repeatCount, 2)
+        XCTAssertEqual(decoded.results.first?.plays.count, 2)
+    }
+
+    func testAdReportOutputIncludesSummaryIdentityAndRedactsSources() throws {
+        let fixture = try makeAdFixture()
+        let result = try fixture.query.events()
+
+        let human = try ReportOutput.formatAdsHuman(result)
+        XCTAssertTrue(human.contains("Ad summary: total=4 unknown=1 ad_start=2 ad_end=1"), human)
+        XCTAssertTrue(human.contains("Ad Event 1:"), human)
+        XCTAssertTrue(human.contains("classification=UNKNOWN"), human)
+        XCTAssertTrue(human.contains("classification=AD_START"), human)
+        XCTAssertTrue(human.contains("classification=AD_END"), human)
+        XCTAssertTrue(human.contains("stream=\(fixture.hlsStreamID)(hls source=https://example.test/live.m3u8)"), human)
+        XCTAssertTrue(human.contains("run=\(fixture.hlsRunID)"), human)
+        XCTAssertTrue(human.contains("chunk=\(fixture.hlsSecondChunkID)(seq=1)"), human)
+        XCTAssertTrue(human.contains("pts=unknown"), human)
+        XCTAssertTrue(human.contains("pts=00:10.000"), human)
+        XCTAssertFalse(human.contains("fixture-secret"), human)
+        XCTAssertFalse(human.contains("token="), human)
+        XCTAssertFalse(human.contains("password="), human)
+
+        let json = try ReportOutput.encodeAdsJSON(result)
+        XCTAssertTrue(json.hasPrefix("{\"events\":[{"), json)
+        XCTAssertTrue(json.hasSuffix("\n"), json)
+        XCTAssertTrue(json.contains("\"summary\":{\"adEnd\":1,\"adStart\":2,\"unknown\":1}"), json)
+        XCTAssertTrue(json.contains("\"classification\":\"AD_START\""), json)
+        XCTAssertTrue(json.contains("\"streamSource\":\"https:\\/\\/example.test\\/live.m3u8\""), json)
+        XCTAssertFalse(json.contains("fixture-secret"), json)
+        XCTAssertFalse(json.contains("token="), json)
+        XCTAssertFalse(json.contains("password="), json)
+
+        let decoded = try JSONDecoder().decode(ReportOutput.AdsPayload.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.summary, .init(unknown: 1, adStart: 2, adEnd: 1))
+        XCTAssertEqual(decoded.events.count, 4)
+    }
+
+    func testRepeatAndAdReportOutputRejectNonFiniteTimes() throws {
+        var repeatResult = makeRepeatOutputResult()
+        repeatResult.totalDurationSeconds = .infinity
+        XCTAssertThrowsError(try ReportOutput.encodeRepeatsJSON([repeatResult])) { error in
+            XCTAssertEqual(error as? ReportOutput.OutputError, .invalidTime("totalDurationSeconds"))
+        }
+        XCTAssertThrowsError(try ReportOutput.formatRepeatsHuman([repeatResult])) { error in
+            XCTAssertEqual(error as? ReportOutput.OutputError, .invalidTime("totalDurationSeconds"))
+        }
+
+        var nestedPlayResult = makeRepeatOutputResult()
+        nestedPlayResult.plays[0].startSeconds = .nan
+        XCTAssertThrowsError(try ReportOutput.encodeRepeatsJSON([nestedPlayResult])) { error in
+            XCTAssertEqual(error as? ReportOutput.OutputError, .invalidTime("startSeconds"))
+        }
+
+        let badAd = AdReportQuery.Result(
+            events: [
+                AdReportQuery.EventResult(
+                    identity: .init(
+                        eventID: 1,
+                        streamID: 2,
+                        streamType: "hls",
+                        streamSource: "https://example.test/live.m3u8?token=fixture-secret",
+                        runID: 3,
+                        chunkID: 4,
+                        chunkSequence: 5
+                    ),
+                    classification: .adStart,
+                    markerType: "EXT-X-CUE-OUT",
+                    source: "https://ads.example.test/start?token=fixture-secret",
+                    pts: .nan,
+                    segment: "/private/ad.ts?password=fixture-secret",
+                    observedAt: "2026-05-01T10:00:05Z"
+                )
+            ],
+            summary: .init(unknown: 0, adStart: 1, adEnd: 0)
+        )
+        XCTAssertThrowsError(try ReportOutput.encodeAdsJSON(badAd)) { error in
+            XCTAssertEqual(error as? ReportOutput.OutputError, .invalidTime("pts"))
+        }
+        XCTAssertThrowsError(try ReportOutput.formatAdsHuman(badAd)) { error in
+            XCTAssertEqual(error as? ReportOutput.OutputError, .invalidTime("pts"))
+        }
+    }
+
+    private func makeRepeatOutputResult() -> SongReportQuery.RepeatResult {
+        let song = SongReportQuery.SongDisplay(
+            songID: 11,
+            songKey: "fixture:repeat-echo",
+            title: "Echo Song",
+            artist: "Repeat Artist",
+            album: "Report Fixtures",
+            isrc: "US-S03-26-00001",
+            displayName: "Repeat Artist — Echo Song",
+            isUnknown: false
+        )
+        let firstPlay = SongReportQuery.PlayResult(
+            identity: .init(
+                playID: 301,
+                streamID: 101,
+                streamType: "hls",
+                streamSource: "https://example.test/repeats.m3u8?token=fixture-secret",
+                runID: 201,
+                firstChunkID: 401,
+                firstChunkSequence: 0,
+                lastChunkID: 402,
+                lastChunkSequence: 1
+            ),
+            song: song,
+            startSeconds: 0,
+            endSeconds: 10,
+            durationSeconds: 10,
+            confidence: 0.91,
+            source: "/private/fingerprint-source?password=fixture-secret",
+            createdAt: "2026-05-01T12:00:03Z",
+            updatedAt: "2026-05-01T12:00:13Z"
+        )
+        let secondPlay = SongReportQuery.PlayResult(
+            identity: .init(
+                playID: 302,
+                streamID: 101,
+                streamType: "hls",
+                streamSource: "https://example.test/repeats.m3u8?token=fixture-secret",
+                runID: 201,
+                firstChunkID: 403,
+                firstChunkSequence: 2,
+                lastChunkID: 404,
+                lastChunkSequence: 3
+            ),
+            song: song,
+            startSeconds: 20,
+            endSeconds: 30,
+            durationSeconds: 10,
+            confidence: 0.89,
+            source: "https://fingerprints.example.test/match?token=fixture-secret",
+            createdAt: "2026-05-01T12:00:23Z",
+            updatedAt: "2026-05-01T12:00:33Z"
+        )
+
+        return SongReportQuery.RepeatResult(
+            groupKey: "artist-title:repeat artist:echo song",
+            song: song,
+            repeatCount: 2,
+            totalDurationSeconds: 20,
+            firstStartSeconds: 0,
+            lastEndSeconds: 30,
+            plays: [firstPlay, secondPlay]
+        )
     }
 
     private struct Fixture {
