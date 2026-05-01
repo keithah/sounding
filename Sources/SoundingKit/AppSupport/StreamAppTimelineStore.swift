@@ -6,6 +6,8 @@ public enum StreamAppTimelineStoreError: Error, Equatable, Sendable, CustomStrin
     case streamNotFound
     case invalidLimit(String)
     case invalidWindow
+    case invalidFocusedSegmentID
+    case focusedSegmentNotFound
     case emptyRawSpeakerLabel
     case emptyDisplayLabel
     case displayLabelTooLong(max: Int)
@@ -24,6 +26,10 @@ public enum StreamAppTimelineStoreError: Error, Equatable, Sendable, CustomStrin
             return "Stream timeline limit \(field) must be greater than zero."
         case .invalidWindow:
             return "Stream timeline lookback window must be finite and non-negative."
+        case .invalidFocusedSegmentID:
+            return "Focused transcript refresh requires a valid segment identifier."
+        case .focusedSegmentNotFound:
+            return "Focused transcript segment was not found for the selected stream."
         case .emptyRawSpeakerLabel:
             return "Speaker label must not be empty."
         case .emptyDisplayLabel:
@@ -189,6 +195,9 @@ public struct StreamAppTimelineStore: Sendable {
         if let lookback = request.lookbackSeconds, !lookback.isFinite || lookback < 0 {
             throw StreamAppTimelineStoreError.invalidWindow
         }
+        if let focusedSegmentID = request.focusedSegmentID, focusedSegmentID <= 0 {
+            throw StreamAppTimelineStoreError.invalidFocusedSegmentID
+        }
     }
 
     private func validateRawSpeakerLabel(_ value: String) throws -> String {
@@ -240,6 +249,14 @@ public struct StreamAppTimelineStore: Sendable {
         lowerBound: Double?,
         db: Database
     ) throws -> [SegmentRow] {
+        if let focusedSegmentID = request.focusedSegmentID {
+            return try fetchFocusedSegmentRows(
+                request: request,
+                focusedSegmentID: focusedSegmentID,
+                db: db
+            )
+        }
+
         var arguments: StatementArguments = [request.streamID]
         var windowClause = ""
         if let lowerBound {
@@ -276,7 +293,83 @@ public struct StreamAppTimelineStore: Sendable {
             arguments: arguments
         )
 
-        return try rows.map { row in
+        return try decodeSegmentRows(rows)
+    }
+
+    private func fetchFocusedSegmentRows(
+        request: StreamAppTimelineRequest,
+        focusedSegmentID: Int64,
+        db: Database
+    ) throws -> [SegmentRow] {
+        let focusExists = try Bool.fetchOne(
+            db,
+            sql: """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM transcript_segments
+                    JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                    WHERE ingest_runs.stream_id = ?
+                      AND transcript_segments.id = ?
+                )
+                """,
+            arguments: [request.streamID, focusedSegmentID]
+        ) ?? false
+        guard focusExists else {
+            throw StreamAppTimelineStoreError.focusedSegmentNotFound
+        }
+
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+                WITH ordered_segments AS (
+                    SELECT
+                        transcript_segments.id,
+                        transcript_segments.run_id,
+                        transcript_segments.chunk_id,
+                        transcript_segments.sequence,
+                        transcript_segments.speaker_label,
+                        transcript_segments.start_seconds,
+                        transcript_segments.end_seconds,
+                        transcript_segments.text,
+                        transcript_segments.confidence,
+                        ROW_NUMBER() OVER (
+                            ORDER BY transcript_segments.start_seconds, transcript_segments.id
+                        ) AS segment_rank
+                    FROM transcript_segments
+                    JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                    WHERE ingest_runs.stream_id = ?
+                ),
+                focused_segment AS (
+                    SELECT segment_rank AS focus_rank
+                    FROM ordered_segments
+                    WHERE id = ?
+                )
+                SELECT * FROM (
+                    SELECT
+                        ordered_segments.id,
+                        ordered_segments.run_id,
+                        ordered_segments.chunk_id,
+                        ordered_segments.sequence,
+                        ordered_segments.speaker_label,
+                        ordered_segments.start_seconds,
+                        ordered_segments.end_seconds,
+                        ordered_segments.text,
+                        ordered_segments.confidence
+                    FROM ordered_segments, focused_segment
+                    ORDER BY ABS(ordered_segments.segment_rank - focused_segment.focus_rank),
+                             ordered_segments.segment_rank
+                    LIMIT ?
+                ) AS focused_window
+                ORDER BY start_seconds, id
+                """,
+            arguments: [request.streamID, focusedSegmentID, request.paragraphLimit]
+        )
+
+        return try decodeSegmentRows(rows)
+    }
+
+    private func decodeSegmentRows(_ rows: [Row]) throws -> [SegmentRow] {
+        try rows.map { row in
             guard let id: Int64 = row["id"] else {
                 throw StreamAppTimelineStoreError.malformedRow("segment_id")
             }
@@ -632,6 +725,7 @@ public struct StreamAppTimelineStore: Sendable {
             playerPositionSeconds: player?.positionSeconds,
             playerLiveEdgeSeconds: player?.liveEdgeSeconds,
             lagSeconds: lagSeconds,
+            focusedSegmentID: request.focusedSegmentID,
             refreshedAt: request.refreshedAt,
             validationErrors: [],
             bufferedSeekUnavailableMessage: player?.unavailableRangeMessage

@@ -8,6 +8,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
     public var metadataLimit: Int
     public var timelineLimit: Int
     public var lookbackSeconds: Double?
+    public var focusedSegmentID: Int64?
     public var refreshedAt: String
 
     public init(
@@ -18,6 +19,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
         metadataLimit: Int = 10,
         timelineLimit: Int = 100,
         lookbackSeconds: Double? = 300,
+        focusedSegmentID: Int64? = nil,
         refreshedAt: String? = nil
     ) {
         self.streamID = streamID
@@ -27,6 +29,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
         self.metadataLimit = metadataLimit
         self.timelineLimit = timelineLimit
         self.lookbackSeconds = lookbackSeconds
+        self.focusedSegmentID = focusedSegmentID
         self.refreshedAt = refreshedAt ?? Self.defaultRefreshTimestamp()
     }
 
@@ -225,6 +228,7 @@ public struct StreamAppTimelineDiagnostics: Equatable, Sendable {
     public var playerPositionSeconds: Double?
     public var playerLiveEdgeSeconds: Double?
     public var lagSeconds: Double?
+    public var focusedSegmentID: Int64?
     public var refreshedAt: String
     public var validationErrors: [String]
     public var bufferedSeekUnavailableMessage: String?
@@ -234,6 +238,7 @@ public struct StreamAppTimelineDiagnostics: Equatable, Sendable {
         playerPositionSeconds: Double? = nil,
         playerLiveEdgeSeconds: Double? = nil,
         lagSeconds: Double? = nil,
+        focusedSegmentID: Int64? = nil,
         refreshedAt: String,
         validationErrors: [String] = [],
         bufferedSeekUnavailableMessage: String? = nil
@@ -242,6 +247,7 @@ public struct StreamAppTimelineDiagnostics: Equatable, Sendable {
         self.playerPositionSeconds = playerPositionSeconds
         self.playerLiveEdgeSeconds = playerLiveEdgeSeconds
         self.lagSeconds = lagSeconds
+        self.focusedSegmentID = focusedSegmentID
         self.refreshedAt = refreshedAt
         self.validationErrors = validationErrors.map(IngestRedaction.redact)
         self.bufferedSeekUnavailableMessage = bufferedSeekUnavailableMessage.map(IngestRedaction.redact)

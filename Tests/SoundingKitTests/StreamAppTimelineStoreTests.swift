@@ -124,6 +124,107 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(providerRows.ftsLabels, ["caller", "dj", "guest", "host"])
     }
 
+    func testFocusedSnapshotIncludesOlderSegmentOutsideNewestWindowAndLookback() throws {
+        let fixture = try makeFixture()
+        let store = StreamAppTimelineStore(database: fixture.temporary.database)
+        let focusedSegmentID = try fixture.temporary.database.read { db in
+            try XCTUnwrap(
+                Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM transcript_segments WHERE text = ?",
+                    arguments: ["Opening alpha words"]
+                )
+            )
+        }
+
+        try store.updateSpeakerDisplay(
+            streamID: fixture.mainStreamID,
+            rawLabel: "host",
+            displayLabel: "Morning Host",
+            colorToken: "violet",
+            updatedAt: "2026-05-01T16:10:00Z"
+        )
+
+        let snapshot = try store.snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 28,
+                    liveEdgeSeconds: 30,
+                    bufferedStartSeconds: 0,
+                    bufferedEndSeconds: 30
+                ),
+                paragraphLimit: 2,
+                wordLimitPerParagraph: 2,
+                metadataLimit: 2,
+                timelineLimit: 6,
+                lookbackSeconds: 5,
+                focusedSegmentID: focusedSegmentID,
+                refreshedAt: "2026-05-01T16:10:01Z"
+            )
+        )
+
+        XCTAssertEqual(snapshot.transcriptParagraphs.map(\.text), ["Opening alpha words", "Middle beta words"])
+        XCTAssertEqual(snapshot.transcriptParagraphs.first?.id, focusedSegmentID)
+        XCTAssertEqual(snapshot.transcriptParagraphs.first?.speakerDisplay.displayLabel, "Morning Host")
+        XCTAssertEqual(snapshot.transcriptParagraphs.first?.words.map(\.text), ["Opening", "alpha"])
+        XCTAssertEqual(snapshot.timelineItems.first { $0.id == "transcript:\(focusedSegmentID)" }?.isSeekable, true)
+        XCTAssertEqual(snapshot.diagnostics.focusedSegmentID, focusedSegmentID)
+    }
+
+    func testFocusedSnapshotRejectsInvalidMissingAndCrossStreamSegmentIDs() throws {
+        let fixture = try makeFixture()
+        let store = StreamAppTimelineStore(database: fixture.temporary.database)
+        let otherSegmentID = try fixture.temporary.database.read { db in
+            try XCTUnwrap(
+                Int64.fetchOne(
+                    db,
+                    sql: """
+                        SELECT transcript_segments.id
+                        FROM transcript_segments
+                        JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                        WHERE ingest_runs.stream_id = ?
+                        ORDER BY transcript_segments.id
+                        LIMIT 1
+                        """,
+                    arguments: [fixture.otherStreamID]
+                )
+            )
+        }
+
+        XCTAssertThrowsError(
+            try store.snapshot(
+                request: StreamAppTimelineRequest(
+                    streamID: fixture.mainStreamID,
+                    focusedSegmentID: 0
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? StreamAppTimelineStoreError, .invalidFocusedSegmentID)
+        }
+        XCTAssertThrowsError(
+            try store.snapshot(
+                request: StreamAppTimelineRequest(
+                    streamID: fixture.mainStreamID,
+                    focusedSegmentID: 9_999_999
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? StreamAppTimelineStoreError, .focusedSegmentNotFound)
+        }
+        XCTAssertThrowsError(
+            try store.snapshot(
+                request: StreamAppTimelineRequest(
+                    streamID: fixture.mainStreamID,
+                    focusedSegmentID: otherSegmentID
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? StreamAppTimelineStoreError, .focusedSegmentNotFound)
+        }
+    }
+
     func testValidationRejectsMalformedInputsBeforeSql() throws {
         let fixture = try makeFixture()
         let store = StreamAppTimelineStore(database: fixture.temporary.database)
