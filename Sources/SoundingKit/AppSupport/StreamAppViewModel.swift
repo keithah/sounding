@@ -214,8 +214,11 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
     public var canPauseRuntime: Bool
     public var canResumeRuntime: Bool
     public var canStopRuntime: Bool
+    public var canSeekToLive: Bool
+    public var canScrubBufferedRange: Bool
+    public var scrubPositionFraction: Double
 
-    public init(item: StreamAppListItem) {
+    public init(item: StreamAppListItem, timeline: AppPlayerTimelineSnapshot? = nil) {
         self.item = item
         switch item.status {
         case .running:
@@ -267,13 +270,44 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             canResumeRuntime = false
             canStopRuntime = false
         }
-        bufferedRangeTitle = "Rolling buffer pending playback wiring"
+
+        if let timeline {
+            playerStateTitle = timeline.state.title
+            playerStateDetail = timeline.unavailableRangeMessage ?? timeline.lastMessage
+            if let range = timeline.rollingBuffer?.bufferedRange {
+                bufferedRangeTitle = String(
+                    format: "Buffered %.0f–%.0fs (live %.0fs, drift %.0fs)",
+                    range.startSeconds,
+                    range.endSeconds,
+                    timeline.liveEdgeSeconds,
+                    timeline.driftSeconds
+                )
+                let span = max(1, range.endSeconds - range.startSeconds)
+                scrubPositionFraction = min(
+                    1,
+                    max(0, (timeline.positionSeconds - range.startSeconds) / span)
+                )
+                canSeekToLive = item.status == .running || item.status == .paused
+                canScrubBufferedRange = range.durationSeconds > 0 && controlsEnabled
+            } else {
+                bufferedRangeTitle = "Rolling buffer warming up"
+                scrubPositionFraction = 1
+                canSeekToLive = false
+                canScrubBufferedRange = false
+            }
+        } else {
+            bufferedRangeTitle = "Rolling buffer waiting for decoded PCM"
+            scrubPositionFraction = 1
+            canSeekToLive = false
+            canScrubBufferedRange = false
+        }
     }
 }
 
 public struct StreamAppViewModel: Equatable, Sendable {
     public private(set) var streams: [StreamAppListItem]
     public var selectedStreamID: Int64?
+    public private(set) var playerTimelines: [Int64: AppPlayerTimelineSnapshot]
     public var addDraft: StreamAppAddDraft
     public private(set) var addError: StreamAppValidationError?
     public private(set) var lastLifecycleMessage: String
@@ -281,12 +315,14 @@ public struct StreamAppViewModel: Equatable, Sendable {
     public init(
         streams: [StreamAppListItem] = [],
         selectedStreamID: Int64? = nil,
+        playerTimelines: [Int64: AppPlayerTimelineSnapshot] = [:],
         addDraft: StreamAppAddDraft = StreamAppAddDraft(),
         addError: StreamAppValidationError? = nil,
         lastLifecycleMessage: String = "Add an HLS or Icecast/ICY stream to begin."
     ) {
         self.streams = streams
         self.selectedStreamID = selectedStreamID
+        self.playerTimelines = playerTimelines
         self.addDraft = addDraft
         self.addError = addError
         self.lastLifecycleMessage = lastLifecycleMessage
@@ -296,7 +332,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
         guard let selectedStreamID,
             let item = streams.first(where: { $0.id == selectedStreamID })
         else { return nil }
-        return StreamAppSelectedStream(item: item)
+        return StreamAppSelectedStream(item: item, timeline: playerTimelines[selectedStreamID])
     }
 
     public var emptyStateTitle: String {
@@ -395,6 +431,9 @@ public struct StreamAppViewModel: Equatable, Sendable {
     public mutating func applyRuntimeEvent(_ event: AppStreamRuntimeEvent) {
         for index in streams.indices where streams[index].id == event.streamID {
             streams[index].status = event.phase.appStatus
+        }
+        if let playerTimeline = event.result?.playerTimeline {
+            playerTimelines[event.streamID] = playerTimeline
         }
         lastLifecycleMessage = event.message
     }

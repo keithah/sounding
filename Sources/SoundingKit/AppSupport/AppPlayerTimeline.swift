@@ -93,6 +93,8 @@ public struct AppPlayerTimelineSnapshot: Equatable, Sendable {
     public var bufferedEndSeconds: Double?
     public var driftSeconds: Double
     public var decodedFrameCount: Int
+    public var rollingBuffer: RollingBufferSnapshot?
+    public var unavailableRangeMessage: String?
     public var lastMessage: String
 
     public init(
@@ -104,6 +106,8 @@ public struct AppPlayerTimelineSnapshot: Equatable, Sendable {
         bufferedEndSeconds: Double? = nil,
         driftSeconds: Double = 0,
         decodedFrameCount: Int = 0,
+        rollingBuffer: RollingBufferSnapshot? = nil,
+        unavailableRangeMessage: String? = nil,
         lastMessage: String = "Player idle."
     ) {
         self.streamID = streamID
@@ -114,6 +118,8 @@ public struct AppPlayerTimelineSnapshot: Equatable, Sendable {
         self.bufferedEndSeconds = bufferedEndSeconds
         self.driftSeconds = driftSeconds
         self.decodedFrameCount = decodedFrameCount
+        self.rollingBuffer = rollingBuffer
+        self.unavailableRangeMessage = unavailableRangeMessage.map(IngestRedaction.redact)
         self.lastMessage = IngestRedaction.redact(lastMessage)
     }
 }
@@ -148,6 +154,8 @@ public actor AppPlayerTimelineClock {
             bufferedEndSeconds: end,
             driftSeconds: liveEdge - position,
             decodedFrameCount: current.decodedFrameCount + frames.count,
+            rollingBuffer: current.rollingBuffer,
+            unavailableRangeMessage: current.unavailableRangeMessage,
             lastMessage: "Decoded \(frames.count) shared PCM frame(s)."
         )
     }
@@ -165,8 +173,69 @@ public actor AppPlayerTimelineClock {
             bufferedEndSeconds: current.bufferedEndSeconds,
             driftSeconds: current.liveEdgeSeconds - position,
             decodedFrameCount: current.decodedFrameCount,
+            rollingBuffer: current.rollingBuffer,
+            unavailableRangeMessage: current.unavailableRangeMessage,
             lastMessage: message
         )
+    }
+
+    public func updateRollingBuffer(_ snapshot: RollingBufferSnapshot) {
+        let range = snapshot.bufferedRange
+        current = AppPlayerTimelineSnapshot(
+            streamID: current.streamID ?? snapshot.streamID,
+            state: current.state,
+            positionSeconds: current.positionSeconds,
+            liveEdgeSeconds: max(current.liveEdgeSeconds, snapshot.liveEdgeSeconds),
+            bufferedStartSeconds: range?.startSeconds ?? current.bufferedStartSeconds,
+            bufferedEndSeconds: range?.endSeconds ?? current.bufferedEndSeconds,
+            driftSeconds: max(current.liveEdgeSeconds, snapshot.liveEdgeSeconds) - current.positionSeconds,
+            decodedFrameCount: current.decodedFrameCount,
+            rollingBuffer: snapshot,
+            unavailableRangeMessage: nil,
+            lastMessage: snapshot.lastMessage
+        )
+    }
+
+    public func applySeekResult(_ result: RollingBufferSeekResult) {
+        switch result {
+        case .available(let frame):
+            current = AppPlayerTimelineSnapshot(
+                streamID: frame.streamID,
+                state: .playing,
+                positionSeconds: frame.startSeconds,
+                liveEdgeSeconds: max(current.liveEdgeSeconds, frame.endSeconds),
+                bufferedStartSeconds: current.rollingBuffer?.bufferedRange?.startSeconds
+                    ?? current.bufferedStartSeconds,
+                bufferedEndSeconds: current.rollingBuffer?.bufferedRange?.endSeconds
+                    ?? current.bufferedEndSeconds,
+                driftSeconds: max(current.liveEdgeSeconds, frame.endSeconds) - frame.startSeconds,
+                decodedFrameCount: current.decodedFrameCount,
+                rollingBuffer: current.rollingBuffer,
+                unavailableRangeMessage: nil,
+                lastMessage: "Playback seeked to buffered frame \(frame.sequence)."
+            )
+        case .unavailable(let requestedSeconds, let range):
+            let rangeDescription: String
+            if let range {
+                rangeDescription = "available range \(range.startSeconds)-\(range.endSeconds)s"
+            } else {
+                rangeDescription = "no buffered audio available"
+            }
+            let message = "Requested \(requestedSeconds)s is unavailable (\(rangeDescription))."
+            current = AppPlayerTimelineSnapshot(
+                streamID: current.streamID,
+                state: current.state,
+                positionSeconds: current.positionSeconds,
+                liveEdgeSeconds: current.liveEdgeSeconds,
+                bufferedStartSeconds: range?.startSeconds ?? current.bufferedStartSeconds,
+                bufferedEndSeconds: range?.endSeconds ?? current.bufferedEndSeconds,
+                driftSeconds: current.driftSeconds,
+                decodedFrameCount: current.decodedFrameCount,
+                rollingBuffer: current.rollingBuffer,
+                unavailableRangeMessage: message,
+                lastMessage: message
+            )
+        }
     }
 
     public func snapshot() -> AppPlayerTimelineSnapshot { current }
@@ -305,22 +374,29 @@ public struct SinglePathPCMDecoder: AudioDecoding {
     private let upstream: any AudioDecoding
     private let player: any AppPCMPlaybackAdapting
     private let timeline: AppPlayerTimelineClock
+    private let rollingBuffer: RollingPCMBuffer?
 
     public init(
         streamID: Int64,
         upstream: any AudioDecoding,
         player: any AppPCMPlaybackAdapting,
-        timeline: AppPlayerTimelineClock
+        timeline: AppPlayerTimelineClock,
+        rollingBuffer: RollingPCMBuffer? = nil
     ) {
         self.streamID = streamID
         self.upstream = upstream
         self.player = player
         self.timeline = timeline
+        self.rollingBuffer = rollingBuffer
     }
 
     public func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
         let chunks = try await upstream.decodedChunks(for: request)
         let frames = chunks.map { SharedPCMFrame(streamID: streamID, chunk: $0) }
+        if let rollingBuffer {
+            let snapshot = await rollingBuffer.append(frames)
+            await timeline.updateRollingBuffer(snapshot)
+        }
         do {
             try await player.play(frames, timeline: timeline)
         } catch {

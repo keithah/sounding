@@ -130,7 +130,9 @@ struct ContentView: View {
                 startRuntime: { startRuntime(for: selected.item.id) },
                 pauseRuntime: { pauseRuntime() },
                 resumeRuntime: { resumeRuntime() },
-                stopRuntime: { stopRuntime() }
+                stopRuntime: { stopRuntime() },
+                seekToLive: { seekToLive() },
+                scrubBackward: { scrubBackward(seconds: 30) }
             )
         } else {
             ContentUnavailableView(
@@ -188,6 +190,16 @@ struct ContentView: View {
         Task { await runtime.stop() }
     }
 
+    private func seekToLive() {
+        guard let runtime else { return }
+        Task { await runtime.seekToLive() }
+    }
+
+    private func scrubBackward(seconds: Double) {
+        guard let runtime else { return }
+        Task { await runtime.scrubBackward(seconds: seconds) }
+    }
+
     private func observeRuntime() async {
         guard let runtime else { return }
         for await event in await runtime.events() {
@@ -207,14 +219,23 @@ struct ContentView: View {
             let registry = StreamRegistry(database: database)
             let queue = InferenceQueue()
             let cache = ModelCache()
+            let timeline = AppPlayerTimelineClock()
+            let rollingBuffer = RollingPCMBuffer(configuration: .appDefault())
             let runner = StreamIngestAppRuntimeRunner(
                 database: database,
                 decoder: AVFoundationAudioDecoder(),
                 transcriber: QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
                 diarizer: QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue),
-                player: AVFoundationAppPCMPlayerAdapter()
+                player: AVFoundationAppPCMPlayerAdapter(),
+                timeline: timeline,
+                rollingBuffer: rollingBuffer
             )
-            let runtime = AppStreamRuntimeService(registry: registry, ingester: runner)
+            let runtime = AppStreamRuntimeService(
+                registry: registry,
+                ingester: runner,
+                playbackTimeline: timeline,
+                rollingBuffer: rollingBuffer
+            )
             var viewModel = StreamAppViewModel()
             try viewModel.reload(from: registry)
             return (registry, runtime, viewModel, nil)
@@ -270,6 +291,8 @@ private struct StreamDetail: View {
     var pauseRuntime: () -> Void
     var resumeRuntime: () -> Void
     var stopRuntime: () -> Void
+    var seekToLive: () -> Void
+    var scrubBackward: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -319,8 +342,10 @@ private struct StreamDetail: View {
                             .disabled(!selected.canResumeRuntime)
                         Button("Stop", systemImage: "stop.fill", action: stopRuntime)
                             .disabled(!selected.canStopRuntime)
-                        Button("Live", systemImage: "dot.radiowaves.forward") {}
-                            .disabled(true)
+                        Button("-30s", systemImage: "gobackward.30", action: scrubBackward)
+                            .disabled(!selected.canScrubBufferedRange)
+                        Button("Live", systemImage: "dot.radiowaves.forward", action: seekToLive)
+                            .disabled(!selected.canSeekToLive)
                     }
                     .disabled(!selected.controlsEnabled)
 
@@ -328,8 +353,8 @@ private struct StreamDetail: View {
                         Text(selected.bufferedRangeTitle)
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Slider(value: .constant(1.0), in: 0...1)
-                            .disabled(true)
+                        Slider(value: .constant(selected.scrubPositionFraction), in: 0...1)
+                            .disabled(!selected.canScrubBufferedRange)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

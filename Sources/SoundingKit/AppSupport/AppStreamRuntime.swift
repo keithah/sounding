@@ -58,6 +58,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     private let now: StreamIngestPipeline.TimestampProvider
     private let player: (any AppPCMPlaybackAdapting)?
     private let timeline: AppPlayerTimelineClock
+    private let rollingBuffer: RollingPCMBuffer?
 
     public init(
         database: SoundingDatabase,
@@ -68,6 +69,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
         player: (any AppPCMPlaybackAdapting)? = nil,
         timeline: AppPlayerTimelineClock = AppPlayerTimelineClock(),
+        rollingBuffer: RollingPCMBuffer? = nil,
         now: @escaping StreamIngestPipeline.TimestampProvider = {
             ISO8601DateFormatter().string(from: Date())
         }
@@ -80,12 +82,17 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         self.fingerprintEnricher = fingerprintEnricher
         self.player = player
         self.timeline = timeline
+        self.rollingBuffer = rollingBuffer
         self.now = now
     }
 
     public func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
         let runtimeDecoder: any AudioDecoding
         if let player {
+            if let rollingBuffer {
+                await rollingBuffer.start(streamID: request.streamID)
+                await timeline.updateRollingBuffer(await rollingBuffer.snapshot())
+            }
             try await player.prepare(
                 streamID: request.streamID,
                 sourceDescription: request.sourceDescription,
@@ -95,7 +102,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 streamID: request.streamID,
                 upstream: decoder,
                 player: player,
-                timeline: timeline
+                timeline: timeline,
+                rollingBuffer: rollingBuffer
             )
         } else {
             runtimeDecoder = decoder
@@ -118,12 +126,16 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
             if let player {
                 await player.stop(timeline: timeline)
             }
+            let playerTimeline = await timeline.snapshot()
+            if let rollingBuffer {
+                await timeline.updateRollingBuffer(await rollingBuffer.cleanup())
+            }
             return AppStreamRuntimeResult(
                 streamID: result.streamID,
                 runID: result.runID,
                 processedChunks: result.processedChunks,
                 diagnosticCount: result.diagnostics.count,
-                playerTimeline: await timeline.snapshot()
+                playerTimeline: playerTimeline
             )
         } catch {
             if let player {
@@ -131,6 +143,9 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 await timeline.updatePlayerState(
                     .failed(message: String(describing: error)),
                     message: "Runtime playback failed: \(error).")
+            }
+            if let rollingBuffer {
+                await timeline.updateRollingBuffer(await rollingBuffer.cleanup())
             }
             throw error
         }
@@ -220,6 +235,8 @@ public protocol AppStreamRuntimeControlling: Sendable {
     func pause() async
     func resume() async
     func stop() async
+    func seekToLive() async
+    func scrubBackward(seconds: Double) async
     func snapshot() async -> AppStreamRuntimeEvent?
 }
 
@@ -228,6 +245,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     private let ingester: any AppStreamRuntimeIngesting
     private let retryPolicy: AppStreamRuntimeRetryPolicy
     private let retrySleep: @Sendable (Int) async throws -> Void
+    private let playbackTimeline: AppPlayerTimelineClock?
+    private let rollingBuffer: RollingPCMBuffer?
 
     private var currentTask: Task<Void, Never>?
     private var currentToken: UUID?
@@ -239,6 +258,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         registry: StreamRegistry,
         ingester: any AppStreamRuntimeIngesting,
         retryPolicy: AppStreamRuntimeRetryPolicy = AppStreamRuntimeRetryPolicy(),
+        playbackTimeline: AppPlayerTimelineClock? = nil,
+        rollingBuffer: RollingPCMBuffer? = nil,
         retrySleep: @escaping @Sendable (Int) async throws -> Void = { seconds in
             try await Task.sleep(nanoseconds: UInt64(max(0, seconds)) * 1_000_000_000)
         }
@@ -246,6 +267,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         self.registry = registry
         self.ingester = ingester
         self.retryPolicy = retryPolicy
+        self.playbackTimeline = playbackTimeline
+        self.rollingBuffer = rollingBuffer
         self.retrySleep = retrySleep
     }
 
@@ -427,6 +450,42 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                 streamID: streamID,
                 phase: .stopped,
                 message: "Stopped stream \(streamID)."
+            )
+        )
+    }
+
+    public func seekToLive() async {
+        guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else { return }
+        let result = await rollingBuffer.seekToLive()
+        await playbackTimeline.applySeekResult(result)
+        publish(
+            AppStreamRuntimeEvent(
+                streamID: streamID,
+                phase: latestEvent?.phase ?? .running,
+                message: (await playbackTimeline.snapshot()).lastMessage,
+                result: AppStreamRuntimeResult(
+                    streamID: streamID,
+                    playerTimeline: await playbackTimeline.snapshot()
+                )
+            )
+        )
+    }
+
+    public func scrubBackward(seconds: Double) async {
+        guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else { return }
+        let timeline = await playbackTimeline.snapshot()
+        let requested = max(0, timeline.liveEdgeSeconds - max(0, seconds))
+        let result = await rollingBuffer.seek(to: requested)
+        await playbackTimeline.applySeekResult(result)
+        publish(
+            AppStreamRuntimeEvent(
+                streamID: streamID,
+                phase: latestEvent?.phase ?? .running,
+                message: (await playbackTimeline.snapshot()).lastMessage,
+                result: AppStreamRuntimeResult(
+                    streamID: streamID,
+                    playerTimeline: await playbackTimeline.snapshot()
+                )
             )
         )
     }
