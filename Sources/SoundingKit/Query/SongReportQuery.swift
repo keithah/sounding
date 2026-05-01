@@ -190,9 +190,7 @@ public struct SongReportQuery {
                 var arguments = StatementArguments()
 
                 if let stream = normalized.stream {
-                    clauses.append(
-                        "(streams.id = ? OR streams.stream_type = ? OR streams.source = ?)")
-                    arguments += [Int64(stream) ?? -1, stream, stream]
+                    Self.appendStreamFilterClause(stream, clauses: &clauses, arguments: &arguments)
                 }
                 if let startSeconds = normalized.startSeconds {
                     clauses.append("song_plays.end_seconds >= ?")
@@ -293,6 +291,16 @@ public struct SongReportQuery {
         }
         return Filter(
             stream: stream, startSeconds: filter.startSeconds, endSeconds: filter.endSeconds)
+    }
+
+    static func appendStreamFilterClause(
+        _ stream: String,
+        clauses: inout [String],
+        arguments: inout StatementArguments
+    ) {
+        clauses.append(
+            "(streams.id = ? OR streams.name = ? OR streams.stream_type = ? OR streams.source = ?)")
+        arguments += [Int64(stream) ?? -1, stream, stream, stream]
     }
 
     private func repeatGroupKey(for song: SongDisplay) -> RepeatGroupKey {

@@ -21,7 +21,9 @@ struct ReportCommand: AsyncParsableCommand {
         @Flag(name: .long, help: "Emit song play results as stable JSON.")
         var json = false
 
-        @Option(name: .long, help: "Filter by stream id, stream type, or exact stream source.")
+        @Option(
+            name: .long,
+            help: "Filter by stream id, managed stream name, stream type, or exact stream source.")
         var stream: String?
 
         @Option(name: .long, help: "Include plays whose end time is at or after this second.")
@@ -106,13 +108,17 @@ struct ReportCommand: AsyncParsableCommand {
         @Flag(name: .long, help: "Emit repeated song results as stable JSON.")
         var json = false
 
-        @Option(name: .long, help: "Filter by stream id, stream type, or exact stream source.")
+        @Option(
+            name: .long,
+            help: "Filter by stream id, managed stream name, stream type, or exact stream source.")
         var stream: String?
 
-        @Option(name: .long, help: "Include repeat plays whose end time is at or after this second.")
+        @Option(
+            name: .long, help: "Include repeat plays whose end time is at or after this second.")
         var startSeconds: Double?
 
-        @Option(name: .long, help: "Include repeat plays whose start time is at or before this second.")
+        @Option(
+            name: .long, help: "Include repeat plays whose start time is at or before this second.")
         var endSeconds: Double?
 
         mutating func validate() throws {
@@ -187,7 +193,9 @@ struct ReportCommand: AsyncParsableCommand {
         @Flag(name: .long, help: "Emit ad event results as stable JSON.")
         var json = false
 
-        @Option(name: .long, help: "Filter by stream id, stream type, or exact stream source.")
+        @Option(
+            name: .long,
+            help: "Filter by stream id, managed stream name, stream type, or exact stream source.")
         var stream: String?
 
         @Option(name: .long, help: "Include ad events whose PTS is at or after this second.")

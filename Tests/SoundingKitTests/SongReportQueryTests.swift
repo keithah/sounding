@@ -85,6 +85,124 @@ final class SongReportQueryTests: XCTestCase {
             [fixture.knownPlayID, fixture.unknownPlayID])
     }
 
+    func testFiltersByManagedStreamNameAndRemovedStreamsRemainReportableById() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let managed = try registry.add(
+            name: "Managed Main",
+            streamType: "hls",
+            source: "https://example.test/managed.m3u8?token=fixture-secret",
+            createdAt: "2026-05-01T15:00:00Z"
+        )
+        let other = try registry.add(
+            name: "Managed Other",
+            streamType: "icy",
+            source: "https://example.test/other",
+            createdAt: "2026-05-01T15:30:00Z"
+        )
+        let writer = IngestPersistence(database: temporary.database)
+        let managedRunID = try writer.createRun(
+            streamID: managed.id,
+            startedAt: "2026-05-01T15:00:01Z",
+            status: .running
+        )
+        let managedChunk0 = try writer.createChunk(
+            runID: managedRunID,
+            sequence: 0,
+            segmentURI: "managed-000.ts",
+            startedAt: "2026-05-01T15:00:02Z",
+            endedAt: "2026-05-01T15:00:12Z"
+        )
+        let managedChunk1 = try writer.createChunk(
+            runID: managedRunID,
+            sequence: 1,
+            segmentURI: "managed-001.ts",
+            startedAt: "2026-05-01T15:00:12Z",
+            endedAt: "2026-05-01T15:00:22Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: managedRunID,
+                chunkID: managedChunk0,
+                songPlays: [
+                    SongPlayDraft(
+                        song: repeatSong,
+                        startSeconds: 0,
+                        endSeconds: 10,
+                        confidence: 0.91,
+                        source: "local_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T15:00:03Z"
+            )
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: managedRunID,
+                chunkID: managedChunk1,
+                songPlays: [
+                    SongPlayDraft(
+                        song: repeatSong,
+                        startSeconds: 20,
+                        endSeconds: 30,
+                        confidence: 0.89,
+                        source: "local_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T15:00:13Z"
+            )
+        )
+
+        let otherRunID = try writer.createRun(
+            streamID: other.id,
+            startedAt: "2026-05-01T15:30:01Z",
+            status: .running
+        )
+        let otherChunk = try writer.createChunk(
+            runID: otherRunID,
+            sequence: 0,
+            segmentURI: "other-000",
+            startedAt: "2026-05-01T15:30:02Z",
+            endedAt: "2026-05-01T15:30:12Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: otherRunID,
+                chunkID: otherChunk,
+                songPlays: [
+                    SongPlayDraft(
+                        song: otherSong,
+                        startSeconds: 0,
+                        endSeconds: 9,
+                        confidence: 0.80,
+                        source: "local_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T15:30:03Z"
+            )
+        )
+
+        let query = SongReportQuery(database: temporary.database)
+        let namedPlays = try query.plays(filter: .init(stream: "Managed Main"))
+        XCTAssertEqual(namedPlays.map(\.identity.streamID), [managed.id, managed.id])
+
+        let namedRepeats = try query.repeats(filter: .init(stream: "Managed Main"))
+        XCTAssertEqual(namedRepeats.count, 1)
+        XCTAssertEqual(namedRepeats.first?.repeatCount, 2)
+        XCTAssertEqual(
+            namedRepeats.first?.plays.map(\.identity.streamID), [managed.id, managed.id])
+
+        _ = try registry.remove(id: managed.id, removedAt: "2026-05-01T16:00:00Z")
+
+        let removedById = try query.plays(filter: .init(stream: String(managed.id)))
+        XCTAssertEqual(removedById.map(\.identity.streamID), [managed.id, managed.id])
+        XCTAssertEqual(
+            try query.repeats(filter: .init(stream: String(managed.id))).first?.repeatCount, 2)
+        XCTAssertEqual(
+            try query.plays(filter: .init(stream: String(other.id))).map(\.identity.streamID),
+            [other.id])
+    }
+
     func testEmptyDatabaseAndNoMatchReturnEmptyResults() throws {
         let temporary = try TemporarySoundingDatabase()
         let query = SongReportQuery(database: temporary.database)

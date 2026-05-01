@@ -99,9 +99,8 @@ public struct AdReportQuery {
                 var arguments = StatementArguments()
 
                 if let stream = normalized.stream {
-                    clauses.append(
-                        "(streams.id = ? OR streams.stream_type = ? OR streams.source = ?)")
-                    arguments += [Int64(stream) ?? -1, stream, stream]
+                    SongReportQuery.appendStreamFilterClause(
+                        stream, clauses: &clauses, arguments: &arguments)
                 }
                 if let startSeconds = normalized.startSeconds {
                     clauses.append("ad_events.pts IS NOT NULL")

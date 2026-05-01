@@ -65,6 +65,39 @@ final class ReportQueryTests: XCTestCase {
         XCTAssertEqual(allStreamsWindow.events.map(\.pts), [10, 5])
     }
 
+    func testAdFiltersByManagedStreamNameAndRemovedStreamsRemainReportableById() throws {
+        let fixture = try makeAdFixture()
+        try fixture.temporary.database.write { db in
+            try db.execute(
+                sql: "UPDATE streams SET name = ? WHERE id = ?",
+                arguments: ["Managed Ads", fixture.hlsStreamID]
+            )
+            try db.execute(
+                sql: "UPDATE streams SET name = ? WHERE id = ?",
+                arguments: ["Other Ads", fixture.icyStreamID]
+            )
+        }
+
+        let named = try fixture.query.events(filter: .init(stream: "Managed Ads"))
+        XCTAssertEqual(
+            named.events.map(\.identity.streamID),
+            [fixture.hlsStreamID, fixture.hlsStreamID, fixture.hlsStreamID])
+        XCTAssertEqual(named.summary, .init(unknown: 1, adStart: 1, adEnd: 1))
+
+        _ = try StreamRegistry(database: fixture.temporary.database).remove(
+            id: fixture.hlsStreamID,
+            removedAt: "2026-05-01T16:00:00Z"
+        )
+
+        let removedById = try fixture.query.events(
+            filter: .init(stream: String(fixture.hlsStreamID)))
+        XCTAssertEqual(
+            removedById.events.map(\.identity.streamID),
+            [fixture.hlsStreamID, fixture.hlsStreamID, fixture.hlsStreamID]
+        )
+        XCTAssertEqual(removedById.summary, .init(unknown: 1, adStart: 1, adEnd: 1))
+    }
+
     func testNullPTSIsIncludedWithoutTimeFilterAndExcludedWithEitherTimeFilter() throws {
         let fixture = try makeAdFixture()
 
@@ -177,7 +210,8 @@ final class ReportQueryTests: XCTestCase {
         XCTAssertTrue(human.contains("song=Repeat Artist — Echo Song"), human)
         XCTAssertTrue(human.contains("window=00:00.000-00:30.000"), human)
         XCTAssertTrue(human.contains("total_duration=00:20.000"), human)
-        XCTAssertTrue(human.contains("stream=101(hls source=https://example.test/repeats.m3u8)"), human)
+        XCTAssertTrue(
+            human.contains("stream=101(hls source=https://example.test/repeats.m3u8)"), human)
         XCTAssertTrue(human.contains("run=201 play=301"), human)
         XCTAssertTrue(human.contains("chunks=401(seq=0)-402(seq=1)"), human)
         XCTAssertFalse(human.contains("fixture-secret"), human)
@@ -189,12 +223,14 @@ final class ReportQueryTests: XCTestCase {
         XCTAssertTrue(json.hasSuffix("\n"), json)
         XCTAssertTrue(json.contains("\"displayLabel\":\"Repeat Artist — Echo Song\""), json)
         XCTAssertTrue(json.contains("\"repeatCount\":2"), json)
-        XCTAssertTrue(json.contains("\"streamSource\":\"https:\\/\\/example.test\\/repeats.m3u8\""), json)
+        XCTAssertTrue(
+            json.contains("\"streamSource\":\"https:\\/\\/example.test\\/repeats.m3u8\""), json)
         XCTAssertFalse(json.contains("fixture-secret"), json)
         XCTAssertFalse(json.contains("token="), json)
         XCTAssertFalse(json.contains("password="), json)
 
-        let decoded = try JSONDecoder().decode(ReportOutput.RepeatsPayload.self, from: Data(json.utf8))
+        let decoded = try JSONDecoder().decode(
+            ReportOutput.RepeatsPayload.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.results.first?.repeatCount, 2)
         XCTAssertEqual(decoded.results.first?.plays.count, 2)
     }
@@ -209,7 +245,9 @@ final class ReportQueryTests: XCTestCase {
         XCTAssertTrue(human.contains("classification=UNKNOWN"), human)
         XCTAssertTrue(human.contains("classification=AD_START"), human)
         XCTAssertTrue(human.contains("classification=AD_END"), human)
-        XCTAssertTrue(human.contains("stream=\(fixture.hlsStreamID)(hls source=https://example.test/live.m3u8)"), human)
+        XCTAssertTrue(
+            human.contains(
+                "stream=\(fixture.hlsStreamID)(hls source=https://example.test/live.m3u8)"), human)
         XCTAssertTrue(human.contains("run=\(fixture.hlsRunID)"), human)
         XCTAssertTrue(human.contains("chunk=\(fixture.hlsSecondChunkID)(seq=1)"), human)
         XCTAssertTrue(human.contains("pts=unknown"), human)
@@ -223,7 +261,8 @@ final class ReportQueryTests: XCTestCase {
         XCTAssertTrue(json.hasSuffix("\n"), json)
         XCTAssertTrue(json.contains("\"summary\":{\"adEnd\":1,\"adStart\":2,\"unknown\":1}"), json)
         XCTAssertTrue(json.contains("\"classification\":\"AD_START\""), json)
-        XCTAssertTrue(json.contains("\"streamSource\":\"https:\\/\\/example.test\\/live.m3u8\""), json)
+        XCTAssertTrue(
+            json.contains("\"streamSource\":\"https:\\/\\/example.test\\/live.m3u8\""), json)
         XCTAssertFalse(json.contains("fixture-secret"), json)
         XCTAssertFalse(json.contains("token="), json)
         XCTAssertFalse(json.contains("password="), json)
