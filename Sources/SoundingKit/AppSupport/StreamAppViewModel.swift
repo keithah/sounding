@@ -204,6 +204,23 @@ public struct StreamAppListItem: Equatable, Identifiable, Sendable {
     }
 }
 
+public enum StreamAppViewModelTimelineError: Error, Equatable, Sendable, CustomStringConvertible {
+    case noSelectedStream
+    case selectedStreamUnavailable
+    case unknownSpeakerLabel(String)
+
+    public var description: String {
+        switch self {
+        case .noSelectedStream:
+            return "Select a stream before refreshing its timeline."
+        case .selectedStreamUnavailable:
+            return "The selected stream is no longer available."
+        case .unknownSpeakerLabel:
+            return "Choose an existing speaker before editing its display label."
+        }
+    }
+}
+
 public struct StreamAppSelectedStream: Equatable, Sendable {
     public var item: StreamAppListItem
     public var playerStateTitle: String
@@ -217,8 +234,26 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
     public var canSeekToLive: Bool
     public var canScrubBufferedRange: Bool
     public var scrubPositionFraction: Double
+    public var recentTranscriptParagraphs: [StreamAppTranscriptParagraph]
+    public var speakerDisplays: [StreamAppSpeakerDisplay]
+    public var currentMetadata: StreamAppMetadataItem?
+    public var recentMetadata: [StreamAppMetadataItem]
+    public var timelineItems: [StreamAppTimelineItem]
+    public var timelineDiagnostics: StreamAppTimelineDiagnostics?
+    public var timelineFreshnessMessage: String
+    public var timelineLagMessage: String?
+    public var bufferedSeekUnavailableMessage: String?
+    public var hasSeekableTimelineItems: Bool
+    public var timelineRefreshErrorMessage: String?
+    public var speakerEditErrorMessage: String?
 
-    public init(item: StreamAppListItem, timeline: AppPlayerTimelineSnapshot? = nil) {
+    public init(
+        item: StreamAppListItem,
+        timeline: AppPlayerTimelineSnapshot? = nil,
+        snapshot: StreamAppTimelineSnapshot? = nil,
+        timelineRefreshErrorMessage: String? = nil,
+        speakerEditErrorMessage: String? = nil
+    ) {
         self.item = item
         switch item.status {
         case .running:
@@ -301,6 +336,25 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             canSeekToLive = false
             canScrubBufferedRange = false
         }
+
+        recentTranscriptParagraphs = snapshot?.transcriptParagraphs ?? []
+        speakerDisplays = snapshot?.speakers ?? []
+        currentMetadata = snapshot?.currentMetadata
+        recentMetadata = snapshot?.recentMetadata ?? []
+        timelineItems = snapshot?.timelineItems ?? []
+        timelineDiagnostics = snapshot?.diagnostics
+        timelineFreshnessMessage = snapshot.map { "Timeline refreshed \($0.diagnostics.refreshedAt)." }
+            ?? "Timeline waiting for first refresh."
+        if let lagSeconds = snapshot?.diagnostics.lagSeconds {
+            timelineLagMessage = String(format: "Transcript lag %.0fs.", lagSeconds)
+        } else {
+            timelineLagMessage = nil
+        }
+        bufferedSeekUnavailableMessage = snapshot?.diagnostics.bufferedSeekUnavailableMessage
+            ?? timeline?.unavailableRangeMessage
+        hasSeekableTimelineItems = timelineItems.contains { $0.isSeekable }
+        self.timelineRefreshErrorMessage = timelineRefreshErrorMessage.map(IngestRedaction.redact)
+        self.speakerEditErrorMessage = speakerEditErrorMessage.map(IngestRedaction.redact)
     }
 }
 
@@ -308,6 +362,9 @@ public struct StreamAppViewModel: Equatable, Sendable {
     public private(set) var streams: [StreamAppListItem]
     public var selectedStreamID: Int64?
     public private(set) var playerTimelines: [Int64: AppPlayerTimelineSnapshot]
+    public private(set) var timelineSnapshots: [Int64: StreamAppTimelineSnapshot]
+    public private(set) var timelineRefreshErrors: [Int64: String]
+    public private(set) var speakerEditErrors: [Int64: String]
     public var addDraft: StreamAppAddDraft
     public private(set) var addError: StreamAppValidationError?
     public private(set) var lastLifecycleMessage: String
@@ -316,6 +373,9 @@ public struct StreamAppViewModel: Equatable, Sendable {
         streams: [StreamAppListItem] = [],
         selectedStreamID: Int64? = nil,
         playerTimelines: [Int64: AppPlayerTimelineSnapshot] = [:],
+        timelineSnapshots: [Int64: StreamAppTimelineSnapshot] = [:],
+        timelineRefreshErrors: [Int64: String] = [:],
+        speakerEditErrors: [Int64: String] = [:],
         addDraft: StreamAppAddDraft = StreamAppAddDraft(),
         addError: StreamAppValidationError? = nil,
         lastLifecycleMessage: String = "Add an HLS or Icecast/ICY stream to begin."
@@ -323,6 +383,9 @@ public struct StreamAppViewModel: Equatable, Sendable {
         self.streams = streams
         self.selectedStreamID = selectedStreamID
         self.playerTimelines = playerTimelines
+        self.timelineSnapshots = timelineSnapshots
+        self.timelineRefreshErrors = timelineRefreshErrors.mapValues(IngestRedaction.redact)
+        self.speakerEditErrors = speakerEditErrors.mapValues(IngestRedaction.redact)
         self.addDraft = addDraft
         self.addError = addError
         self.lastLifecycleMessage = lastLifecycleMessage
@@ -332,7 +395,13 @@ public struct StreamAppViewModel: Equatable, Sendable {
         guard let selectedStreamID,
             let item = streams.first(where: { $0.id == selectedStreamID })
         else { return nil }
-        return StreamAppSelectedStream(item: item, timeline: playerTimelines[selectedStreamID])
+        return StreamAppSelectedStream(
+            item: item,
+            timeline: playerTimelines[selectedStreamID],
+            snapshot: timelineSnapshots[selectedStreamID],
+            timelineRefreshErrorMessage: timelineRefreshErrors[selectedStreamID],
+            speakerEditErrorMessage: speakerEditErrors[selectedStreamID]
+        )
     }
 
     public var emptyStateTitle: String {
@@ -364,6 +433,11 @@ public struct StreamAppViewModel: Equatable, Sendable {
         } else if selectedStreamID == nil {
             selectedStreamID = streams.first?.id
         }
+        let activeIDs = Set(streams.map(\.id))
+        playerTimelines = playerTimelines.filter { activeIDs.contains($0.key) }
+        timelineSnapshots = timelineSnapshots.filter { activeIDs.contains($0.key) }
+        timelineRefreshErrors = timelineRefreshErrors.filter { activeIDs.contains($0.key) }
+        speakerEditErrors = speakerEditErrors.filter { activeIDs.contains($0.key) }
         lastLifecycleMessage =
             streams.isEmpty
             ? "Add an HLS or Icecast/ICY stream to begin."
@@ -438,6 +512,88 @@ public struct StreamAppViewModel: Equatable, Sendable {
         lastLifecycleMessage = event.message
     }
 
+    @discardableResult
+    public mutating func refreshSelectedTimeline(
+        using store: StreamAppTimelineStore,
+        refreshedAt: String? = nil
+    ) throws -> StreamAppTimelineSnapshot {
+        let streamID = try requireSelectedStreamID()
+        guard streams.contains(where: { $0.id == streamID }) else {
+            let error = StreamAppViewModelTimelineError.selectedStreamUnavailable
+            timelineRefreshErrors[streamID] = error.description
+            throw error
+        }
+
+        do {
+            let snapshot = try store.snapshot(
+                request: StreamAppTimelineRequest(
+                    streamID: streamID,
+                    player: playerTimelines[streamID],
+                    refreshedAt: refreshedAt
+                )
+            )
+            guard streams.contains(where: { $0.id == streamID }) else {
+                let error = StreamAppViewModelTimelineError.selectedStreamUnavailable
+                timelineRefreshErrors[streamID] = error.description
+                throw error
+            }
+            timelineSnapshots[streamID] = snapshot
+            timelineRefreshErrors[streamID] = nil
+            lastLifecycleMessage = "Timeline refreshed for selected stream."
+            return snapshot
+        } catch {
+            timelineRefreshErrors[streamID] = Self.redactedTimelineMessage(error)
+            lastLifecycleMessage = timelineRefreshErrors[streamID] ?? "Timeline refresh failed."
+            throw error
+        }
+    }
+
+    public mutating func updateSelectedSpeakerDisplay(
+        rawLabel: String,
+        displayLabel: String,
+        colorToken: String? = nil,
+        using store: StreamAppTimelineStore,
+        refreshedAt: String? = nil
+    ) throws {
+        let streamID = try requireSelectedStreamID()
+        guard streams.contains(where: { $0.id == streamID }) else {
+            let error = StreamAppViewModelTimelineError.selectedStreamUnavailable
+            speakerEditErrors[streamID] = error.description
+            throw error
+        }
+        if let snapshot = timelineSnapshots[streamID] {
+            let trimmedRawLabel = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard snapshot.speakers.contains(where: { $0.rawLabel == trimmedRawLabel }) else {
+                let error = StreamAppViewModelTimelineError.unknownSpeakerLabel(trimmedRawLabel)
+                speakerEditErrors[streamID] = error.description
+                throw error
+            }
+        }
+
+        do {
+            try store.updateSpeakerDisplay(
+                streamID: streamID,
+                rawLabel: rawLabel,
+                displayLabel: displayLabel,
+                colorToken: colorToken
+            )
+            speakerEditErrors[streamID] = nil
+            try refreshSelectedTimeline(using: store, refreshedAt: refreshedAt)
+            lastLifecycleMessage = "Updated speaker display for selected stream."
+        } catch {
+            speakerEditErrors[streamID] = Self.redactedTimelineMessage(error)
+            lastLifecycleMessage = speakerEditErrors[streamID] ?? "Speaker display update failed."
+            throw error
+        }
+    }
+
+    private func requireSelectedStreamID() throws -> Int64 {
+        guard let selectedStreamID else {
+            throw StreamAppViewModelTimelineError.noSelectedStream
+        }
+        return selectedStreamID
+    }
+
     public static func validateRegistryStreamType(_ streamType: String) throws -> StreamAppTransport
     {
         if let transport = StreamAppTransport.fromRegistryStreamType(streamType) {
@@ -447,6 +603,10 @@ public struct StreamAppViewModel: Equatable, Sendable {
             streamType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "unknown" : streamType
         )
+    }
+
+    private static func redactedTimelineMessage(_ error: Error) -> String {
+        IngestRedaction.redact(String(describing: error))
     }
 
     private static func mapRegistryError(_ error: StreamRegistryError) -> StreamAppValidationError {
