@@ -1,0 +1,279 @@
+import Foundation
+import GRDB
+import XCTest
+@testable import SoundingKit
+
+final class StreamIngestPipelineTests: XCTestCase {
+    func testMaxChunksOnePersistsExactlyOneChunkWithTranscriptSpeakerAndMarkerRows() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0), Self.chunk(sequence: 1)]),
+            transcriber: FakeTranscriber(segmentsBySequence: [0: [Self.segment(text: "hello world")], 1: [Self.segment(text: "ignored")]]),
+            diarizer: FakeDiarizer(turnsBySequence: [0: [SpeakerTurnDraft(speakerLabel: "speaker-1", startSeconds: 0, endSeconds: 1.2)]])
+        )
+
+        let result = try await pipeline.run(
+            source: "https://user:pass@example.test/live.m3u8?token=secret#frag",
+            streamType: .hls,
+            maxChunks: 1
+        )
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let counts = try temporary.database.read { db in
+            try [
+                "streams": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM streams"),
+                "completed_runs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_runs WHERE status = 'completed'"),
+                "chunks": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_chunks"),
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "words": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_words"),
+                "turns": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM speaker_turns"),
+                "ads": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events")
+            ]
+        }
+        XCTAssertEqual(counts, [
+            "streams": 1,
+            "completed_runs": 1,
+            "chunks": 1,
+            "segments": 1,
+            "words": 2,
+            "turns": 1,
+            "ads": 1
+        ])
+
+        let storedSources = try temporary.database.read { db in
+            try [
+                "stream": String.fetchOne(db, sql: "SELECT source FROM streams"),
+                "chunk": String.fetchOne(db, sql: "SELECT segment_uri FROM ingest_chunks"),
+                "adRaw": String.fetchOne(db, sql: "SELECT raw_base64 FROM ad_events")
+            ]
+        }
+        XCTAssertEqual(storedSources["stream"] as? String, "https://example.test/live.m3u8")
+        XCTAssertEqual(storedSources["chunk"] as? String, "https://example.test/segment-000.ts")
+        XCTAssertEqual(storedSources["adRaw"] as? String, "[redacted]")
+    }
+
+    func testTranscriberAndDiarizerFailuresPersistPhaseDiagnosticsAndCompleteRun() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeTranscriber(errorBySequence: [0: FakeIngestError("transcribe token=secret")]),
+            diarizer: FakeDiarizer(errorBySequence: [0: FakeIngestError("diarize password=secret")])
+        )
+
+        let result = try await pipeline.run(source: "https://example.test/live", streamType: .icecast, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        XCTAssertEqual(result.diagnostics.map(\.phase), [.transcribe, .diarize])
+        let rows = try temporary.database.read { db in
+            try Row.fetchAll(db, sql: "SELECT phase, severity, reason, context_json FROM ingest_diagnostics ORDER BY id")
+        }
+        XCTAssertEqual(rows.map { $0["phase"] as String }, ["transcribe", "diarize"])
+        XCTAssertEqual(rows.map { $0["severity"] as String }, ["error", "error"])
+        XCTAssertEqual(rows.map { $0["reason"] as String }, ["transcription-failed", "diarization-failed"])
+        for row in rows {
+            let context: String = row["context_json"]
+            XCTAssertFalse(context.contains("secret"), context)
+        }
+        let completed = try temporary.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_runs WHERE status = 'completed'")
+        }
+        XCTAssertEqual(completed, 1)
+    }
+
+    func testEmptyChunksAreDiagnosedWithoutTranscriptRows() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0, audio: Data())]),
+            transcriber: FakeTranscriber(),
+            diarizer: FakeDiarizer()
+        )
+
+        let result = try await pipeline.run(source: "https://example.test/live", streamType: .icecast, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        XCTAssertEqual(result.diagnostics.first?.phase, .decode)
+        XCTAssertEqual(result.diagnostics.first?.reason, "empty-audio-chunk")
+        let counts = try temporary.database.read { db in
+            try [
+                "chunks": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_chunks"),
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "diagnostics": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_diagnostics WHERE phase = 'decode' AND reason = 'empty-audio-chunk'")
+            ]
+        }
+        XCTAssertEqual(counts, ["chunks": 1, "segments": 0, "diagnostics": 1])
+    }
+
+    func testNonMonotonicWordTimestampsAreDiagnosedAndInvalidWordsAreRejected() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let badSegment = TranscriptSegmentDraft(
+            sequence: 0,
+            speakerLabel: "speaker-1",
+            startSeconds: 0,
+            endSeconds: 2,
+            text: "hello rewind world",
+            words: [
+                TranscriptWordDraft(sequence: 0, speakerLabel: "speaker-1", startSeconds: 0.0, endSeconds: 0.4, text: "hello"),
+                TranscriptWordDraft(sequence: 1, speakerLabel: "speaker-1", startSeconds: 0.8, endSeconds: 1.0, text: "rewind"),
+                TranscriptWordDraft(sequence: 2, speakerLabel: "speaker-1", startSeconds: 0.7, endSeconds: 1.2, text: "world")
+            ]
+        )
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeTranscriber(segmentsBySequence: [0: [badSegment]]),
+            diarizer: FakeDiarizer()
+        )
+
+        let result = try await pipeline.run(source: "https://example.test/live", streamType: .icecast, maxChunks: 1)
+
+        XCTAssertEqual(result.diagnostics.map(\.reason), ["non-monotonic-word-timestamps"])
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "words": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_words"),
+                "diagnostics": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_diagnostics WHERE reason = 'non-monotonic-word-timestamps'")
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 1, "words": 2, "diagnostics": 1])
+    }
+
+    func testDecoderFailurePersistsDecodeDiagnosticAndFailsRunWithRedactedContext() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(error: FakeIngestError("decoder failed for https://user:pass@example.test/live?token=secret")),
+            transcriber: FakeTranscriber(),
+            diarizer: FakeDiarizer()
+        )
+
+        do {
+            _ = try await pipeline.run(source: "https://user:pass@example.test/live?token=secret", streamType: .hls, maxChunks: 1)
+            XCTFail("Expected decoder failure")
+        } catch let error as FakeIngestError {
+            XCTAssertTrue(error.description.contains("decoder failed"))
+        } catch {
+            XCTFail("Expected FakeIngestError, got \(error)")
+        }
+
+        let evidence = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT ingest_runs.status AS status, ingest_diagnostics.phase AS phase,
+                       ingest_diagnostics.reason AS reason, ingest_diagnostics.context_json AS context
+                FROM ingest_runs
+                JOIN ingest_diagnostics ON ingest_diagnostics.run_id = ingest_runs.id
+                """)
+        }
+        XCTAssertEqual(evidence?["status"] as String?, "failed")
+        XCTAssertEqual(evidence?["phase"] as String?, "decode")
+        XCTAssertEqual(evidence?["reason"] as String?, "decoder-failed")
+        let context: String? = evidence?["context"]
+        XCTAssertFalse(context?.contains("user:pass") ?? true, context ?? "nil")
+        XCTAssertFalse(context?.contains("token=secret") ?? true, context ?? "nil")
+    }
+
+    private static func chunk(sequence: Int, audio: Data = Data([0x01, 0x02, 0x03])) -> DecodedAudioChunk {
+        DecodedAudioChunk(
+            sequence: sequence,
+            segmentURI: "https://user:pass@example.test/segment-\(String(format: "%03d", sequence)).ts?token=secret#frag",
+            audio: audio,
+            startSeconds: Double(sequence) * 2.0,
+            endSeconds: Double(sequence + 1) * 2.0,
+            startedAt: "2026-04-30T12:00:0\(sequence)Z",
+            endedAt: "2026-04-30T12:00:0\(sequence + 1)Z",
+            adMarkers: [
+                AdMarker(
+                    type: "SCTE35",
+                    classification: .adStart,
+                    source: "hls_segment",
+                    pts: 1.0,
+                    segment: "https://user:pass@example.test/segment-\(sequence).ts?token=secret",
+                    rawBase64: "AAAAAQ==",
+                    timestamp: "2026-04-30T12:00:0\(sequence)Z"
+                )
+            ]
+        )
+    }
+
+    private static func segment(text: String) -> TranscriptSegmentDraft {
+        TranscriptSegmentDraft(
+            sequence: 0,
+            speakerLabel: "speaker-1",
+            startSeconds: 0,
+            endSeconds: 1.2,
+            text: text,
+            confidence: 0.9,
+            words: [
+                TranscriptWordDraft(sequence: 0, speakerLabel: "speaker-1", startSeconds: 0.0, endSeconds: 0.5, text: "hello", confidence: 0.9),
+                TranscriptWordDraft(sequence: 1, speakerLabel: "speaker-1", startSeconds: 0.6, endSeconds: 1.2, text: "world", confidence: 0.9)
+            ]
+        )
+    }
+}
+
+private struct FakeDecoder: AudioDecoding {
+    var chunks: [DecodedAudioChunk]
+    var error: Error?
+
+    init(chunks: [DecodedAudioChunk] = [], error: Error? = nil) {
+        self.chunks = chunks
+        self.error = error
+    }
+
+    func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+        if let error {
+            throw error
+        }
+        return chunks
+    }
+}
+
+private struct FakeTranscriber: MLTranscription {
+    var segmentsBySequence: [Int: [TranscriptSegmentDraft]]
+    var errorBySequence: [Int: Error]
+
+    init(
+        segmentsBySequence: [Int: [TranscriptSegmentDraft]] = [:],
+        errorBySequence: [Int: Error] = [:]
+    ) {
+        self.segmentsBySequence = segmentsBySequence
+        self.errorBySequence = errorBySequence
+    }
+
+    func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
+        if let error = errorBySequence[chunk.sequence] {
+            throw error
+        }
+        return segmentsBySequence[chunk.sequence] ?? []
+    }
+}
+
+private struct FakeDiarizer: SpeakerDiarization {
+    var turnsBySequence: [Int: [SpeakerTurnDraft]]
+    var errorBySequence: [Int: Error]
+
+    init(
+        turnsBySequence: [Int: [SpeakerTurnDraft]] = [:],
+        errorBySequence: [Int: Error] = [:]
+    ) {
+        self.turnsBySequence = turnsBySequence
+        self.errorBySequence = errorBySequence
+    }
+
+    func diarize(_ chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft]) async throws -> [SpeakerTurnDraft] {
+        if let error = errorBySequence[chunk.sequence] {
+            throw error
+        }
+        return turnsBySequence[chunk.sequence] ?? []
+    }
+}
+
+private struct FakeIngestError: Error, CustomStringConvertible {
+    var description: String
+
+    init(_ description: String) {
+        self.description = description
+    }
+}
