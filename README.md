@@ -15,9 +15,9 @@ For the broader product direction, read [`sounding.md`](sounding.md). For the fi
 
 M001 is a source and CLI baseline, not a packaged app release. The important boundary is:
 
-- `SoundingKit` owns the reusable stream monitoring, marker decoding/classification, persistence, live verification, and redaction behavior.
-- `sounding` is the CLI shell over that package. In M001 it exposes `monitor` and `live-verify`.
-- SQLite persistence is established for the ingest baseline tables: `streams`, `ingest_runs`, `ingest_chunks`, `ad_events`, and `ingest_diagnostics`.
+- `SoundingKit` owns the reusable stream monitoring, marker decoding/classification, ingest pipeline, persistence, live verification, and redaction behavior.
+- `sounding` is the CLI shell over that package. It exposes `monitor`, `live-verify`, and the M002 `ingest` tracer path.
+- SQLite persistence is established for the ingest baseline tables: `streams`, `ingest_runs`, `ingest_chunks`, `ad_events`, `ingest_diagnostics`, transcript segments, timestamped transcript words, speaker turns, and transcript FTS.
 - Fixture-backed monitor paths cover HLS ID3, ICY metadata, MPEG-TS SCTE-35, UDP replay, marker classification, redacted diagnostics, and command smoke behavior.
 
 M001 deliberately stops short of transcripts, diarization, search, song fingerprinting, the native app UI, distribution, notarization, and long-running soak guarantees.
@@ -52,6 +52,27 @@ swift run --package-path sounding sounding monitor \
 ```
 
 The test suite contains additional smoke and parity coverage for monitor options, pipeline timeout handling, command output, and migration shape. Full XCTest execution is currently a local environment caveat; see the proof section below before treating test execution as green.
+
+## Bounded transcript ingest
+
+M002 introduces a first vertical ingest path through the real CLI:
+
+```sh
+swift run --package-path sounding sounding ingest \
+  "$SOUNDING_LIVE_URL" \
+  --db /tmp/sounding-ingest.sqlite \
+  --duration 60
+
+swift run --package-path sounding sounding ingest \
+  sounding/Tests/SoundingKitTests/Fixtures/HLS/manifest-id3.m3u8 \
+  --db /tmp/sounding-ingest-fixture.sqlite \
+  --stream-type hls \
+  --max-chunks 1
+```
+
+`ingest` requires either `--duration` or `--max-chunks` and validates those bounds before opening the database or model providers. Database-open failures, source-open failures, and model setup failures are reported through redacted CLI diagnostics; recoverable per-chunk transcription and diarization failures are persisted in `ingest_diagnostics` for later inspection. On successful bounded runs, the database should contain stream/run/chunk rows plus any transcript segments, timestamped words, speaker turns, ad events, and diagnostics produced by the source and providers.
+
+Real ML/live proof is intentionally local-only: provide an authorized `SOUNDING_LIVE_URL`, let WhisperKit/FluidAudio download or reuse cached models, then inspect the SQLite counts with `sqlite3` or GRDB. Do not commit live URLs, model cache paths, generated databases, or runtime evidence files.
 
 ## Local-only live verification
 
