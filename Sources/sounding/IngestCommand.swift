@@ -8,8 +8,8 @@ struct IngestCommand: AsyncParsableCommand {
         abstract: "Run bounded stream ingest into a Sounding SQLite database."
     )
 
-    @Argument(help: "Media source URL or local fixture path to ingest.")
-    var source: String
+    @Argument(help: "One or two media source URLs or local fixture paths to ingest.")
+    var sources: [String] = []
 
     @Option(name: .long, help: "Path to the Sounding SQLite database to open or create.")
     var db: String
@@ -25,7 +25,7 @@ struct IngestCommand: AsyncParsableCommand {
 
     mutating func validate() throws {
         do {
-            try validateBounds()
+            try validateConfiguration()
         } catch let error as IngestCommandError {
             throw ValidationError(error.description)
         }
@@ -33,7 +33,7 @@ struct IngestCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         do {
-            try validateBounds()
+            try validateConfiguration()
         } catch let error as IngestCommandError {
             standardErrorWrite(error.description)
             throw ExitCode.failure
@@ -51,31 +51,62 @@ struct IngestCommand: AsyncParsableCommand {
         let cache = ModelCache(progressHandler: { progress in
             progressSink.emit(progress)
         })
-        let pipeline = StreamIngestPipeline(
-            database: database,
-            decoder: AVFoundationAudioDecoder(),
-            transcriber: WhisperKitTranscriber(cache: cache),
-            diarizer: FluidAudioDiarizer(cache: cache)
-        )
+        let queue = InferenceQueue()
+        let providers = makeProviders(cache: cache, queue: queue)
 
         do {
-            let result = try await pipeline.run(
-                source: source,
-                streamType: streamType.value,
-                durationSeconds: duration,
-                maxChunks: maxChunks
+            if normalizedSources.count == 1 {
+                let result = try await StreamIngestPipeline(
+                    database: database,
+                    decoder: AVFoundationAudioDecoder(),
+                    transcriber: providers.transcriber,
+                    diarizer: providers.diarizer
+                ).run(
+                    source: normalizedSources[0],
+                    streamType: streamType.value,
+                    durationSeconds: duration,
+                    maxChunks: maxChunks
+                )
+                if let setupDiagnostic = result.diagnostics.first(where: {
+                    $0.phase == .modelSetup && $0.severity == .error
+                }) {
+                    standardErrorWrite(
+                        "Ingest modelSetup failed: \(setupDiagnostic.reason). See persisted ingest_diagnostics for redacted run details."
+                    )
+                    throw ExitCode.failure
+                }
+                print(
+                    "ingest completed: stream=\(result.streamID) run=\(result.runID) chunks=\(result.processedChunks) diagnostics=\(result.diagnostics.count)"
+                )
+                return
+            }
+
+            let supervisor = MultiStreamIngestSupervisor(
+                database: database,
+                maximumRequests: Self.maximumSourceCount,
+                decoderFactory: { _ in AVFoundationAudioDecoder() },
+                transcriber: providers.transcriber,
+                diarizer: providers.diarizer
             )
-            if let setupDiagnostic = result.diagnostics.first(where: {
-                $0.phase == .modelSetup && $0.severity == .error
-            }) {
+            let outcomes = try await supervisor.run(
+                normalizedSources.map { source in
+                    StreamIngestRequest(
+                        source: source,
+                        streamType: streamType.value,
+                        durationSeconds: duration,
+                        maxChunks: maxChunks
+                    )
+                }
+            )
+            for (index, outcome) in outcomes.enumerated() {
+                print(summaryLine(for: outcome, index: index))
+            }
+            if outcomes.contains(where: { $0.status != .completed }) {
                 standardErrorWrite(
-                    "Ingest modelSetup failed: \(setupDiagnostic.reason). See persisted ingest_diagnostics for redacted run details."
+                    "Ingest failed: one or more stream outcomes require operator inspection. See persisted ingest_diagnostics for redacted run details."
                 )
                 throw ExitCode.failure
             }
-            print(
-                "ingest completed: stream=\(result.streamID) run=\(result.runID) chunks=\(result.processedChunks) diagnostics=\(result.diagnostics.count)"
-            )
         } catch let exitCode as ExitCode {
             throw exitCode
         } catch {
@@ -84,7 +115,24 @@ struct IngestCommand: AsyncParsableCommand {
         }
     }
 
-    private func validateBounds() throws {
+    private static let maximumSourceCount = 2
+
+    private var normalizedSources: [String] {
+        sources.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func validateConfiguration() throws {
+        let normalizedSources = normalizedSources
+        guard !normalizedSources.isEmpty else {
+            throw IngestCommandError.configuration(
+                "provide at least one non-empty source before ingest can start")
+        }
+        guard normalizedSources.count <= Self.maximumSourceCount else {
+            throw IngestCommandError.configuration(
+                "requested \(normalizedSources.count) sources, but this M002 proof supports at most \(Self.maximumSourceCount) sources"
+            )
+        }
         guard duration != nil || maxChunks != nil else {
             throw IngestCommandError.configuration(
                 "provide either duration or max-chunks before ingest can start")
@@ -95,6 +143,39 @@ struct IngestCommand: AsyncParsableCommand {
         if let maxChunks, maxChunks <= 0 {
             throw IngestCommandError.configuration("max-chunks must be greater than zero")
         }
+    }
+
+    private func makeProviders(
+        cache: ModelCache,
+        queue: InferenceQueue
+    ) -> (transcriber: any MLTranscription, diarizer: any SpeakerDiarization) {
+        if ProcessInfo.processInfo.environment["SOUNDING_DETERMINISTIC_ML"] == "1" {
+            return (
+                QueuedTranscriber(DeterministicCLITranscriber(), queue: queue),
+                QueuedDiarizer(DeterministicCLIDiarizer(), queue: queue)
+            )
+        }
+        return (
+            QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
+            QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue)
+        )
+    }
+
+    private func summaryLine(for outcome: MultiStreamIngestOutcome, index: Int) -> String {
+        var fields = [
+            "ingest stream summary:",
+            "index=\(index)",
+            "source=\(outcome.sourceDescription)",
+            "status=\(outcome.status.rawValue)",
+            "chunks=\(outcome.processedChunks)",
+            "diagnostics=\(outcome.diagnosticCount)",
+        ]
+        if let streamID = outcome.streamID { fields.append("stream=\(streamID)") }
+        if let runID = outcome.runID { fields.append("run=\(runID)") }
+        if let errorDescription = outcome.errorDescription {
+            fields.append("error=\(IngestRedaction.redact(errorDescription))")
+        }
+        return fields.joined(separator: " ")
     }
 
     private func diagnosticMessage(for error: Error) -> String {
@@ -145,5 +226,49 @@ private final class CLIModelProgressSink: @unchecked Sendable {
         let line =
             "model \(progress.event.rawValue): provider=\(IngestRedaction.component(progress.provider)) model=\(IngestRedaction.component(progress.model))\(suffix)"
         FileHandle.standardError.write(Data((line + "\n").utf8))
+    }
+}
+
+private struct DeterministicCLITranscriber: MLTranscription {
+    func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
+        let speaker = "cli-speaker-\(chunk.sequence)"
+        let words = ["cli", "shared", "phrase", "stream", "\(chunk.sequence)"]
+        let duration = max((chunk.endSeconds - chunk.startSeconds) / Double(words.count), 0.1)
+        return [
+            TranscriptSegmentDraft(
+                sequence: 0,
+                speakerLabel: speaker,
+                startSeconds: chunk.startSeconds,
+                endSeconds: max(chunk.endSeconds, chunk.startSeconds + duration),
+                text: words.joined(separator: " "),
+                confidence: 0.99,
+                words: words.enumerated().map { offset, text in
+                    TranscriptWordDraft(
+                        sequence: offset,
+                        speakerLabel: speaker,
+                        startSeconds: chunk.startSeconds + (Double(offset) * duration),
+                        endSeconds: chunk.startSeconds + (Double(offset + 1) * duration),
+                        text: text,
+                        confidence: 0.99
+                    )
+                }
+            )
+        ]
+    }
+}
+
+private struct DeterministicCLIDiarizer: SpeakerDiarization {
+    func diarize(
+        _ chunk: DecodedAudioChunk,
+        transcriptSegments: [TranscriptSegmentDraft]
+    ) async throws -> [SpeakerTurnDraft] {
+        transcriptSegments.map { segment in
+            SpeakerTurnDraft(
+                speakerLabel: segment.speakerLabel ?? "cli-speaker",
+                startSeconds: segment.startSeconds,
+                endSeconds: segment.endSeconds,
+                confidence: 0.99
+            )
+        }
     }
 }

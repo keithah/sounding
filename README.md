@@ -82,6 +82,25 @@ Use short, bounded runs and redacted placeholders when proving the M002 ingest p
 - **Fatal setup failure:** missing bounds, invalid bounds, database-open failures, source-open failures, and provider setup failures should fail before unrelated work continues. Stderr should use messages such as `Ingest configuration failed`, `Ingest database failed`, `Ingest sourceOpen failed`, or `Ingest modelSetup failed` with redacted source and path details.
 - **Cancellation or interrupt:** an interrupted run should write a terminal `cancelled` ingest run once, preserve any completed chunk diagnostics, and avoid duplicate terminal state updates.
 - **Search/count after ingest:** after valid transcript rows exist, run `search` and `count` against the same database to prove transcript FTS and phrase aggregates still work after success or recoverable failures.
+- **Two-stream shared-queue proof:** run exactly two authorized bounded sources in one `ingest` process, not two shell processes, so both streams share one model cache and one in-process inference queue. Keep the database under `/tmp` or another ignored local path and use placeholders in notes:
+
+```sh
+swift run --package-path sounding sounding ingest \
+  "$SOUNDING_LIVE_URL_A" \
+  "$SOUNDING_LIVE_URL_B" \
+  --db /tmp/sounding-two-stream.sqlite \
+  --duration 60
+
+swift run --package-path sounding sounding search "sponsor message" \
+  --db /tmp/sounding-two-stream.sqlite \
+  --json
+
+swift run --package-path sounding sounding count "sponsor message" \
+  --db /tmp/sounding-two-stream.sqlite \
+  --json
+```
+
+Expect one redacted `ingest stream summary:` line per source with `index`, `status`, `chunks`, `diagnostics`, `stream`, and `run` fields. If either stream fails, the command exits non-zero after printing all available per-stream summaries; inspect `ingest_diagnostics` for the stream-scoped `phase` and `reason` rather than rerunning with private URLs in logs.
 
 For local inspection, prefer deterministic SQL that avoids leaking values:
 
@@ -91,6 +110,12 @@ sqlite3 /tmp/sounding-ingest.sqlite \
 
 sqlite3 /tmp/sounding-ingest.sqlite \
   "SELECT phase, reason, COUNT(*) FROM ingest_diagnostics GROUP BY phase, reason;"
+
+sqlite3 /tmp/sounding-two-stream.sqlite \
+  "SELECT stream_id, status, COUNT(*) FROM ingest_runs GROUP BY stream_id, status;"
+
+sqlite3 /tmp/sounding-two-stream.sqlite \
+  "SELECT streams.id, streams.type, COUNT(transcript_segments.id) AS segments FROM streams LEFT JOIN ingest_runs ON ingest_runs.stream_id = streams.id LEFT JOIN ingest_chunks ON ingest_chunks.run_id = ingest_runs.id LEFT JOIN transcript_segments ON transcript_segments.chunk_id = ingest_chunks.id GROUP BY streams.id, streams.type;"
 ```
 
 Real ML/live proof is intentionally local-only: provide an authorized `SOUNDING_LIVE_URL`, let WhisperKit/FluidAudio download or reuse cached models, then inspect the SQLite counts with `sqlite3` or GRDB. Do not commit live URLs, model cache paths, generated databases, or runtime evidence files.

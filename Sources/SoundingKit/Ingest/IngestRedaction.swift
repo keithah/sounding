@@ -19,6 +19,11 @@ public enum IngestRedaction {
     /// Redacts a structured source/URI value while preserving safe network host/path identity.
     public static func sourceDescription(_ source: String) -> String {
         guard var components = URLComponents(string: source), let scheme = components.scheme else {
+            if source.hasPrefix("/") || source.hasPrefix("./") || source.hasPrefix("../")
+                || source.contains("/")
+            {
+                return "[redacted-path]"
+            }
             return redact(source)
         }
 
@@ -52,11 +57,11 @@ public enum IngestRedaction {
 
     private static func redactJSONValue(_ value: JSONValue) -> JSONValue {
         switch value {
-        case let .string(text):
+        case .string(let text):
             return .string(redact(text))
-        case let .object(object):
+        case .object(let object):
             return .object(object.mapValues(redactJSONValue))
-        case let .array(values):
+        case .array(let values):
             return .array(values.map(redactJSONValue))
         case .number, .bool, .null:
             return value
@@ -83,7 +88,8 @@ public enum IngestRedaction {
 
     private static func redactSecretAssignments(in value: String) -> String {
         value.replacingOccurrences(
-            of: #"(?i)\b(token|access_token|api[_-]?key|secret|password|passwd|pwd|key)\s*=\s*([^\s&;,\"']+)"#,
+            of:
+                #"(?i)\b(token|access_token|api[_-]?key|secret|password|passwd|pwd|key)\s*=\s*([^\s&;,\"']+)"#,
             with: "$1=[redacted]",
             options: .regularExpression
         )
@@ -99,7 +105,8 @@ public enum IngestRedaction {
 
     private static func redactAbsolutePaths(in value: String) -> String {
         value.replacingOccurrences(
-            of: #"(?<!:)\/(?:Users|tmp|private\/tmp|var\/folders|var\/tmp|Volumes|Applications|Library)\/[^\s\"'<>)]*"#,
+            of:
+                #"(?<!:)\/(?:Users|tmp|private\/tmp|var\/folders|var\/tmp|Volumes|Applications|Library)\/[^\s\"'<>)]*"#,
             with: "[redacted-path]",
             options: .regularExpression
         )

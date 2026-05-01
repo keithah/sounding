@@ -61,6 +61,115 @@ final class IngestCommandSmokeTests: XCTestCase {
         assertSanitized(stderr, forbiddenLiteral: dbURL.path)
     }
 
+    func testRejectsTooManySourcesBeforeCreatingDatabase() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "too-many-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+
+        let result = try runSounding(arguments: [
+            "ingest",
+            "https://user:pass@example.test/one.m3u8?token=synthetic-secret",
+            "https://user:pass@example.test/two.m3u8?token=synthetic-secret",
+            "https://user:pass@example.test/three.m3u8?token=synthetic-secret",
+            "--db", dbURL.path,
+            "--max-chunks", "1",
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0, result.diagnosticSummary)
+        XCTAssertEqual(result.stdoutLineCount, 0, result.diagnosticSummary)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dbURL.path), result.diagnosticSummary)
+        let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+        XCTAssertTrue(stderr.contains("Ingest configuration failed"), result.diagnosticSummary)
+        XCTAssertTrue(stderr.contains("at most 2 sources"), result.diagnosticSummary)
+        assertSanitized(stderr, forbiddenLiteral: "user:pass")
+        assertSanitized(stderr, forbiddenLiteral: "synthetic-secret")
+        assertSanitized(stderr, forbiddenLiteral: dbURL.path)
+    }
+
+    func testTwoSourceIngestPersistsDistinctRunsAndSearchCountJSONDistinguishStreams() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "two-source")
+        defer { removeDatabaseFiles(dbURL) }
+        let fixture =
+            packageRootURL
+            .appendingPathComponent("Tests/SoundingKitTests/Fixtures/HLS/manifest-scte35.m3u8")
+
+        let ingest = try runSounding(
+            arguments: [
+                "ingest",
+                fixture.path,
+                fixture.path,
+                "--db", dbURL.path,
+                "--stream-type", "hls",
+                "--max-chunks", "1",
+            ],
+            environment: ["SOUNDING_DETERMINISTIC_ML": "1"]
+        )
+
+        XCTAssertEqual(ingest.exitCode, 0, ingest.diagnosticSummary)
+        let stdout = String(data: ingest.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(stdout.contains("index=0"), ingest.diagnosticSummary)
+        XCTAssertTrue(stdout.contains("index=1"), ingest.diagnosticSummary)
+        XCTAssertTrue(stdout.contains("status=completed"), ingest.diagnosticSummary)
+        XCTAssertTrue(stdout.contains("chunks=1"), ingest.diagnosticSummary)
+        assertSanitized(stdout, forbiddenLiteral: fixture.path)
+        assertSanitized(stdout, forbiddenLiteral: dbURL.path)
+
+        let database = try DatabaseQueue(path: dbURL.path)
+        let counts = try database.read { db in
+            try [
+                "streams": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM streams"),
+                "completed_runs": Int.fetchOne(
+                    db, sql: "SELECT COUNT(*) FROM ingest_runs WHERE status = 'completed'"),
+                "chunks": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_chunks"),
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "words": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_words"),
+                "turns": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM speaker_turns"),
+                "ads": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+            ]
+        }
+        XCTAssertEqual(counts["streams"] as? Int, 2)
+        XCTAssertEqual(counts["completed_runs"] as? Int, 2)
+        XCTAssertEqual(counts["chunks"] as? Int, 2)
+        XCTAssertEqual(counts["segments"] as? Int, 2)
+        XCTAssertEqual(counts["words"] as? Int, 10)
+        XCTAssertEqual(counts["turns"] as? Int, 2)
+        XCTAssertEqual(counts["ads"] as? Int, 2)
+
+        let search = try runSounding(arguments: [
+            "search", "cli shared phrase",
+            "--db", dbURL.path,
+            "--limit", "10",
+            "--json",
+        ])
+        XCTAssertEqual(search.exitCode, 0, search.diagnosticSummary)
+        let searchObject = try jsonObject(from: search.stdout)
+        let searchResults = try XCTUnwrap(searchObject["results"] as? [[String: Any]])
+        XCTAssertEqual(searchResults.count, 2, search.diagnosticSummary)
+        let streamIDs = Set(
+            searchResults.compactMap { result -> Int64? in
+                guard let identity = result["identity"] as? [String: Any],
+                    let value = identity["streamID"] as? Int
+                else { return nil }
+                return Int64(value)
+            })
+        XCTAssertEqual(streamIDs.count, 2, search.diagnosticSummary)
+
+        let count = try runSounding(arguments: [
+            "count", "cli shared phrase",
+            "--db", dbURL.path,
+            "--json",
+        ])
+        XCTAssertEqual(count.exitCode, 0, count.diagnosticSummary)
+        let countObject = try jsonObject(from: count.stdout)
+        let countResults = try XCTUnwrap(countObject["results"] as? [[String: Any]])
+        XCTAssertEqual(countResults.count, 2, count.diagnosticSummary)
+        let countStreamIDs = Set(
+            countResults.compactMap { result -> Int64? in
+                guard let value = result["streamID"] as? Int else { return nil }
+                return Int64(value)
+            })
+        XCTAssertEqual(countStreamIDs, streamIDs, count.diagnosticSummary)
+    }
+
     func testUnwritableDatabasePathFailsBeforeOpeningSourceOrModels() throws {
         let missingDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -129,12 +238,14 @@ final class IngestCommandSmokeTests: XCTestCase {
         XCTAssertFalse(source?.contains("synthetic-secret") ?? true, source ?? "nil")
         XCTAssertFalse(context?.contains("synthetic-secret") ?? true, context ?? "nil")
         assertSanitized(stderr, forbiddenLiteral: "synthetic-secret")
-        assertSanitized(stderr, forbiddenLiteral: "/tmp/sounding-missing-audio-token=synthetic-secret.wav")
+        assertSanitized(
+            stderr, forbiddenLiteral: "/tmp/sounding-missing-audio-token=synthetic-secret.wav")
         assertSanitized(stderr, forbiddenLiteral: dbURL.path)
     }
 
     private func runSounding(
         arguments: [String],
+        environment: [String: String] = [:],
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> CLIResult {
@@ -143,6 +254,11 @@ final class IngestCommandSmokeTests: XCTestCase {
         process.executableURL = executable
         process.arguments = arguments
         process.currentDirectoryURL = packageRootURL
+        if !environment.isEmpty {
+            process.environment = ProcessInfo.processInfo.environment.merging(environment) {
+                _, new in new
+            }
+        }
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -205,6 +321,19 @@ final class IngestCommandSmokeTests: XCTestCase {
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
+    private func jsonObject(
+        from data: Data,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> [String: Any] {
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let dictionary = object as? [String: Any] else {
+            XCTFail("Expected top-level JSON object", file: file, line: line)
+            throw CLIError.invalidJSON
+        }
+        return dictionary
+    }
+
     private func temporaryDatabaseURL(secretComponent: String) -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("sounding-ingest-\(secretComponent)-\(UUID().uuidString)")
@@ -226,6 +355,7 @@ final class IngestCommandSmokeTests: XCTestCase {
 
     private enum CLIError: Error {
         case missingExecutable
+        case invalidJSON
     }
 
     private struct CLIResult {
