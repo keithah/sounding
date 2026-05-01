@@ -159,4 +159,42 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.addError, .duplicateName)
         XCTAssertEqual(viewModel.lastLifecycleMessage, "A stream with this name already exists.")
     }
+
+    func testConfigurationIssuesProjectRedactedBlockingStatusForSettingsAndRuntime() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        var viewModel = StreamAppViewModel()
+        try viewModel.reload(from: registry)
+        let rawPath = "/Users/example/private/Sounding.sqlite"
+        let rawSecretURL = "https://user:pass@example.test/config?token=secret#fragment"
+        let issue = SoundingAppConfigurationIssue(
+            id: "database.location-unavailable",
+            severity: .blocking,
+            phase: .startup,
+            category: .database,
+            message: "Database unavailable at \(rawPath)",
+            detail: "Retry failed for \(rawSecretURL) and \(rawPath)",
+            action: SoundingAppConfigurationAction(
+                kind: .chooseDatabaseLocation,
+                label: "Choose database location"
+            )
+        )
+        let configuration = SoundingAppConfiguration(
+            databaseURL: URL(fileURLWithPath: rawPath),
+            whisperModelName: "tiny",
+            rollingBuffer: .appDefault(),
+            acoustIDKeyStatus: .present,
+            issues: [issue]
+        )
+
+        viewModel.applyConfiguration(configuration)
+
+        XCTAssertEqual(viewModel.configurationIssues, [issue])
+        XCTAssertEqual(viewModel.blockingConfigurationIssues, [issue])
+        XCTAssertEqual(viewModel.lastLifecycleMessage, issue.message)
+        XCTAssertFalse(viewModel.lastLifecycleMessage.contains(rawPath), viewModel.lastLifecycleMessage)
+        XCTAssertFalse(viewModel.configurationIssues[0].detail?.contains("user:pass") ?? true)
+        XCTAssertFalse(viewModel.configurationIssues[0].detail?.contains("token=secret") ?? true)
+        XCTAssertFalse(viewModel.configurationIssues[0].detail?.contains(rawPath) ?? true)
+    }
 }

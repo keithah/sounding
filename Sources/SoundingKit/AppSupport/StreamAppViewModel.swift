@@ -465,6 +465,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
   public private(set) var transcriptScrollTargetSegmentID: Int64?
   public private(set) var searchErrorMessage: String?
   public private(set) var searchJumpMessage: String?
+  public private(set) var configurationIssues: [SoundingAppConfigurationIssue]
   public var addDraft: StreamAppAddDraft
   public private(set) var addError: StreamAppValidationError?
   public private(set) var lastLifecycleMessage: String
@@ -483,6 +484,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
     transcriptScrollTargetSegmentID: Int64? = nil,
     searchErrorMessage: String? = nil,
     searchJumpMessage: String? = nil,
+    configurationIssues: [SoundingAppConfigurationIssue] = [],
     addDraft: StreamAppAddDraft = StreamAppAddDraft(),
     addError: StreamAppValidationError? = nil,
     lastLifecycleMessage: String = "Add an HLS or Icecast/ICY stream to begin."
@@ -500,6 +502,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
     self.transcriptScrollTargetSegmentID = transcriptScrollTargetSegmentID
     self.searchErrorMessage = searchErrorMessage.map(IngestRedaction.redact)
     self.searchJumpMessage = searchJumpMessage.map(IngestRedaction.redact)
+    self.configurationIssues = configurationIssues
     self.addDraft = addDraft
     self.addError = addError
     self.lastLifecycleMessage = lastLifecycleMessage
@@ -527,6 +530,17 @@ public struct StreamAppViewModel: Equatable, Sendable {
 
   public var emptyStateTitle: String {
     streams.isEmpty ? "No streams yet" : "Select a stream"
+  }
+
+  public var blockingConfigurationIssues: [SoundingAppConfigurationIssue] {
+    configurationIssues.filter(\.blocksRuntime)
+  }
+
+  public mutating func applyConfiguration(_ configuration: SoundingAppConfiguration) {
+    configurationIssues = configuration.issues
+    if let blocking = configuration.issues.first(where: { $0.blocksRuntime }) {
+      lastLifecycleMessage = blocking.message
+    }
   }
 
   public static func makePreview() -> StreamAppViewModel {
