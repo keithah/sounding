@@ -76,7 +76,12 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "stream_type",
             "source",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "name",
+            "status",
+            "paused_at",
+            "resumed_at",
+            "removed_at"
         ])
         XCTAssertEqual(columnsByTable["ingest_runs"], [
             "id",
@@ -215,7 +220,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
         ])
     }
 
-    func testSongTimelineMigrationCreatesReportIndexes() throws {
+    func testTimelineAndStreamManagementMigrationsCreateIndexes() throws {
         let temporary = try TemporarySoundingDatabase()
 
         let indexes = try temporary.database.read { db in
@@ -223,12 +228,17 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'index'
-                  AND tbl_name IN ('audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache')
+                  AND tbl_name IN ('streams', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache')
                 ORDER BY name
                 """))
         }
 
         XCTAssertTrue(indexes.isSuperset(of: [
+            "streams_on_stream_type",
+            "streams_on_source",
+            "streams_on_status",
+            "streams_on_name",
+            "streams_on_active_name",
             "audio_fingerprints_on_stream_run_time",
             "audio_fingerprints_on_chunk_id",
             "audio_fingerprints_on_fingerprint_hash",
@@ -244,6 +254,35 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "acoustid_lookup_cache_on_recording_id",
             "acoustid_lookup_cache_on_updated_at"
         ]))
+    }
+
+    func testStreamManagementMigrationDefaultsLegacyStreamRowsToActive() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+
+        let streamID = try writer.createStream(
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+
+        let row = try temporary.database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                SELECT name, status, paused_at, resumed_at, removed_at
+                FROM streams
+                WHERE id = ?
+                """,
+                arguments: [streamID]
+            )
+        }
+
+        XCTAssertNil(row?["name"] as String?)
+        XCTAssertEqual(row?["status"] as String?, "active")
+        XCTAssertNil(row?["paused_at"] as String?)
+        XCTAssertNil(row?["resumed_at"] as String?)
+        XCTAssertNil(row?["removed_at"] as String?)
     }
 
     func testNewMigratedDatabaseStartsWithEmptyBaselineTables() throws {

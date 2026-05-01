@@ -266,6 +266,27 @@ enum SoundingDatabaseMigrator {
             try db.create(index: "acoustid_lookup_cache_on_updated_at", on: "acoustid_lookup_cache", columns: ["updated_at"])
         }
 
+        migrator.registerMigration("addStreamManagement") { db in
+            try db.alter(table: "streams") { table in
+                table.add(column: "name", .text)
+                table.add(column: "status", .text)
+                    .notNull()
+                    .defaults(to: "active")
+                    .check(sql: "status IN ('active', 'paused', 'removed')")
+                table.add(column: "paused_at", .text)
+                table.add(column: "resumed_at", .text)
+                table.add(column: "removed_at", .text)
+            }
+            try db.create(index: "streams_on_status", on: "streams", columns: ["status"])
+            try db.create(index: "streams_on_name", on: "streams", columns: ["name"])
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX streams_on_active_name
+                ON streams(name)
+                WHERE name IS NOT NULL
+                  AND removed_at IS NULL
+                """)
+        }
+
         try migrator.migrate(writer)
     }
 }
