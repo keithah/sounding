@@ -13,7 +13,9 @@ final class AppStreamRuntimeTests: XCTestCase {
             streamType: "hls",
             source: "https://user:pass@example.test/live.m3u8?token=secret"
         )
-        let ingester = RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: stream.id, runID: 7, processedChunks: 2, diagnosticCount: 0))
+        let ingester = RecordingAppRuntimeIngester(
+            result: AppStreamRuntimeResult(
+                streamID: stream.id, runID: 7, processedChunks: 2, diagnosticCount: 0))
         let runtime = AppStreamRuntimeService(
             registry: registry,
             ingester: ingester,
@@ -33,8 +35,10 @@ final class AppStreamRuntimeTests: XCTestCase {
         XCTAssertEqual(stopped.phase, .stopped)
         XCTAssertEqual(stopped.result?.runID, 7)
         XCTAssertEqual(stopped.result?.processedChunks, 2)
-        XCTAssertFalse([connecting, running, stopped].map(\.message).joined().contains("user:pass"))
-        XCTAssertFalse([connecting, running, stopped].map(\.message).joined().contains("token=secret"))
+        XCTAssertFalse(
+            [connecting, running, stopped].map(\.message).joined().contains("user:pass"))
+        XCTAssertFalse(
+            [connecting, running, stopped].map(\.message).joined().contains("token=secret"))
 
         let requests = await ingester.requests()
         XCTAssertEqual(requests.count, 1)
@@ -92,7 +96,8 @@ final class AppStreamRuntimeTests: XCTestCase {
         let runtime = AppStreamRuntimeService(
             registry: registry,
             ingester: ingester,
-            retryPolicy: AppStreamRuntimeRetryPolicy(maximumReconnectAttempts: 1, backoffSeconds: { _ in 0 }),
+            retryPolicy: AppStreamRuntimeRetryPolicy(
+                maximumReconnectAttempts: 1, backoffSeconds: { _ in 0 }),
             retrySleep: { _ in }
         )
         let events = await runtime.events()
@@ -117,6 +122,401 @@ final class AppStreamRuntimeTests: XCTestCase {
         XCTAssertEqual(stopped.phase, .stopped)
         let callCount = await ingester.callCount()
         XCTAssertEqual(callCount, 2)
+    }
+
+    func testSeekToBufferedSecondPublishesPlayerTimelineEvent() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Buffered HLS",
+            streamType: "hls",
+            source: "https://user:pass@example.test/buffered.m3u8?token=secret"
+        )
+        let gate = RuntimeGate()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 120,
+                hotMemoryDurationSeconds: 120,
+                maximumSpillBytes: 0
+            )
+        )
+        await rollingBuffer.start(streamID: stream.id)
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 0,
+                audio: Data([0x01]),
+                startSeconds: 0,
+                endSeconds: 10
+            ),
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 1,
+                audio: Data([0x02]),
+                startSeconds: 10,
+                endSeconds: 20
+            ),
+        ])
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: stream.id)
+        await timeline.updateRollingBuffer(await rollingBuffer.snapshot())
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: BlockingAppRuntimeIngester(gate: gate),
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            rollingBuffer: rollingBuffer
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+
+        await runtime.seek(to: 10)
+
+        let seeked = try await nextEvent(from: &iterator)
+        XCTAssertEqual(seeked.phase, .running)
+        XCTAssertEqual(seeked.result?.streamID, stream.id)
+        let snapshot = try XCTUnwrap(seeked.result?.playerTimeline)
+        XCTAssertEqual(snapshot.streamID, stream.id)
+        XCTAssertEqual(snapshot.state, .playing)
+        XCTAssertEqual(snapshot.positionSeconds, 10)
+        XCTAssertEqual(snapshot.liveEdgeSeconds, 20)
+        XCTAssertEqual(snapshot.bufferedStartSeconds, 0)
+        XCTAssertEqual(snapshot.bufferedEndSeconds, 20)
+        XCTAssertNil(snapshot.unavailableRangeMessage)
+        XCTAssertEqual(snapshot.lastMessage, "Playback seeked to buffered frame 1.")
+
+        await runtime.stop()
+        await gate.release()
+    }
+
+    func testSeekRejectsNegativeTargetAsUnavailableWithoutMovingPlayback() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Buffered HLS",
+            streamType: "hls",
+            source: "https://user:pass@example.test/buffered.m3u8?token=secret"
+        )
+        let gate = RuntimeGate()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 120,
+                hotMemoryDurationSeconds: 120,
+                maximumSpillBytes: 0
+            )
+        )
+        await rollingBuffer.start(streamID: stream.id)
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 0,
+                audio: Data([0x01]),
+                startSeconds: 0,
+                endSeconds: 10
+            )
+        ])
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: stream.id)
+        await timeline.updateRollingBuffer(await rollingBuffer.snapshot())
+        await timeline.updatePlayerState(
+            .playing,
+            positionSeconds: 5,
+            message: "Playback already inside buffered range."
+        )
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: BlockingAppRuntimeIngester(gate: gate),
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            rollingBuffer: rollingBuffer
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+
+        await runtime.seek(to: -1)
+
+        let rejected = try await nextEvent(from: &iterator)
+        let snapshot = try XCTUnwrap(rejected.result?.playerTimeline)
+        XCTAssertEqual(snapshot.positionSeconds, 5)
+        XCTAssertEqual(snapshot.state, .playing)
+        XCTAssertEqual(snapshot.bufferedStartSeconds, 0)
+        XCTAssertEqual(snapshot.bufferedEndSeconds, 10)
+        XCTAssertEqual(
+            snapshot.unavailableRangeMessage,
+            "Requested -1.0s is unavailable (available range 0.0-10.0s)."
+        )
+        XCTAssertEqual(snapshot.lastMessage, snapshot.unavailableRangeMessage)
+        XCTAssertFalse(rejected.message.contains("user:pass"), rejected.message)
+        XCTAssertFalse(rejected.message.contains("token=secret"), rejected.message)
+
+        await runtime.stop()
+        await gate.release()
+    }
+
+    func testSeekOutsideBufferedRangePublishesUnavailableTimelineFeedback() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Buffered HLS",
+            streamType: "hls",
+            source: "https://user:pass@example.test/buffered.m3u8?token=secret"
+        )
+        let gate = RuntimeGate()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 120,
+                hotMemoryDurationSeconds: 120,
+                maximumSpillBytes: 0
+            )
+        )
+        await rollingBuffer.start(streamID: stream.id)
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 0,
+                audio: Data([0x01]),
+                startSeconds: 0,
+                endSeconds: 10
+            )
+        ])
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: stream.id)
+        await timeline.updateRollingBuffer(await rollingBuffer.snapshot())
+        await timeline.updatePlayerState(
+            .playing, positionSeconds: 4, message: "Playing buffered audio.")
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: BlockingAppRuntimeIngester(gate: gate),
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            rollingBuffer: rollingBuffer
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+
+        await runtime.seek(to: 42)
+
+        let unavailable = try await nextEvent(from: &iterator)
+        let snapshot = try XCTUnwrap(unavailable.result?.playerTimeline)
+        XCTAssertEqual(snapshot.positionSeconds, 4)
+        XCTAssertEqual(snapshot.state, .playing)
+        XCTAssertEqual(
+            snapshot.unavailableRangeMessage,
+            "Requested 42.0s is unavailable (available range 0.0-10.0s)."
+        )
+        XCTAssertEqual(unavailable.message, snapshot.unavailableRangeMessage)
+        XCTAssertFalse(unavailable.message.contains("user:pass"), unavailable.message)
+        XCTAssertFalse(unavailable.message.contains("token=secret"), unavailable.message)
+
+        await runtime.stop()
+        await gate.release()
+    }
+
+    func testSeekWithoutCurrentStreamIsNoOp() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(maximumSpillBytes: 0)
+        )
+        await rollingBuffer.start(streamID: 999)
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: 999,
+                sequence: 0,
+                audio: Data([0x01]),
+                startSeconds: 0,
+                endSeconds: 10
+            )
+        ])
+        let timeline = AppPlayerTimelineClock()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 999)),
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            rollingBuffer: rollingBuffer
+        )
+
+        await runtime.seek(to: 5)
+
+        let runtimeSnapshot = await runtime.snapshot()
+        let timelineSnapshot = await timeline.snapshot()
+        XCTAssertNil(runtimeSnapshot)
+        XCTAssertEqual(timelineSnapshot, AppPlayerTimelineSnapshot())
+    }
+
+    func testSeekRejectsNonFiniteTargetsAsUnavailableWithoutMovingPlayback() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Buffered HLS",
+            streamType: "hls",
+            source: "https://user:pass@example.test/buffered.m3u8?token=secret"
+        )
+        let gate = RuntimeGate()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 120,
+                hotMemoryDurationSeconds: 120,
+                maximumSpillBytes: 0
+            )
+        )
+        await rollingBuffer.start(streamID: stream.id)
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 0,
+                audio: Data([0x01]),
+                startSeconds: 0,
+                endSeconds: 10
+            )
+        ])
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: stream.id)
+        await timeline.updateRollingBuffer(await rollingBuffer.snapshot())
+        await timeline.updatePlayerState(
+            .playing, positionSeconds: 3, message: "Playing buffered audio.")
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: BlockingAppRuntimeIngester(gate: gate),
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            rollingBuffer: rollingBuffer
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+
+        for target in [Double.nan, Double.infinity] {
+            await runtime.seek(to: target)
+            let rejected = try await nextEvent(from: &iterator)
+            let snapshot = try XCTUnwrap(rejected.result?.playerTimeline)
+            XCTAssertEqual(snapshot.positionSeconds, 3)
+            XCTAssertEqual(snapshot.state, .playing)
+            XCTAssertNotNil(snapshot.unavailableRangeMessage)
+            XCTAssertTrue(snapshot.lastMessage.contains("unavailable"), snapshot.lastMessage)
+            XCTAssertFalse(rejected.message.contains("user:pass"), rejected.message)
+            XCTAssertFalse(rejected.message.contains("token=secret"), rejected.message)
+        }
+
+        await runtime.stop()
+        await gate.release()
+    }
+
+    func testSeekSupportsBufferedStartEndLiveEdgeAndZeroBoundaries() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Boundary HLS",
+            streamType: "hls",
+            source: "https://example.test/boundary.m3u8"
+        )
+        let gate = RuntimeGate()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 120,
+                hotMemoryDurationSeconds: 120,
+                maximumSpillBytes: 0
+            )
+        )
+        await rollingBuffer.start(streamID: stream.id)
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 0,
+                audio: Data([0x01]),
+                startSeconds: 0,
+                endSeconds: 10
+            ),
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 1,
+                audio: Data([0x02]),
+                startSeconds: 10,
+                endSeconds: 20
+            ),
+        ])
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: stream.id)
+        await timeline.updateRollingBuffer(await rollingBuffer.snapshot())
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: BlockingAppRuntimeIngester(gate: gate),
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            rollingBuffer: rollingBuffer
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+
+        await runtime.seek(to: 0)
+        let zero = try await nextEvent(from: &iterator)
+        XCTAssertEqual(zero.result?.playerTimeline?.positionSeconds, 0)
+        XCTAssertNil(zero.result?.playerTimeline?.unavailableRangeMessage)
+
+        await runtime.seek(to: 20)
+        let liveEdge = try await nextEvent(from: &iterator)
+        let liveSnapshot = try XCTUnwrap(liveEdge.result?.playerTimeline)
+        XCTAssertEqual(liveSnapshot.positionSeconds, 10)
+        XCTAssertEqual(liveSnapshot.liveEdgeSeconds, 20)
+        XCTAssertNil(liveSnapshot.unavailableRangeMessage)
+        XCTAssertEqual(liveSnapshot.lastMessage, "Playback seeked to buffered frame 1.")
+
+        await runtime.stop()
+        await gate.release()
+    }
+
+    func testSeekWithoutRollingBufferLeavesCurrentRuntimeEventUnchanged() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "No Buffer HLS",
+            streamType: "hls",
+            source: "https://example.test/no-buffer.m3u8"
+        )
+        let gate = RuntimeGate()
+        let timeline = AppPlayerTimelineClock()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: BlockingAppRuntimeIngester(gate: gate),
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            rollingBuffer: nil
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(from: &iterator)
+        let running = try await nextEvent(from: &iterator)
+
+        await runtime.seek(to: 5)
+
+        let latest = await runtime.snapshot()
+        XCTAssertEqual(latest, running)
+        XCTAssertNil(latest?.result?.playerTimeline)
+
+        await runtime.stop()
+        await gate.release()
     }
 
     func testPipelineRunnerUsesExistingManagedStreamAndTemporarySQLite() async throws {
@@ -163,7 +563,9 @@ final class AppStreamRuntimeTests: XCTestCase {
             )
         }
         XCTAssertEqual(rows?["source"] as String?, "https://example.test/pipeline.m3u8")
-        XCTAssertEqual(rows?["source_url"] as String?, "https://user:pass@example.test/pipeline.m3u8?token=secret")
+        XCTAssertEqual(
+            rows?["source_url"] as String?,
+            "https://user:pass@example.test/pipeline.m3u8?token=secret")
         XCTAssertEqual(rows?["status"] as String?, "completed")
         XCTAssertEqual(rows?["chunk_count"] as Int?, 1)
     }
@@ -243,7 +645,8 @@ private actor FlakyAppRuntimeIngester: AppStreamRuntimeIngesting {
         calls += 1
         if calls == 1 {
             throw RuntimeFailure(
-                message: "decode failed at /tmp/token=secret.raw for https://user:pass@example.test/retry.m3u8?token=secret"
+                message:
+                    "decode failed at /tmp/token=secret.raw for https://user:pass@example.test/retry.m3u8?token=secret"
             )
         }
         return AppStreamRuntimeResult(streamID: streamID, processedChunks: 1)

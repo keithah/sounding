@@ -235,6 +235,7 @@ public protocol AppStreamRuntimeControlling: Sendable {
     func pause() async
     func resume() async
     func stop() async
+    func seek(to seconds: Double) async
     func seekToLive() async
     func scrubBackward(seconds: Double) async
     func snapshot() async -> AppStreamRuntimeEvent?
@@ -454,40 +455,41 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         )
     }
 
+    public func seek(to seconds: Double) async {
+        guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else {
+            return
+        }
+        let result: RollingBufferSeekResult
+        if seconds.isFinite && seconds >= 0 {
+            result = await rollingBuffer.seek(to: seconds)
+        } else {
+            result = .unavailable(
+                requestedSeconds: seconds,
+                bufferedRange: await rollingBuffer.snapshot().bufferedRange
+            )
+        }
+        await playbackTimeline.applySeekResult(result)
+        await publishPlayerTimelineEvent(streamID: streamID, playbackTimeline: playbackTimeline)
+    }
+
     public func seekToLive() async {
-        guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else { return }
+        guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else {
+            return
+        }
         let result = await rollingBuffer.seekToLive()
         await playbackTimeline.applySeekResult(result)
-        publish(
-            AppStreamRuntimeEvent(
-                streamID: streamID,
-                phase: latestEvent?.phase ?? .running,
-                message: (await playbackTimeline.snapshot()).lastMessage,
-                result: AppStreamRuntimeResult(
-                    streamID: streamID,
-                    playerTimeline: await playbackTimeline.snapshot()
-                )
-            )
-        )
+        await publishPlayerTimelineEvent(streamID: streamID, playbackTimeline: playbackTimeline)
     }
 
     public func scrubBackward(seconds: Double) async {
-        guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else { return }
+        guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else {
+            return
+        }
         let timeline = await playbackTimeline.snapshot()
         let requested = max(0, timeline.liveEdgeSeconds - max(0, seconds))
         let result = await rollingBuffer.seek(to: requested)
         await playbackTimeline.applySeekResult(result)
-        publish(
-            AppStreamRuntimeEvent(
-                streamID: streamID,
-                phase: latestEvent?.phase ?? .running,
-                message: (await playbackTimeline.snapshot()).lastMessage,
-                result: AppStreamRuntimeResult(
-                    streamID: streamID,
-                    playerTimeline: await playbackTimeline.snapshot()
-                )
-            )
-        )
+        await publishPlayerTimelineEvent(streamID: streamID, playbackTimeline: playbackTimeline)
     }
 
     public func snapshot() -> AppStreamRuntimeEvent? {
@@ -512,6 +514,24 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         currentToken = nil
         currentStreamID = nil
         publish(event)
+    }
+
+    private func publishPlayerTimelineEvent(
+        streamID: Int64,
+        playbackTimeline: AppPlayerTimelineClock
+    ) async {
+        let snapshot = await playbackTimeline.snapshot()
+        publish(
+            AppStreamRuntimeEvent(
+                streamID: streamID,
+                phase: latestEvent?.phase ?? .running,
+                message: snapshot.lastMessage,
+                result: AppStreamRuntimeResult(
+                    streamID: streamID,
+                    playerTimeline: snapshot
+                )
+            )
+        )
     }
 
     private func removeContinuation(_ id: UUID) {
