@@ -49,7 +49,7 @@ Use `--format ndjson` when you want one evidence object per line:
   --format ndjson
 ```
 
-For a missing-source smoke check, point a required fixture entry at a nonexistent local path and write evidence under `/tmp`. The expected result is a non-zero process exit with a `stream_unavailable` result in evidence and no raw source, token, credential, config path, or evidence path in stdout or stderr.
+For a missing-source smoke check, point a required fixture entry at a nonexistent local path and write evidence under an ignored local workspace. The expected result is a non-zero process exit with a `stream_unavailable` result in evidence and no raw source, token, credential, config path, or evidence path in stdout or stderr.
 
 ## Evidence categories
 
@@ -87,8 +87,37 @@ Use this checklist for every proof note, summary, and command transcript that ma
 - Replace live URLs with placeholders such as `[authorized-live-url-a]`; never include userinfo, query strings, fragments, signed URLs, or tokens.
 - Replace local database, evidence, config, audio segment, and model cache paths with `[redacted-path]` or a relative ignored workspace label such as `live-proof.local/...`.
 - Preserve non-secret proof facts only: command shape, exit code, bounded duration/chunk count, stream index, run/stream identifiers, aggregate table counts, and redacted diagnostic phase/reason.
-- Inspect stdout, stderr, JSON, NDJSON, SQLite-derived counts, and copied command transcripts for `://`, `?`, `#`, `token`, `password`, `/Users/`, `/tmp/`, `/private/tmp/`, `/var/`, and model cache directory names before citing them in tracked artifacts.
+- Inspect stdout, stderr, JSON, NDJSON, SQLite-derived counts, and copied command transcripts for URL schemes, query strings, fragments, credential keywords, absolute home/temp/system paths, and model cache directory names before citing them in tracked artifacts.
 - If redaction fails, stop the live proof, fix the CLI or evidence producer, rerun from the ignored workspace, and only then update tracked validation notes.
+
+## M002/S05 proof status
+
+T04 packages the available S05 proof as validation-ready, redacted evidence. Auto-mode did not have authorized live stream URLs and could not collect secrets, so the operator-live acceptance gap remains open; do not mark M002's final live-proof requirement closed until a human/operator reruns the bounded commands below with authorized local-only URLs.
+
+The completed deterministic two-source CLI supervisor proof used this safe command shape:
+
+```sh
+SOUNDING_DETERMINISTIC_ML=1 sounding ingest [tracked-fixture-a] [tracked-fixture-b] \
+  --db live-proof.local/... --stream-type hls --max-chunks 1
+sounding search 'cli shared phrase' --db live-proof.local/... --json --limit 10
+sounding count 'cli shared phrase' --db live-proof.local/... --json
+```
+
+Redacted local evidence showed exit code 0 for ingest, search, and count; two completed streams; two completed runs; one chunk per stream; one transcript segment per stream; five transcript words per stream; one speaker turn per stream; zero diagnostics; and stream-separated search/count JSON with two results carrying distinct stream/run identities. Count JSON reported one matching segment and one occurrence for each stream/run identity. This validates the S04 multi-stream CLI/supervisor, persistence, search/count, and shared deterministic queued inference path without exposing URLs, local database paths, or model cache paths.
+
+Fresh deterministic SwiftPM gate for S01-S04 protection passed during T04 packaging:
+
+```sh
+swift build --product sounding && \
+  swift test --filter SoundingDatabaseMigrationTests && \
+  swift test --filter IngestPersistenceTests && \
+  swift test --filter TranscriptQueryTests && \
+  swift test --filter SearchCountCommandSmokeTests && \
+  swift test --filter InferenceQueueTests && \
+  swift test --filter MultiStreamIngestSupervisorTests
+```
+
+The gate exited 0 in the T04 run. Validation status: deterministic fixture-backed multi-stream/query evidence is packaged and passing; real operator-live first-run/cache proof and two-authorized-live-URL proof are still blocked on local secret-bearing stream inputs that must remain outside source control.
 
 ## Source-control hygiene
 
