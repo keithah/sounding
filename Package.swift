@@ -28,7 +28,7 @@ let xcodeXCTestLinkerSettings: [LinkerSetting] = FileManager.default.fileExists(
 let package = Package(
     name: "Sounding",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .library(
@@ -42,13 +42,17 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
-        .package(url: "https://github.com/groue/GRDB.swift", from: "6.29.3")
+        .package(url: "https://github.com/groue/GRDB.swift", from: "6.29.3"),
+        .package(name: "argmax-oss-swift", url: "https://github.com/argmaxinc/WhisperKit", from: "0.18.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio", from: "0.14.3")
     ],
     targets: [
         .target(
             name: "SoundingKit",
             dependencies: [
-                .product(name: "GRDB", package: "GRDB.swift")
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "WhisperKit", package: "argmax-oss-swift", condition: .when(platforms: [.macOS])),
+                .product(name: "FluidAudio", package: "FluidAudio", condition: .when(platforms: [.macOS]))
             ],
             linkerSettings: sqliteLinkerSettings
         ),

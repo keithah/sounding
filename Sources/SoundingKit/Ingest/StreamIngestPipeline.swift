@@ -148,12 +148,13 @@ public struct StreamIngestPipeline {
                         )
                     })
                 } catch {
+                    let diagnosticError = error as? IngestDiagnosticError
                     chunkDiagnostics.append(
                         diagnostic(
                             streamID: streamID,
-                            phase: .transcribe,
+                            phase: diagnosticError?.ingestDiagnosticPhase ?? .transcribe,
                             severity: .error,
-                            reason: "transcription-failed",
+                            reason: diagnosticError?.ingestDiagnosticReason ?? "transcription-failed",
                             source: redactedSource,
                             streamType: streamType,
                             context: errorContext(error, chunk: chunk)
@@ -166,12 +167,13 @@ public struct StreamIngestPipeline {
                 do {
                     speakerTurns = try await diarizer.diarize(chunk, transcriptSegments: segments)
                 } catch {
+                    let diagnosticError = error as? IngestDiagnosticError
                     chunkDiagnostics.append(
                         diagnostic(
                             streamID: streamID,
-                            phase: .diarize,
+                            phase: diagnosticError?.ingestDiagnosticPhase ?? .diarize,
                             severity: .error,
-                            reason: "diarization-failed",
+                            reason: diagnosticError?.ingestDiagnosticReason ?? "diarization-failed",
                             source: redactedSource,
                             streamType: streamType,
                             context: errorContext(error, chunk: chunk)
@@ -206,7 +208,7 @@ public struct StreamIngestPipeline {
             )
             return StreamIngestResult(streamID: streamID, runID: runID, processedChunks: processedChunks, diagnostics: diagnostics)
         } catch {
-            let decodingDiagnostic = error as? AudioDecodingDiagnosticError
+            let decodingDiagnostic = error as? IngestDiagnosticError
             let diagnostic = self.diagnostic(
                 streamID: streamID,
                 phase: decodingDiagnostic?.ingestDiagnosticPhase ?? .decode,
