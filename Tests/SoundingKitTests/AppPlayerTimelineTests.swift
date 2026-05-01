@@ -4,6 +4,10 @@ import XCTest
 
 @testable import SoundingKit
 
+#if canImport(AVFoundation)
+    import AVFoundation
+#endif
+
 final class AppPlayerTimelineTests: XCTestCase {
     func testRuntimeFeedsIngestAndPlaybackFromOneDecodeCall() async throws {
         let temporary = try TemporarySoundingDatabase()
@@ -129,6 +133,203 @@ final class AppPlayerTimelineTests: XCTestCase {
         XCTAssertFalse(snapshot.lastMessage.contains("secret"), snapshot.lastMessage)
     }
 
+    func testAVFoundationAdapterSchedulesSupportedPCMFrames() async throws {
+        #if canImport(AVFoundation)
+            let timeline = AppPlayerTimelineClock()
+            await timeline.reset(streamID: 88)
+            let scheduledBufferCount = LockedCounter()
+            let adapter = AVFoundationAppPCMPlayerAdapter(
+                engineStarter: {},
+                bufferScheduler: { buffers in
+                    XCTAssertEqual(buffers.count, 2)
+                    XCTAssertEqual(buffers.map(\.frameLength), [2, 2])
+                    XCTAssertEqual(buffers.map { $0.format.sampleRate }, [48_000, 48_000])
+                    XCTAssertEqual(buffers.map { Int($0.format.channelCount) }, [2, 2])
+                    scheduledBufferCount.increment(by: buffers.count)
+                },
+                playerStarter: {}
+            )
+            let format = SharedPCMFormat.linearPCM(
+                sampleRate: 48_000,
+                channelCount: 2,
+                bitDepth: 16
+            )
+
+            try await adapter.play(
+                [
+                    SharedPCMFrame(
+                        streamID: 88,
+                        sequence: 0,
+                        audio: Data([0x00, 0x00, 0xff, 0x7f, 0x00, 0x80, 0xff, 0xff]),
+                        startSeconds: 0,
+                        endSeconds: 0.00004,
+                        format: format
+                    ),
+                    SharedPCMFrame(
+                        streamID: 88,
+                        sequence: 1,
+                        audio: Data([0x10, 0x00, 0x20, 0x00, 0x30, 0x00, 0x40, 0x00]),
+                        startSeconds: 0.00004,
+                        endSeconds: 0.00008,
+                        format: format
+                    ),
+                ], timeline: timeline)
+
+            XCTAssertEqual(scheduledBufferCount.value, 2)
+            let snapshot = await timeline.snapshot()
+            XCTAssertEqual(snapshot.state, .playing)
+            XCTAssertEqual(snapshot.decodedFrameCount, 2)
+            XCTAssertEqual(snapshot.bufferedStartSeconds, 0)
+            XCTAssertEqual(snapshot.bufferedEndSeconds, 0.00008)
+            XCTAssertEqual(snapshot.lastMessage, "Playing shared PCM frame 1.")
+        #endif
+    }
+
+    func testAVFoundationAdapterRejectsUnknownAndContainerBytesWithoutClaimingPlayback()
+        async throws
+    {
+        #if canImport(AVFoundation)
+            let timeline = AppPlayerTimelineClock()
+            await timeline.reset(streamID: 89)
+            let scheduledBufferCount = LockedCounter()
+            let adapter = AVFoundationAppPCMPlayerAdapter(
+                engineStarter: {},
+                bufferScheduler: { buffers in scheduledBufferCount.increment(by: buffers.count) },
+                playerStarter: {}
+            )
+            let frame = SharedPCMFrame(
+                streamID: 89,
+                sequence: 0,
+                audio: Data([0x23, 0x45, 0x58, 0x54, 0x4d, 0x33, 0x55]),
+                startSeconds: 0,
+                endSeconds: 1,
+                format: .containerBytes
+            )
+
+            do {
+                try await adapter.play([frame], timeline: timeline)
+                XCTFail("Expected unsupported PCM format")
+            } catch let error as AppPlayerAdapterError {
+                guard case .unsupportedPCMFormat(let message) = error else {
+                    return XCTFail("Expected unsupportedPCMFormat, got \(error)")
+                }
+                XCTAssertTrue(message.contains("containerBytes"), message)
+            }
+
+            XCTAssertEqual(scheduledBufferCount.value, 0)
+            let snapshot = await timeline.snapshot()
+            XCTAssertEqual(snapshot.decodedFrameCount, 0)
+            XCTAssertEqual(
+                snapshot.state,
+                .failed(
+                    message:
+                        "Unsupported PCM format for frame 0: decoded payload is containerBytes."))
+            XCTAssertEqual(
+                snapshot.lastMessage,
+                "Unsupported PCM format for frame 0: decoded payload is containerBytes.")
+        #endif
+    }
+
+    func testAVFoundationAdapterRejectsMalformedPCMAndRedactsFailureMessages() async throws {
+        #if canImport(AVFoundation)
+            let timeline = AppPlayerTimelineClock()
+            await timeline.reset(streamID: 90)
+            let adapter = AVFoundationAppPCMPlayerAdapter(
+                engineStarter: {},
+                bufferScheduler: { _ in
+                    throw AppPlayerAdapterError.schedulingFailed(
+                        "leaked https://user:pass@example.test/live.m3u8?token=secret")
+                },
+                playerStarter: {}
+            )
+            let malformedFrame = SharedPCMFrame(
+                streamID: 90,
+                sequence: 7,
+                audio: Data([0x00, 0x01, 0x02]),
+                startSeconds: 1,
+                endSeconds: 2,
+                format: .linearPCM(sampleRate: 44_100, channelCount: 2)
+            )
+
+            do {
+                try await adapter.play([malformedFrame], timeline: timeline)
+                XCTFail("Expected malformed payload rejection")
+            } catch let error as AppPlayerAdapterError {
+                XCTAssertEqual(
+                    error,
+                    .unsupportedPCMFormat(
+                        "Unsupported PCM format for frame 7: PCM payload byte count is not aligned to frames."
+                    )
+                )
+            }
+
+            let badTimestampFrame = SharedPCMFrame(
+                streamID: 90,
+                sequence: 6,
+                audio: Data([0x00, 0x00, 0x01, 0x00]),
+                startSeconds: .infinity,
+                endSeconds: .infinity,
+                format: .linearPCM(sampleRate: 44_100, channelCount: 1)
+            )
+            do {
+                try await adapter.play([badTimestampFrame], timeline: timeline)
+                XCTFail("Expected malformed timestamp rejection")
+            } catch let error as AppPlayerAdapterError {
+                XCTAssertEqual(
+                    error,
+                    .unsupportedPCMFormat(
+                        "Unsupported PCM format for frame 6: timestamp bounds are malformed.")
+                )
+            }
+
+            let validFrame = SharedPCMFrame(
+                streamID: 90,
+                sequence: 8,
+                audio: Data([0x00, 0x00, 0x01, 0x00]),
+                startSeconds: 2,
+                endSeconds: 3,
+                format: .linearPCM(sampleRate: 44_100, channelCount: 1)
+            )
+            do {
+                try await adapter.play([validFrame], timeline: timeline)
+                XCTFail("Expected scheduler failure")
+            } catch let error as AppPlayerAdapterError {
+                XCTAssertEqual(
+                    error,
+                    .schedulingFailed("leaked [redacted]")
+                )
+            }
+
+            let snapshot = await timeline.snapshot()
+            guard case .failed(let message) = snapshot.state else {
+                return XCTFail("Expected failed snapshot, got \(snapshot.state)")
+            }
+            XCTAssertFalse(message.contains("token=secret"), message)
+            XCTAssertFalse(snapshot.lastMessage.contains("user:pass"), snapshot.lastMessage)
+            XCTAssertTrue(snapshot.lastMessage.contains("[redacted]"), snapshot.lastMessage)
+        #endif
+    }
+
+    func testAVFoundationAdapterEmptyFramesAreNoOpForTimelineState() async throws {
+        #if canImport(AVFoundation)
+            let timeline = AppPlayerTimelineClock()
+            await timeline.reset(streamID: 91)
+            await timeline.updatePlayerState(
+                .playing, positionSeconds: 12, message: "Already playing.")
+            let before = await timeline.snapshot()
+            let adapter = AVFoundationAppPCMPlayerAdapter(
+                engineStarter: { XCTFail("Empty frames should not start the engine") },
+                bufferScheduler: { _ in XCTFail("Empty frames should not schedule buffers") },
+                playerStarter: { XCTFail("Empty frames should not start playback") }
+            )
+
+            try await adapter.play([], timeline: timeline)
+
+            let after = await timeline.snapshot()
+            XCTAssertEqual(after, before)
+        #endif
+    }
+
     func testPlayerTimelineClockTracksPositionLiveEdgeAndDrift() async throws {
         let timeline = AppPlayerTimelineClock()
         await timeline.reset(streamID: 7)
@@ -150,6 +351,23 @@ final class AppPlayerTimelineTests: XCTestCase {
         XCTAssertEqual(snapshot.bufferedEndSeconds, 20)
         XCTAssertEqual(snapshot.driftSeconds, 8)
         XCTAssertEqual(snapshot.decodedFrameCount, 2)
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func increment(by amount: Int) {
+        lock.lock()
+        storage += amount
+        lock.unlock()
     }
 }
 

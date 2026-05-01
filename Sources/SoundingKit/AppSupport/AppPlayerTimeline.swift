@@ -7,18 +7,60 @@ import Foundation
 /// Format metadata for decoded audio shared by ingest and playback.
 /// Existing decoders may not know the concrete PCM format yet, so the default
 /// contract remains explicit about unknown format instead of inventing one.
+public enum SharedPCMPayloadKind: String, Equatable, Sendable {
+    case unknown
+    case linearPCM
+    case containerBytes
+}
+
 public struct SharedPCMFormat: Equatable, Sendable {
     public var sampleRate: Double?
     public var channelCount: Int?
     public var bitDepth: Int?
+    public var payloadKind: SharedPCMPayloadKind
+    public var isFloat: Bool
+    public var isInterleaved: Bool
+    public var isBigEndian: Bool
 
-    public init(sampleRate: Double? = nil, channelCount: Int? = nil, bitDepth: Int? = nil) {
+    public init(
+        sampleRate: Double? = nil,
+        channelCount: Int? = nil,
+        bitDepth: Int? = nil,
+        payloadKind: SharedPCMPayloadKind = .unknown,
+        isFloat: Bool = false,
+        isInterleaved: Bool = true,
+        isBigEndian: Bool = false
+    ) {
         self.sampleRate = sampleRate
         self.channelCount = channelCount
         self.bitDepth = bitDepth
+        self.payloadKind = payloadKind
+        self.isFloat = isFloat
+        self.isInterleaved = isInterleaved
+        self.isBigEndian = isBigEndian
     }
 
     public static let unknown = SharedPCMFormat()
+    public static let containerBytes = SharedPCMFormat(payloadKind: .containerBytes)
+
+    public static func linearPCM(
+        sampleRate: Double,
+        channelCount: Int,
+        bitDepth: Int = 16,
+        isFloat: Bool = false,
+        isInterleaved: Bool = true,
+        isBigEndian: Bool = false
+    ) -> SharedPCMFormat {
+        SharedPCMFormat(
+            sampleRate: sampleRate,
+            channelCount: channelCount,
+            bitDepth: bitDepth,
+            payloadKind: .linearPCM,
+            isFloat: isFloat,
+            isInterleaved: isInterleaved,
+            isBigEndian: isBigEndian
+        )
+    }
 }
 
 /// One decoded audio range on the single SoundingKit timeline.
@@ -51,7 +93,9 @@ public struct SharedPCMFrame: Equatable, Sendable {
         self.format = format
     }
 
-    public init(streamID: Int64, chunk: DecodedAudioChunk, format: SharedPCMFormat = .unknown) {
+    public init(
+        streamID: Int64, chunk: DecodedAudioChunk, format: SharedPCMFormat = .containerBytes
+    ) {
         self.init(
             streamID: streamID,
             sequence: chunk.sequence,
@@ -193,7 +237,8 @@ public actor AppPlayerTimelineClock {
             liveEdgeSeconds: max(current.liveEdgeSeconds, snapshot.liveEdgeSeconds),
             bufferedStartSeconds: range?.startSeconds ?? current.bufferedStartSeconds,
             bufferedEndSeconds: range?.endSeconds ?? current.bufferedEndSeconds,
-            driftSeconds: max(current.liveEdgeSeconds, snapshot.liveEdgeSeconds) - current.positionSeconds,
+            driftSeconds: max(current.liveEdgeSeconds, snapshot.liveEdgeSeconds)
+                - current.positionSeconds,
             decodedFrameCount: current.decodedFrameCount,
             rollingBuffer: snapshot,
             unavailableRangeMessage: nil,
@@ -250,11 +295,14 @@ public enum AppPlayerAdapterError: Error, Equatable, CustomStringConvertible, Se
     case independentSourcePathRejected(String)
     case audioDeviceUnavailable(String)
     case decodeFailed(String)
+    case unsupportedPCMFormat(String)
+    case schedulingFailed(String)
 
     public var description: String {
         switch self {
         case .independentSourcePathRejected(let message), .audioDeviceUnavailable(let message),
-            .decodeFailed(let message):
+            .decodeFailed(let message), .unsupportedPCMFormat(let message),
+            .schedulingFailed(let message):
             return IngestRedaction.redact(message)
         }
     }
@@ -277,24 +325,50 @@ public protocol AppPCMPlaybackAdapting: Sendable {
 public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unchecked Sendable {
     #if canImport(AVFoundation)
         private let engine = AVAudioEngine()
+        private let playerNode = AVAudioPlayerNode()
+        private var didAttachPlayerNode = false
+        private let engineStarter: (@Sendable () throws -> Void)?
+        private let bufferScheduler: (@Sendable ([AVAudioPCMBuffer]) throws -> Void)?
+        private let playerStarter: (@Sendable () -> Void)?
+        private let engineStopper: (@Sendable () -> Void)?
     #endif
 
-    public init() {}
+    public init() {
+        #if canImport(AVFoundation)
+            self.engineStarter = nil
+            self.bufferScheduler = nil
+            self.playerStarter = nil
+            self.engineStopper = nil
+        #endif
+    }
+
+    #if canImport(AVFoundation)
+        init(
+            engineStarter: (@Sendable () throws -> Void)?,
+            bufferScheduler: (@Sendable ([AVAudioPCMBuffer]) throws -> Void)?,
+            playerStarter: (@Sendable () -> Void)? = nil,
+            engineStopper: (@Sendable () -> Void)? = nil
+        ) {
+            self.engineStarter = engineStarter
+            self.bufferScheduler = bufferScheduler
+            self.playerStarter = playerStarter
+            self.engineStopper = engineStopper
+        }
+    #endif
 
     public func prepare(
         streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock
     ) async throws {
         #if canImport(AVFoundation)
-            if !engine.isRunning {
-                do {
-                    try engine.start()
-                } catch {
-                    await timeline.updatePlayerState(
-                        .failed(message: "Audio device unavailable."),
-                        message: "Audio device unavailable: \(error).")
-                    throw AppPlayerAdapterError.audioDeviceUnavailable(
-                        "Audio device unavailable: \(error).")
-                }
+            do {
+                try startAudioEngineIfNeeded()
+            } catch {
+                await publishFailure(
+                    "Audio device unavailable: \(error).",
+                    timeline: timeline
+                )
+                throw AppPlayerAdapterError.audioDeviceUnavailable(
+                    "Audio device unavailable: \(error).")
             }
         #endif
         await timeline.reset(
@@ -302,6 +376,28 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
     }
 
     public func play(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws {
+        guard !frames.isEmpty else { return }
+
+        do {
+            #if canImport(AVFoundation)
+                let buffers = try frames.map(makePCMBuffer)
+                try startAudioEngineIfNeeded()
+                try schedule(buffers)
+                startPlayerNodeIfNeeded()
+            #else
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "AVFoundation playback is unavailable on this platform.")
+            #endif
+        } catch let error as AppPlayerAdapterError {
+            await publishFailure(error.description, timeline: timeline)
+            throw error
+        } catch {
+            let failure = AppPlayerAdapterError.schedulingFailed(
+                "Player scheduling failed: \(error).")
+            await publishFailure(failure.description, timeline: timeline)
+            throw failure
+        }
+
         await timeline.recordDecodedFrames(frames)
         if let last = frames.max(by: { $0.endSeconds < $1.endSeconds }) {
             await timeline.updatePlayerState(
@@ -309,25 +405,165 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 positionSeconds: last.startSeconds,
                 message: "Playing shared PCM frame \(last.sequence)."
             )
-        } else {
-            await timeline.updatePlayerState(.buffering, message: "Waiting for decoded PCM frames.")
         }
     }
 
     public func pause(timeline: AppPlayerTimelineClock) async {
+        #if canImport(AVFoundation)
+            playerNode.pause()
+        #endif
         await timeline.updatePlayerState(.paused, message: "Playback paused.")
     }
 
     public func resume(timeline: AppPlayerTimelineClock) async {
+        #if canImport(AVFoundation)
+            startPlayerNodeIfNeeded()
+        #endif
         await timeline.updatePlayerState(.playing, message: "Playback resumed.")
     }
 
     public func stop(timeline: AppPlayerTimelineClock) async {
         #if canImport(AVFoundation)
-            engine.stop()
+            playerNode.stop()
+            if let engineStopper {
+                engineStopper()
+            } else {
+                engine.stop()
+            }
         #endif
         await timeline.updatePlayerState(.stopped, message: "Playback stopped.")
     }
+
+    private func publishFailure(_ message: String, timeline: AppPlayerTimelineClock) async {
+        await timeline.updatePlayerState(
+            .failed(message: message),
+            message: message
+        )
+    }
+
+    #if canImport(AVFoundation)
+        private func startAudioEngineIfNeeded() throws {
+            if let engineStarter {
+                try engineStarter()
+                return
+            }
+            if !didAttachPlayerNode {
+                engine.attach(playerNode)
+                let outputFormat = engine.outputNode.inputFormat(forBus: 0)
+                engine.connect(playerNode, to: engine.outputNode, format: outputFormat)
+                didAttachPlayerNode = true
+            }
+            if !engine.isRunning {
+                try engine.start()
+            }
+        }
+
+        private func schedule(_ buffers: [AVAudioPCMBuffer]) throws {
+            if let bufferScheduler {
+                try bufferScheduler(buffers)
+                return
+            }
+            for buffer in buffers {
+                playerNode.scheduleBuffer(buffer, completionHandler: nil)
+            }
+        }
+
+        private func startPlayerNodeIfNeeded() {
+            if let playerStarter {
+                playerStarter()
+                return
+            }
+            if !playerNode.isPlaying {
+                playerNode.play()
+            }
+        }
+
+        private func makePCMBuffer(from frame: SharedPCMFrame) throws -> AVAudioPCMBuffer {
+            let format = frame.format
+            guard format.payloadKind == .linearPCM else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): decoded payload is \(format.payloadKind.rawValue)."
+                )
+            }
+            guard frame.startSeconds.isFinite, frame.endSeconds.isFinite,
+                frame.startSeconds >= 0, frame.endSeconds >= frame.startSeconds
+            else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): timestamp bounds are malformed."
+                )
+            }
+            guard let sampleRate = format.sampleRate, sampleRate.isFinite, sampleRate > 0 else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): missing sample rate.")
+            }
+            guard let channelCount = format.channelCount, channelCount > 0,
+                channelCount <= Int(UInt32.max)
+            else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): missing channel count.")
+            }
+            guard format.bitDepth == 16, !format.isFloat, format.isInterleaved, !format.isBigEndian
+            else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): only little-endian interleaved 16-bit PCM is schedulable."
+                )
+            }
+            guard frame.byteCount > 0, frame.byteCount <= frame.audio.count else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): PCM payload is empty or truncated."
+                )
+            }
+
+            let bytesPerFrame = channelCount * MemoryLayout<Int16>.size
+            guard frame.byteCount % bytesPerFrame == 0 else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): PCM payload byte count is not aligned to frames."
+                )
+            }
+            let frameCount = frame.byteCount / bytesPerFrame
+            guard frameCount > 0, frameCount <= Int(UInt32.max) else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): PCM payload frame count is invalid."
+                )
+            }
+            guard
+                let audioFormat = AVAudioFormat(
+                    commonFormat: .pcmFormatInt16,
+                    sampleRate: sampleRate,
+                    channels: AVAudioChannelCount(channelCount),
+                    interleaved: true
+                ),
+                let buffer = AVAudioPCMBuffer(
+                    pcmFormat: audioFormat,
+                    frameCapacity: AVAudioFrameCount(frameCount)
+                )
+            else {
+                throw AppPlayerAdapterError.unsupportedPCMFormat(
+                    "Unsupported PCM format for frame \(frame.sequence): AVFoundation could not create a PCM buffer."
+                )
+            }
+
+            buffer.frameLength = AVAudioFrameCount(frameCount)
+            let mutableBuffers = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+            guard let audioBuffer = mutableBuffers.first,
+                let destination = audioBuffer.mData
+            else {
+                throw AppPlayerAdapterError.schedulingFailed(
+                    "Player scheduling failed: AVFoundation did not expose PCM buffer storage.")
+            }
+            guard audioBuffer.mDataByteSize >= frame.byteCount else {
+                throw AppPlayerAdapterError.schedulingFailed(
+                    "Player scheduling failed: AVFoundation PCM buffer storage is too small.")
+            }
+            frame.audio.withUnsafeBytes { rawBytes in
+                if let source = rawBytes.baseAddress {
+                    destination.copyMemory(from: source, byteCount: frame.byteCount)
+                }
+            }
+            mutableBuffers[0].mDataByteSize = UInt32(frame.byteCount)
+            return buffer
+        }
+    #endif
 }
 
 /// Deterministic adapter for tests and previews.
