@@ -68,6 +68,7 @@ let package = Package(
             name: "SoundingKitTests",
             dependencies: [
                 "SoundingKit",
+                "sounding",
                 .product(name: "GRDB", package: "GRDB.swift")
             ],
             resources: [
