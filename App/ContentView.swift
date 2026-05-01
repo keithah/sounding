@@ -10,8 +10,8 @@ struct ContentView: View {
     @State private var persistenceError: String?
     @State private var timelineActionMessage: String?
 
-    init() {
-        let initial = Self.makeInitialState()
+    init(preferences: SoundingAppPreferences? = nil) {
+        let initial = Self.makeInitialState(preferences: preferences)
         registry = initial.registry
         runtime = initial.runtime
         timelineStore = initial.timelineStore
@@ -347,8 +347,11 @@ struct ContentView: View {
         }
     }
 
-    private static func makeInitialState() -> SoundingAppRuntimeStartupState {
-        SoundingAppRuntimeFactory().makeStartupState()
+    private static func makeInitialState(preferences: SoundingAppPreferences? = nil) -> SoundingAppRuntimeStartupState {
+        if let preferences {
+            return SoundingAppRuntimeFactory().makeStartupState(preferences: preferences)
+        }
+        return SoundingAppRuntimeFactory().makeStartupState()
     }
 }
 

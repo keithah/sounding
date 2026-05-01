@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* SoundingApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002 /* SoundingApp.swift */; };
 		A10000000000000000000003 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* ContentView.swift */; };
+		A10000000000000000000021 /* PreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* PreferencesView.swift */; };
+		A10000000000000000000023 /* AppKeychainSecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* AppKeychainSecretStore.swift */; };
 		A10000000000000000000005 /* SoundingKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000006 /* SoundingKit */; };
 /* End PBXBuildFile section */
 
@@ -16,6 +18,8 @@
 		A10000000000000000000007 /* Sounding.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Sounding.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000002 /* SoundingApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoundingApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000004 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A10000000000000000000022 /* PreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesView.swift; sourceTree = "<group>"; };
+		A10000000000000000000024 /* AppKeychainSecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppKeychainSecretStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -43,6 +47,8 @@
 			children = (
 				A10000000000000000000002 /* SoundingApp.swift */,
 				A10000000000000000000004 /* ContentView.swift */,
+				A10000000000000000000022 /* PreferencesView.swift */,
+				A10000000000000000000024 /* AppKeychainSecretStore.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -131,6 +137,8 @@
 			files = (
 				A10000000000000000000001 /* SoundingApp.swift in Sources */,
 				A10000000000000000000003 /* ContentView.swift in Sources */,
+				A10000000000000000000021 /* PreferencesView.swift in Sources */,
+				A10000000000000000000023 /* AppKeychainSecretStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
