@@ -72,6 +72,27 @@ swift run --package-path sounding sounding ingest \
 
 `ingest` requires either `--duration` or `--max-chunks` and validates those bounds before opening the database or model providers. Database-open failures, source-open failures, and model setup failures are reported through redacted CLI diagnostics; recoverable per-chunk transcription and diarization failures are persisted in `ingest_diagnostics` for later inspection. On successful bounded runs, the database should contain stream/run/chunk rows plus any transcript segments, timestamped words, speaker turns, ad events, and diagnostics produced by the source and providers.
 
+### Operational hardening proof for ingest
+
+Use short, bounded runs and redacted placeholders when proving the M002 ingest path. Do not paste private URLs, credentials, local model cache paths, generated database paths, or runtime evidence into tracked files.
+
+- **Bounded success:** run a fixture or authorized live source with `--max-chunks 1` or a short `--duration`; expect stdout shaped like `ingest completed: stream=<id> run=<id> chunks=<n> diagnostics=<n>`, an `ingest_runs.status` of `completed`, sanitized `streams.source` / `ingest_chunks.segment_uri` values, and any transcript rows to remain queryable.
+- **Model cache reuse:** run the same bounded live proof twice on the same machine. The first run may emit redacted `model downloading` / `model cached` progress lines, while the second should reuse cached providers without printing model cache filesystem paths.
+- **Recoverable chunk failure:** when a chunk-level transcription or diarization error occurs after some valid chunks, expect the run to finish with persisted `ingest_diagnostics` rows that include `phase`, `reason`, `created_at`, run/chunk identity, and redacted context while valid transcript rows remain searchable and countable.
+- **Fatal setup failure:** missing bounds, invalid bounds, database-open failures, source-open failures, and provider setup failures should fail before unrelated work continues. Stderr should use messages such as `Ingest configuration failed`, `Ingest database failed`, `Ingest sourceOpen failed`, or `Ingest modelSetup failed` with redacted source and path details.
+- **Cancellation or interrupt:** an interrupted run should write a terminal `cancelled` ingest run once, preserve any completed chunk diagnostics, and avoid duplicate terminal state updates.
+- **Search/count after ingest:** after valid transcript rows exist, run `search` and `count` against the same database to prove transcript FTS and phrase aggregates still work after success or recoverable failures.
+
+For local inspection, prefer deterministic SQL that avoids leaking values:
+
+```sh
+sqlite3 /tmp/sounding-ingest.sqlite \
+  "SELECT status, COUNT(*) FROM ingest_runs GROUP BY status;"
+
+sqlite3 /tmp/sounding-ingest.sqlite \
+  "SELECT phase, reason, COUNT(*) FROM ingest_diagnostics GROUP BY phase, reason;"
+```
+
 Real ML/live proof is intentionally local-only: provide an authorized `SOUNDING_LIVE_URL`, let WhisperKit/FluidAudio download or reuse cached models, then inspect the SQLite counts with `sqlite3` or GRDB. Do not commit live URLs, model cache paths, generated databases, or runtime evidence files.
 
 After ingest writes transcript rows, use `search` for timestamped transcript blocks with stream/run/chunk/segment identity, speaker labels, context, and word ranges:
