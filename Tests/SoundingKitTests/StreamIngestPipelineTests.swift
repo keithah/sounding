@@ -204,6 +204,130 @@ final class StreamIngestPipelineTests: XCTestCase {
         XCTAssertFalse(context?.contains("secret") ?? true, context ?? "nil")
     }
 
+    func testTranscriberModelSetupFailureFailsRunWithSingleModelSetupDiagnostic() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeTranscriber(errorBySequence: [0: FakeDiagnosticError(phase: .modelSetup, reason: "model-setup-failed", description: "token=secret")]),
+            diarizer: FakeDiarizer()
+        )
+
+        do {
+            _ = try await pipeline.run(source: "https://user:pass@example.test/live?token=secret", streamType: .icecast, maxChunks: 1)
+            XCTFail("Expected model setup failure")
+        } catch let error as FakeDiagnosticError {
+            XCTAssertEqual(error.ingestDiagnosticPhase, .modelSetup)
+        } catch {
+            XCTFail("Expected FakeDiagnosticError, got \(error)")
+        }
+
+        let rows = try temporary.database.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT ingest_runs.status AS status, ingest_diagnostics.phase AS phase,
+                       ingest_diagnostics.reason AS reason, ingest_diagnostics.context_json AS context
+                FROM ingest_runs
+                JOIN ingest_diagnostics ON ingest_diagnostics.run_id = ingest_runs.id
+                ORDER BY ingest_diagnostics.id
+                """)
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["status"] as String?, "failed")
+        XCTAssertEqual(rows.first?["phase"] as String?, "modelSetup")
+        XCTAssertEqual(rows.first?["reason"] as String?, "model-setup-failed")
+        let context: String? = rows.first?["context"]
+        XCTAssertFalse(context?.contains("secret") ?? true, context ?? "nil")
+        let running = try temporary.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_runs WHERE status = 'running'")
+        }
+        XCTAssertEqual(running, 0)
+    }
+
+    func testDiarizerModelSetupFailureFailsRunWithSingleModelSetupDiagnostic() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeTranscriber(segmentsBySequence: [0: [Self.segment(text: "hello world")]]),
+            diarizer: FakeDiarizer(errorBySequence: [0: FakeDiagnosticError(phase: .modelSetup, reason: "model-setup-failed", description: "password=secret")])
+        )
+
+        do {
+            _ = try await pipeline.run(source: "https://user:pass@example.test/live?token=secret", streamType: .icecast, maxChunks: 1)
+            XCTFail("Expected model setup failure")
+        } catch let error as FakeDiagnosticError {
+            XCTAssertEqual(error.ingestDiagnosticPhase, .modelSetup)
+        } catch {
+            XCTFail("Expected FakeDiagnosticError, got \(error)")
+        }
+
+        let rows = try temporary.database.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT ingest_runs.status AS status, ingest_diagnostics.phase AS phase,
+                       ingest_diagnostics.reason AS reason, ingest_diagnostics.context_json AS context
+                FROM ingest_runs
+                JOIN ingest_diagnostics ON ingest_diagnostics.run_id = ingest_runs.id
+                ORDER BY ingest_diagnostics.id
+                """)
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["status"] as String?, "failed")
+        XCTAssertEqual(rows.first?["phase"] as String?, "modelSetup")
+        XCTAssertEqual(rows.first?["reason"] as String?, "model-setup-failed")
+        let context: String? = rows.first?["context"]
+        XCTAssertFalse(context?.contains("secret") ?? true, context ?? "nil")
+        let running = try temporary.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_runs WHERE status = 'running'")
+        }
+        XCTAssertEqual(running, 0)
+    }
+
+    func testCancellationAfterDecodeBeforeChunkProcessingCancelsRunWithDiagnostic() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let gate = DecodeGate(chunks: [Self.chunk(sequence: 0)])
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: GateDecoder(gate: gate),
+            transcriber: FakeTranscriber(segmentsBySequence: [0: [Self.segment(text: "should not run")]]),
+            diarizer: FakeDiarizer()
+        )
+
+        let task = Task {
+            try await pipeline.run(source: "https://user:pass@example.test/live?token=secret", streamType: .icecast, maxChunks: 1)
+        }
+        await gate.waitUntilRequested()
+        task.cancel()
+        await gate.resume()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        let evidence = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT ingest_runs.status AS status, ingest_diagnostics.reason AS reason,
+                       ingest_diagnostics.context_json AS context,
+                       (SELECT COUNT(*) FROM ingest_chunks WHERE ingest_chunks.run_id = ingest_runs.id AND sequence >= 0) AS real_chunks
+                FROM ingest_runs
+                JOIN ingest_diagnostics ON ingest_diagnostics.run_id = ingest_runs.id
+                """)
+        }
+        XCTAssertEqual(evidence?["status"] as String?, "cancelled")
+        XCTAssertEqual(evidence?["reason"] as String?, "ingest-cancelled")
+        XCTAssertEqual(evidence?["real_chunks"] as Int?, 0)
+        let context: String? = evidence?["context"]
+        XCTAssertFalse(context?.contains("secret") ?? true, context ?? "nil")
+        let running = try temporary.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_runs WHERE status = 'running'")
+        }
+        XCTAssertEqual(running, 0)
+    }
+
     private static func chunk(sequence: Int, audio: Data = Data([0x01, 0x02, 0x03])) -> DecodedAudioChunk {
         DecodedAudioChunk(
             sequence: sequence,
@@ -305,5 +429,61 @@ private struct FakeIngestError: Error, CustomStringConvertible {
 
     init(_ description: String) {
         self.description = description
+    }
+}
+
+private struct FakeDiagnosticError: Error, CustomStringConvertible, IngestDiagnosticError {
+    var ingestDiagnosticPhase: IngestDiagnosticPhase
+    var ingestDiagnosticReason: String
+    var description: String
+
+    init(phase: IngestDiagnosticPhase, reason: String, description: String) {
+        self.ingestDiagnosticPhase = phase
+        self.ingestDiagnosticReason = reason
+        self.description = description
+    }
+}
+
+private struct GateDecoder: AudioDecoding {
+    let gate: DecodeGate
+
+    func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+        await gate.chunksAfterResume()
+    }
+}
+
+private actor DecodeGate {
+    private let chunks: [DecodedAudioChunk]
+    private var requested = false
+    private var requestWaiters: [CheckedContinuation<Void, Never>] = []
+    private var resumeWaiter: CheckedContinuation<Void, Never>?
+
+    init(chunks: [DecodedAudioChunk]) {
+        self.chunks = chunks
+    }
+
+    func waitUntilRequested() async {
+        if requested { return }
+        await withCheckedContinuation { continuation in
+            requestWaiters.append(continuation)
+        }
+    }
+
+    func chunksAfterResume() async -> [DecodedAudioChunk] {
+        requested = true
+        let waiters = requestWaiters
+        requestWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+        await withCheckedContinuation { continuation in
+            resumeWaiter = continuation
+        }
+        return chunks
+    }
+
+    func resume() {
+        resumeWaiter?.resume()
+        resumeWaiter = nil
     }
 }

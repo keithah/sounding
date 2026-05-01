@@ -73,8 +73,60 @@ public struct StreamIngestPipeline {
         var diagnostics: [IngestDiagnosticDraft] = []
         var processedChunks = 0
         var nextSegmentSequence = 0
+        var terminalRunFinished = false
+
+        func finishRunOnce(
+            status: IngestRunStatus,
+            diagnostic: IngestDiagnosticDraft? = nil,
+            chunkID: Int64? = nil,
+            context: [String: JSONValue]
+        ) throws {
+            guard !terminalRunFinished else { return }
+
+            if let diagnostic {
+                let diagnosticChunkID: Int64
+                if let chunkID {
+                    diagnosticChunkID = chunkID
+                } else {
+                    diagnosticChunkID = try persistence.createChunk(
+                        runID: runID,
+                        sequence: -1,
+                        startedAt: now(),
+                        endedAt: now(),
+                        context: ["synthetic": true, "terminalStatus": .string(status.rawValue)]
+                    )
+                }
+                try persistence.persistTimeline(
+                    IngestChunkTimeline(runID: runID, chunkID: diagnosticChunkID, diagnostics: [diagnostic], createdAt: now())
+                )
+            }
+
+            try persistence.finishRun(runID: runID, endedAt: now(), status: status, context: context)
+            terminalRunFinished = true
+        }
+
+        func terminalContext(
+            status: IngestRunStatus,
+            diagnosticCount: Int,
+            phase: IngestDiagnosticPhase? = nil,
+            reason: String? = nil
+        ) -> [String: JSONValue] {
+            var context: [String: JSONValue] = [
+                "processedChunks": .number(Double(processedChunks)),
+                "diagnosticCount": .number(Double(diagnosticCount)),
+                "terminalStatus": .string(status.rawValue)
+            ]
+            if let phase {
+                context["terminalPhase"] = .string(phase.rawValue)
+            }
+            if let reason {
+                context["terminalReason"] = .string(MonitorError.redactedSourceDescription(reason))
+            }
+            return context
+        }
 
         do {
+            try Task.checkCancellation()
             let decoded = try await decoder.decodedChunks(
                 for: AudioDecodeRequest(
                     source: source,
@@ -83,9 +135,11 @@ public struct StreamIngestPipeline {
                     maxChunks: maxChunks
                 )
             )
+            try Task.checkCancellation()
             let bounded = applyBounds(decoded, durationSeconds: durationSeconds, maxChunks: maxChunks)
 
             for chunk in bounded {
+                try Task.checkCancellation()
                 if chunk.audio.isEmpty || chunk.byteCount <= 0 {
                     let diagnostic = self.diagnostic(
                         streamID: streamID,
@@ -132,6 +186,7 @@ public struct StreamIngestPipeline {
                 var chunkDiagnostics: [IngestDiagnosticDraft] = []
                 var segments: [TranscriptSegmentDraft] = []
                 do {
+                    try Task.checkCancellation()
                     segments = try await transcriber.transcribe(chunk)
                     let validation = validateAndNormalize(segments, nextSequence: nextSegmentSequence)
                     segments = validation.segments
@@ -147,38 +202,63 @@ public struct StreamIngestPipeline {
                             context: template.context
                         )
                     })
+                } catch let cancellation as CancellationError {
+                    throw cancellation
                 } catch {
                     let diagnosticError = error as? IngestDiagnosticError
-                    chunkDiagnostics.append(
-                        diagnostic(
-                            streamID: streamID,
-                            phase: diagnosticError?.ingestDiagnosticPhase ?? .transcribe,
-                            severity: .error,
-                            reason: diagnosticError?.ingestDiagnosticReason ?? "transcription-failed",
-                            source: redactedSource,
-                            streamType: streamType,
-                            context: errorContext(error, chunk: chunk)
-                        )
+                    let phase = diagnosticError?.ingestDiagnosticPhase ?? .transcribe
+                    let reason = diagnosticError?.ingestDiagnosticReason ?? "transcription-failed"
+                    let providerDiagnostic = diagnostic(
+                        streamID: streamID,
+                        phase: phase,
+                        severity: .error,
+                        reason: reason,
+                        source: redactedSource,
+                        streamType: streamType,
+                        context: errorContext(error, chunk: chunk)
                     )
+                    if phase == .modelSetup {
+                        try finishRunOnce(
+                            status: .failed,
+                            diagnostic: providerDiagnostic,
+                            chunkID: chunkID,
+                            context: terminalContext(status: .failed, diagnosticCount: diagnostics.count + 1, phase: phase, reason: reason)
+                        )
+                        throw error
+                    }
+                    chunkDiagnostics.append(providerDiagnostic)
                     segments = []
                 }
 
                 var speakerTurns: [SpeakerTurnDraft] = []
                 do {
+                    try Task.checkCancellation()
                     speakerTurns = try await diarizer.diarize(chunk, transcriptSegments: segments)
+                } catch let cancellation as CancellationError {
+                    throw cancellation
                 } catch {
                     let diagnosticError = error as? IngestDiagnosticError
-                    chunkDiagnostics.append(
-                        diagnostic(
-                            streamID: streamID,
-                            phase: diagnosticError?.ingestDiagnosticPhase ?? .diarize,
-                            severity: .error,
-                            reason: diagnosticError?.ingestDiagnosticReason ?? "diarization-failed",
-                            source: redactedSource,
-                            streamType: streamType,
-                            context: errorContext(error, chunk: chunk)
-                        )
+                    let phase = diagnosticError?.ingestDiagnosticPhase ?? .diarize
+                    let reason = diagnosticError?.ingestDiagnosticReason ?? "diarization-failed"
+                    let providerDiagnostic = diagnostic(
+                        streamID: streamID,
+                        phase: phase,
+                        severity: .error,
+                        reason: reason,
+                        source: redactedSource,
+                        streamType: streamType,
+                        context: errorContext(error, chunk: chunk)
                     )
+                    if phase == .modelSetup {
+                        try finishRunOnce(
+                            status: .failed,
+                            diagnostic: providerDiagnostic,
+                            chunkID: chunkID,
+                            context: terminalContext(status: .failed, diagnosticCount: diagnostics.count + chunkDiagnostics.count + 1, phase: phase, reason: reason)
+                        )
+                        throw error
+                    }
+                    chunkDiagnostics.append(providerDiagnostic)
                     speakerTurns = []
                 }
 
@@ -197,42 +277,50 @@ public struct StreamIngestPipeline {
                 processedChunks += 1
             }
 
-            try persistence.finishRun(
-                runID: runID,
-                endedAt: now(),
+            try finishRunOnce(
                 status: .completed,
-                context: [
-                    "processedChunks": .number(Double(processedChunks)),
-                    "diagnosticCount": .number(Double(diagnostics.count))
-                ]
+                context: terminalContext(status: .completed, diagnosticCount: diagnostics.count)
             )
             return StreamIngestResult(streamID: streamID, runID: runID, processedChunks: processedChunks, diagnostics: diagnostics)
-        } catch {
-            let decodingDiagnostic = error as? IngestDiagnosticError
+        } catch is CancellationError {
             let diagnostic = self.diagnostic(
                 streamID: streamID,
-                phase: decodingDiagnostic?.ingestDiagnosticPhase ?? .decode,
+                phase: .decode,
                 severity: .error,
-                reason: decodingDiagnostic?.ingestDiagnosticReason ?? "decoder-failed",
+                reason: "ingest-cancelled",
+                source: redactedSource,
+                streamType: streamType,
+                context: [
+                    "processedChunks": .number(Double(processedChunks)),
+                    "error": .string("CancellationError")
+                ]
+            )
+            try? finishRunOnce(
+                status: .cancelled,
+                diagnostic: diagnostic,
+                context: terminalContext(status: .cancelled, diagnosticCount: diagnostics.count + 1, phase: .decode, reason: "ingest-cancelled")
+            )
+            throw CancellationError()
+        } catch {
+            if terminalRunFinished {
+                throw error
+            }
+            let decodingDiagnostic = error as? IngestDiagnosticError
+            let phase = decodingDiagnostic?.ingestDiagnosticPhase ?? .decode
+            let reason = decodingDiagnostic?.ingestDiagnosticReason ?? "decoder-failed"
+            let diagnostic = self.diagnostic(
+                streamID: streamID,
+                phase: phase,
+                severity: .error,
+                reason: reason,
                 source: redactedSource,
                 streamType: streamType,
                 context: ["error": .string(MonitorError.redactedSourceDescription(String(describing: error)))]
             )
-            let chunkID = try persistence.createChunk(
-                runID: runID,
-                sequence: processedChunks,
-                startedAt: now(),
-                endedAt: now(),
-                context: ["synthetic": true]
-            )
-            try persistence.persistTimeline(
-                IngestChunkTimeline(runID: runID, chunkID: chunkID, diagnostics: [diagnostic], createdAt: now())
-            )
-            try persistence.finishRun(
-                runID: runID,
-                endedAt: now(),
+            try finishRunOnce(
                 status: .failed,
-                context: ["diagnosticCount": .number(Double(diagnostics.count + 1))]
+                diagnostic: diagnostic,
+                context: terminalContext(status: .failed, diagnosticCount: diagnostics.count + 1, phase: phase, reason: reason)
             )
             throw error
         }

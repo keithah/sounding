@@ -64,13 +64,28 @@ final class MLProviderContractTests: XCTestCase {
             diarizer: FakeDiarizer()
         )
 
-        let result = try await pipeline.run(source: "https://user:pass@example.test/live?token=secret", streamType: .icecast, maxChunks: 1)
-
-        XCTAssertEqual(result.diagnostics.map(\.phase), [.modelSetup])
-        XCTAssertEqual(result.diagnostics.map(\.reason), ["model-setup-failed"])
-        let context = try temporary.database.read { db in
-            try String.fetchOne(db, sql: "SELECT context_json FROM ingest_diagnostics WHERE phase = 'modelSetup'")
+        do {
+            _ = try await pipeline.run(source: "https://user:pass@example.test/live?token=secret", streamType: .icecast, maxChunks: 1)
+            XCTFail("Expected model setup failure to terminate the ingest run")
+        } catch let error as ModelCacheError {
+            XCTAssertEqual(error.ingestDiagnosticPhase, .modelSetup)
+            XCTAssertEqual(error.ingestDiagnosticReason, "model-setup-failed")
+        } catch {
+            XCTFail("Expected ModelCacheError, got \(error)")
         }
+
+        let evidence = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT ingest_runs.status AS status, ingest_diagnostics.phase AS phase,
+                       ingest_diagnostics.reason AS reason, ingest_diagnostics.context_json AS context
+                FROM ingest_runs
+                JOIN ingest_diagnostics ON ingest_diagnostics.run_id = ingest_runs.id
+                """)
+        }
+        XCTAssertEqual(evidence?["status"] as String?, "failed")
+        XCTAssertEqual(evidence?["phase"] as String?, "modelSetup")
+        XCTAssertEqual(evidence?["reason"] as String?, "model-setup-failed")
+        let context: String? = evidence?["context"]
         XCTAssertFalse(context?.contains("secret") ?? true, context ?? "nil")
     }
 
