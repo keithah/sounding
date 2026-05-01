@@ -340,25 +340,39 @@ public protocol AppStreamRuntimeControlling: Sendable {
     func events() async -> AsyncStream<AppStreamRuntimeEvent>
     func start(streamID: Int64) async throws
     func pause() async
+    func pause(streamID: Int64) async
     func resume() async
+    func resume(streamID: Int64) async
     func stop() async
+    func stop(streamID: Int64) async
+    func stopAll() async
     func seek(to seconds: Double) async
     func seekToLive() async
     func scrubBackward(seconds: Double) async
     func snapshot() async -> AppStreamRuntimeEvent?
+    func snapshot(streamID: Int64) async -> AppStreamRuntimeEvent?
+    func snapshots() async -> [AppStreamRuntimeEvent]
 }
 
 public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
+    private struct StreamRunState: Sendable {
+        var task: Task<Void, Never>?
+        var token: UUID
+    }
+
     private let registry: StreamRegistry
     private let ingester: any AppStreamRuntimeIngesting
     private let retryPolicy: AppStreamRuntimeRetryPolicy
     private let retrySleep: @Sendable (Int) async throws -> Void
     private let playbackTimeline: AppPlayerTimelineClock?
     private let rollingBuffer: RollingPCMBuffer?
+    private let statusStore: AppStreamRuntimeStatusStore?
+    private let now: @Sendable () -> Date
+    private let timestampFormatter: ISO8601DateFormatter
 
-    private var currentTask: Task<Void, Never>?
-    private var currentToken: UUID?
+    private var streamRuns: [Int64: StreamRunState] = [:]
     private var currentStreamID: Int64?
+    private var latestEvents: [Int64: AppStreamRuntimeEvent] = [:]
     private var latestEvent: AppStreamRuntimeEvent?
     private var eventContinuations: [UUID: AsyncStream<AppStreamRuntimeEvent>.Continuation] = [:]
 
@@ -366,8 +380,10 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         registry: StreamRegistry,
         ingester: any AppStreamRuntimeIngesting,
         retryPolicy: AppStreamRuntimeRetryPolicy = AppStreamRuntimeRetryPolicy(),
+        statusStore: AppStreamRuntimeStatusStore? = nil,
         playbackTimeline: AppPlayerTimelineClock? = nil,
         rollingBuffer: RollingPCMBuffer? = nil,
+        now: @escaping @Sendable () -> Date = { Date() },
         retrySleep: @escaping @Sendable (Int) async throws -> Void = { seconds in
             try await Task.sleep(nanoseconds: UInt64(max(0, seconds)) * 1_000_000_000)
         }
@@ -375,9 +391,13 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         self.registry = registry
         self.ingester = ingester
         self.retryPolicy = retryPolicy
+        self.statusStore = statusStore
         self.playbackTimeline = playbackTimeline
         self.rollingBuffer = rollingBuffer
+        self.now = now
         self.retrySleep = retrySleep
+        self.timestampFormatter = ISO8601DateFormatter()
+        self.timestampFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     }
 
     public func events() -> AsyncStream<AppStreamRuntimeEvent> {
@@ -394,16 +414,20 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     }
 
     public func start(streamID: Int64) async throws {
-        stop()
+        await stop(streamID: streamID)
 
         guard let reconnect = try registry.reconnectSource(id: streamID) else {
-            let event = AppStreamRuntimeEvent(
-                streamID: streamID,
-                phase: .error(message: AppStreamRuntimeError.streamNotFound(streamID).description),
-                message: "Stream \(streamID) was not found or is not active."
+            let error = AppStreamRuntimeError.streamNotFound(streamID)
+            publish(
+                AppStreamRuntimeEvent(
+                    streamID: streamID,
+                    phase: .error(message: error.description),
+                    message: error.description
+                ),
+                attempt: 0,
+                failureMessage: error.description
             )
-            publish(event)
-            throw AppStreamRuntimeError.streamNotFound(streamID)
+            throw error
         }
         guard let streamType = StreamType(rawValue: reconnect.streamType),
             streamType == .hls || streamType == .icecast || streamType == .icy
@@ -414,7 +438,9 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                     streamID: streamID,
                     phase: .error(message: error.description),
                     message: error.description
-                )
+                ),
+                attempt: 0,
+                failureMessage: error.description
             )
             throw error
         }
@@ -427,139 +453,182 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             streamType: streamType
         )
         let token = UUID()
-        currentToken = token
         currentStreamID = streamID
+        streamRuns[streamID] = StreamRunState(task: nil, token: token)
         publish(
             AppStreamRuntimeEvent(
                 streamID: streamID,
                 phase: .connecting,
                 message: "Connecting \(reconnect.name) via \(reconnect.sourceDescription)."
-            )
+            ),
+            attempt: 0
         )
 
         let ingester = self.ingester
         let retryPolicy = self.retryPolicy
         let retrySleep = self.retrySleep
-        currentTask = Task {
+        let task = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
+                await self?.publishIfCurrent(
+                    streamID: streamID,
+                    token: token,
+                    AppStreamRuntimeEvent(
+                        streamID: streamID,
+                        phase: .running,
+                        message: "Running \(request.name) from \(request.sourceDescription)."
+                    ),
+                    attempt: attempt
+                )
                 do {
-                    publishIfCurrent(
-                        token: token,
-                        AppStreamRuntimeEvent(
-                            streamID: streamID,
-                            phase: .running,
-                            message: "Running \(request.name) from \(request.sourceDescription)."
-                        )
-                    )
                     let result = try await ingester.run(request)
-                    finishIfCurrent(
+                    await self?.finishIfCurrent(
+                        streamID: streamID,
                         token: token,
                         event: AppStreamRuntimeEvent(
                             streamID: streamID,
                             phase: .stopped,
-                            message:
-                                "Stopped \(request.name) after \(result.processedChunks) chunk(s).",
+                            message: "Stopped \(request.name) after \(result.processedChunks) chunk(s).",
                             result: result
-                        )
+                        ),
+                        attempt: attempt
                     )
                     return
                 } catch is CancellationError {
-                    finishIfCurrent(
+                    await self?.finishIfCurrent(
+                        streamID: streamID,
                         token: token,
                         event: AppStreamRuntimeEvent(
                             streamID: streamID,
                             phase: .stopped,
                             message: "Stopped \(request.name)."
-                        )
+                        ),
+                        attempt: attempt
                     )
                     return
                 } catch {
                     let redacted = IngestRedaction.redact(String(describing: error))
                     if attempt < retryPolicy.maximumReconnectAttempts {
                         attempt += 1
-                        let seconds = retryPolicy.backoffSeconds(attempt)
-                        publishIfCurrent(
+                        let seconds = max(0, retryPolicy.backoffSeconds(attempt))
+                        await self?.publishIfCurrent(
+                            streamID: streamID,
                             token: token,
                             AppStreamRuntimeEvent(
                                 streamID: streamID,
                                 phase: .reconnecting(nextRetrySeconds: seconds),
-                                message:
-                                    "Runtime failed for \(request.name): \(redacted). Reconnecting in \(seconds) second(s)."
-                            )
+                                message: "Runtime failed for \(request.name): \(redacted). Reconnecting in \(seconds) second(s)."
+                            ),
+                            attempt: attempt,
+                            nextRetrySeconds: seconds,
+                            failureMessage: redacted
                         )
                         do {
                             try await retrySleep(seconds)
                         } catch {
-                            finishIfCurrent(
+                            await self?.finishIfCurrent(
+                                streamID: streamID,
                                 token: token,
                                 event: AppStreamRuntimeEvent(
                                     streamID: streamID,
                                     phase: .stopped,
                                     message: "Stopped \(request.name)."
-                                )
+                                ),
+                                attempt: attempt
                             )
                             return
                         }
-                        publishIfCurrent(
+                        await self?.publishIfCurrent(
+                            streamID: streamID,
                             token: token,
                             AppStreamRuntimeEvent(
                                 streamID: streamID,
                                 phase: .connecting,
                                 message: "Reconnecting \(request.name)."
-                            )
+                            ),
+                            attempt: attempt
                         )
                     } else {
-                        finishIfCurrent(
+                        await self?.finishIfCurrent(
+                            streamID: streamID,
                             token: token,
                             event: AppStreamRuntimeEvent(
                                 streamID: streamID,
                                 phase: .error(message: redacted),
                                 message: "Runtime failed for \(request.name): \(redacted)."
-                            )
+                            ),
+                            attempt: attempt,
+                            failureMessage: redacted
                         )
                         return
                     }
                 }
             }
         }
+        streamRuns[streamID]?.task = task
     }
 
-    public func pause() {
-        guard let streamID = currentStreamID, currentTask != nil else { return }
+    public func pause() async {
+        guard let streamID = currentStreamID else { return }
+        await pause(streamID: streamID)
+    }
+
+    public func pause(streamID: Int64) async {
+        guard streamRuns[streamID] != nil else { return }
         publish(
             AppStreamRuntimeEvent(
                 streamID: streamID,
                 phase: .paused,
                 message: "Paused stream \(streamID)."
-            )
+            ),
+            attempt: latestAttempt(streamID: streamID)
         )
     }
 
-    public func resume() {
-        guard let streamID = currentStreamID, currentTask != nil else { return }
+    public func resume() async {
+        guard let streamID = currentStreamID else { return }
+        await resume(streamID: streamID)
+    }
+
+    public func resume(streamID: Int64) async {
+        guard streamRuns[streamID] != nil else { return }
         publish(
             AppStreamRuntimeEvent(
                 streamID: streamID,
                 phase: .running,
                 message: "Resumed stream \(streamID)."
-            )
+            ),
+            attempt: latestAttempt(streamID: streamID)
         )
     }
 
-    public func stop() {
-        currentTask?.cancel()
-        currentTask = nil
-        currentToken = nil
+    public func stop() async {
         guard let streamID = currentStreamID else { return }
-        currentStreamID = nil
+        await stop(streamID: streamID)
+    }
+
+    public func stop(streamID: Int64) async {
+        let state = streamRuns.removeValue(forKey: streamID)
+        state?.task?.cancel()
+        if currentStreamID == streamID {
+            currentStreamID = streamRuns.keys.sorted().first
+        }
+        guard state != nil || latestEvents[streamID] != nil else { return }
         publish(
             AppStreamRuntimeEvent(
                 streamID: streamID,
                 phase: .stopped,
                 message: "Stopped stream \(streamID)."
-            )
+            ),
+            attempt: latestAttempt(streamID: streamID)
         )
+    }
+
+    public func stopAll() async {
+        let streamIDs = Array(streamRuns.keys)
+        for streamID in streamIDs {
+            await stop(streamID: streamID)
+        }
     }
 
     public func seek(to seconds: Double) async {
@@ -603,24 +672,63 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         latestEvent
     }
 
-    private func publish(_ event: AppStreamRuntimeEvent) {
+    public func snapshot(streamID: Int64) -> AppStreamRuntimeEvent? {
+        latestEvents[streamID]
+    }
+
+    public func snapshots() -> [AppStreamRuntimeEvent] {
+        latestEvents.values.sorted { $0.streamID < $1.streamID }
+    }
+
+    private func publish(
+        _ event: AppStreamRuntimeEvent,
+        attempt: Int,
+        nextRetrySeconds: Int? = nil,
+        failureMessage: String? = nil
+    ) {
+        latestEvents[event.streamID] = event
         latestEvent = event
+        persistStatus(
+            event: event,
+            attempt: attempt,
+            nextRetrySeconds: nextRetrySeconds,
+            failureMessage: failureMessage
+        )
         for continuation in eventContinuations.values {
             continuation.yield(event)
         }
     }
 
-    private func publishIfCurrent(token: UUID, _ event: AppStreamRuntimeEvent) {
-        guard currentToken == token else { return }
-        publish(event)
+    private func publishIfCurrent(
+        streamID: Int64,
+        token: UUID,
+        _ event: AppStreamRuntimeEvent,
+        attempt: Int,
+        nextRetrySeconds: Int? = nil,
+        failureMessage: String? = nil
+    ) {
+        guard streamRuns[streamID]?.token == token else { return }
+        publish(
+            event,
+            attempt: attempt,
+            nextRetrySeconds: nextRetrySeconds,
+            failureMessage: failureMessage
+        )
     }
 
-    private func finishIfCurrent(token: UUID, event: AppStreamRuntimeEvent) {
-        guard currentToken == token else { return }
-        currentTask = nil
-        currentToken = nil
-        currentStreamID = nil
-        publish(event)
+    private func finishIfCurrent(
+        streamID: Int64,
+        token: UUID,
+        event: AppStreamRuntimeEvent,
+        attempt: Int,
+        failureMessage: String? = nil
+    ) {
+        guard streamRuns[streamID]?.token == token else { return }
+        streamRuns.removeValue(forKey: streamID)
+        if currentStreamID == streamID {
+            currentStreamID = streamRuns.keys.sorted().first
+        }
+        publish(event, attempt: attempt, failureMessage: failureMessage)
     }
 
     private func publishPlayerTimelineEvent(
@@ -631,14 +739,63 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         publish(
             AppStreamRuntimeEvent(
                 streamID: streamID,
-                phase: latestEvent?.phase ?? .running,
+                phase: latestEvents[streamID]?.phase ?? .running,
                 message: snapshot.lastMessage,
                 result: AppStreamRuntimeResult(
                     streamID: streamID,
                     playerTimeline: snapshot
                 )
-            )
+            ),
+            attempt: latestAttempt(streamID: streamID)
         )
+    }
+
+    private func persistStatus(
+        event: AppStreamRuntimeEvent,
+        attempt: Int,
+        nextRetrySeconds: Int?,
+        failureMessage: String?
+    ) {
+        guard let statusStore else { return }
+        let updatedAt = timestamp()
+        let failure = failureMessage.map {
+            AppStreamRuntimeRecentFailure(message: $0, occurredAt: updatedAt)
+        }
+        let nextRetryAt = nextRetrySeconds.map { seconds in
+            timestamp(for: now().addingTimeInterval(TimeInterval(max(0, seconds))))
+        }
+        do {
+            try statusStore.upsert(
+                AppStreamRuntimeStatusUpdate(
+                    streamID: event.streamID,
+                    phase: event.phase.statusPhase,
+                    attempt: attempt,
+                    maxAttempts: retryPolicy.maximumReconnectAttempts,
+                    nextRetrySeconds: nextRetrySeconds,
+                    nextRetryAt: nextRetryAt,
+                    updatedAt: updatedAt,
+                    recentFailure: failure
+                )
+            )
+        } catch {
+            // Missing or removed streams may not have a status row to update; keep the
+            // redacted in-memory event visible without letting one store write affect siblings.
+        }
+    }
+
+    private func latestAttempt(streamID: Int64) -> Int {
+        guard let statusStore, let snapshot = try? statusStore.status(streamID: streamID) else {
+            return 0
+        }
+        return snapshot.attempt
+    }
+
+    private func timestamp() -> String {
+        timestamp(for: now())
+    }
+
+    private func timestamp(for date: Date) -> String {
+        timestampFormatter.string(from: date)
     }
 
     private func removeContinuation(_ id: UUID) {

@@ -28,11 +28,12 @@ final class IntegratedAppUATTests: XCTestCase {
                     recorder: recorder
                 )
             },
-            runtimeFactory: { registry, ingester, timeline, rollingBuffer in
+            runtimeFactory: { registry, ingester, timeline, rollingBuffer, statusStore in
                 AppStreamRuntimeService(
                     registry: registry,
                     ingester: ingester,
                     retryPolicy: .noRetry,
+                    statusStore: statusStore,
                     playbackTimeline: timeline,
                     rollingBuffer: rollingBuffer
                 )

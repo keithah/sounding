@@ -124,6 +124,225 @@ final class AppStreamRuntimeTests: XCTestCase {
         XCTAssertEqual(callCount, 2)
     }
 
+    func testFlakyStreamReconnectsWhileSiblingRemainsRunningAndStatusesAreIsolated() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let retrying = try registry.add(
+            name: "Retry HLS",
+            streamType: "hls",
+            source: "https://user:pass@example.test/retry.m3u8?token=secret"
+        )
+        let sibling = try registry.add(
+            name: "Sibling ICY",
+            streamType: "icy",
+            source: "http://user:pass@example.test/live?token=sibling"
+        )
+        let statusStore = AppStreamRuntimeStatusStore(database: temporary.database)
+        let retrySleep = RetrySleepGate()
+        let siblingGate = RuntimeGate()
+        let ingester = PerStreamRuntimeIngester(
+            flakyStreamID: retrying.id,
+            blockingStreamID: sibling.id,
+            blockingGate: siblingGate
+        )
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: AppStreamRuntimeRetryPolicy(
+                maximumReconnectAttempts: 1, backoffSeconds: { _ in 5 }),
+            statusStore: statusStore,
+            retrySleep: { seconds in try await retrySleep.sleep(seconds: seconds) }
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: retrying.id)
+        let retryingConnecting = try await nextEvent(from: &iterator)
+        let retryingRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(retryingConnecting.phase, .connecting)
+        XCTAssertEqual(retryingRunning.phase, .running)
+        let reconnecting = try await nextEvent(from: &iterator)
+        XCTAssertEqual(reconnecting.streamID, retrying.id)
+        XCTAssertEqual(reconnecting.phase, .reconnecting(nextRetrySeconds: 5))
+
+        try await runtime.start(streamID: sibling.id)
+        let siblingConnecting = try await nextEvent(from: &iterator)
+        let siblingRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(siblingConnecting.streamID, sibling.id)
+        XCTAssertEqual(siblingConnecting.phase, .connecting)
+        XCTAssertEqual(siblingRunning.streamID, sibling.id)
+        XCTAssertEqual(siblingRunning.phase, .running)
+        let retryingSnapshot = await runtime.snapshot(streamID: retrying.id)
+        let siblingSnapshot = await runtime.snapshot(streamID: sibling.id)
+        XCTAssertEqual(retryingSnapshot?.phase, .reconnecting(nextRetrySeconds: 5))
+        XCTAssertEqual(siblingSnapshot?.phase, .running)
+
+        let retryingStatus = try XCTUnwrap(try statusStore.status(streamID: retrying.id))
+        let siblingStatus = try XCTUnwrap(try statusStore.status(streamID: sibling.id))
+        XCTAssertEqual(retryingStatus.phase, .reconnecting)
+        XCTAssertEqual(retryingStatus.attempt, 1)
+        XCTAssertEqual(retryingStatus.maxAttempts, 1)
+        XCTAssertEqual(retryingStatus.nextRetrySeconds, 5)
+        XCTAssertNotNil(retryingStatus.nextRetryAt)
+        XCTAssertEqual(siblingStatus.phase, .running)
+        XCTAssertEqual(siblingStatus.attempt, 0)
+
+        await retrySleep.releaseAll()
+        let retryConnecting = try await nextEvent(from: &iterator)
+        let retryRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(retryConnecting.phase, .connecting)
+        XCTAssertEqual(retryRunning.phase, .running)
+        let stopped = try await nextEvent(from: &iterator)
+        XCTAssertEqual(stopped.streamID, retrying.id)
+        XCTAssertEqual(stopped.phase, .stopped)
+        let siblingAfterRetry = await runtime.snapshot(streamID: sibling.id)
+        XCTAssertEqual(siblingAfterRetry?.phase, .running)
+
+        await runtime.stop(streamID: sibling.id)
+        await siblingGate.release()
+    }
+
+    func testMaximumReconnectAttemptsPublishesTerminalRedactedStatus() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Terminal HLS",
+            streamType: "hls",
+            source: "https://user:pass@example.test/terminal.m3u8?token=secret#frag"
+        )
+        let statusStore = AppStreamRuntimeStatusStore(database: temporary.database)
+        let ingester = AlwaysFailingAppRuntimeIngester(
+            message:
+                "failed at /Users/example/private/output.raw for https://user:pass@example.test/terminal.m3u8?token=secret#frag api_key=secret"
+        )
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: AppStreamRuntimeRetryPolicy(
+                maximumReconnectAttempts: 1, backoffSeconds: { _ in 0 }),
+            statusStore: statusStore,
+            retrySleep: { _ in }
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        let firstConnecting = try await nextEvent(from: &iterator)
+        let firstRunning = try await nextEvent(from: &iterator)
+        let reconnecting = try await nextEvent(from: &iterator)
+        let secondConnecting = try await nextEvent(from: &iterator)
+        let secondRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(firstConnecting.phase, .connecting)
+        XCTAssertEqual(firstRunning.phase, .running)
+        XCTAssertEqual(reconnecting.phase, .reconnecting(nextRetrySeconds: 0))
+        XCTAssertEqual(secondConnecting.phase, .connecting)
+        XCTAssertEqual(secondRunning.phase, .running)
+        let terminal = try await nextEvent(from: &iterator)
+        XCTAssertEqual(terminal.phase.statusPhase, .error)
+        XCTAssertFalse(terminal.message.contains("user:pass"), terminal.message)
+        XCTAssertFalse(terminal.message.contains("token=secret"), terminal.message)
+        XCTAssertFalse(terminal.message.contains("api_key=secret"), terminal.message)
+        XCTAssertFalse(terminal.message.contains("/Users/example"), terminal.message)
+        XCTAssertTrue(terminal.message.contains("[redacted-path]"), terminal.message)
+
+        let status = try XCTUnwrap(try statusStore.status(streamID: stream.id))
+        XCTAssertEqual(status.phase, .error)
+        XCTAssertEqual(status.attempt, 1)
+        XCTAssertEqual(status.maxAttempts, 1)
+        XCTAssertNil(status.nextRetrySeconds)
+        let failure = try XCTUnwrap(status.recentFailure)
+        XCTAssertFalse(failure.message.contains("user:pass"), failure.message)
+        XCTAssertFalse(failure.message.contains("token=secret"), failure.message)
+        XCTAssertFalse(failure.message.contains("api_key=secret"), failure.message)
+        XCTAssertFalse(failure.message.contains("/Users/example"), failure.message)
+        XCTAssertTrue(failure.message.contains("[redacted-path]"), failure.message)
+    }
+
+    func testStoppingStreamDuringRetryPreventsLaterRetryPublication() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Cancel HLS",
+            streamType: "hls",
+            source: "https://example.test/cancel.m3u8"
+        )
+        let statusStore = AppStreamRuntimeStatusStore(database: temporary.database)
+        let retrySleep = RetrySleepGate()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: AlwaysFailingAppRuntimeIngester(message: "temporary failure"),
+            retryPolicy: AppStreamRuntimeRetryPolicy(
+                maximumReconnectAttempts: 1, backoffSeconds: { _ in 30 }),
+            statusStore: statusStore,
+            retrySleep: { seconds in try await retrySleep.sleep(seconds: seconds) }
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        let connecting = try await nextEvent(from: &iterator)
+        let running = try await nextEvent(from: &iterator)
+        let reconnecting = try await nextEvent(from: &iterator)
+        XCTAssertEqual(connecting.phase, .connecting)
+        XCTAssertEqual(running.phase, .running)
+        XCTAssertEqual(reconnecting.phase, .reconnecting(nextRetrySeconds: 30))
+
+        await runtime.stop(streamID: stream.id)
+        let stopped = try await nextEvent(from: &iterator)
+        XCTAssertEqual(stopped.phase, .stopped)
+        await retrySleep.releaseAll()
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let stoppedSnapshot = await runtime.snapshot(streamID: stream.id)
+        XCTAssertEqual(stoppedSnapshot?.phase, .stopped)
+        XCTAssertEqual(try statusStore.status(streamID: stream.id)?.phase, .stopped)
+    }
+
+    func testOlderRunCannotOverwriteNewerRunForSameStream() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Restart HLS",
+            streamType: "hls",
+            source: "https://example.test/restart.m3u8"
+        )
+        let statusStore = AppStreamRuntimeStatusStore(database: temporary.database)
+        let firstGate = RuntimeGate()
+        let secondGate = RuntimeGate()
+        let ingester = RestartingAppRuntimeIngester(firstGate: firstGate, secondGate: secondGate)
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            statusStore: statusStore
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        let firstConnecting = try await nextEvent(from: &iterator)
+        let firstRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(firstConnecting.phase, .connecting)
+        XCTAssertEqual(firstRunning.phase, .running)
+        try await runtime.start(streamID: stream.id)
+        let restartStopped = try await nextEvent(from: &iterator)
+        let secondConnecting = try await nextEvent(from: &iterator)
+        let secondRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(restartStopped.phase, .stopped)
+        XCTAssertEqual(secondConnecting.phase, .connecting)
+        XCTAssertEqual(secondRunning.phase, .running)
+
+        await firstGate.release()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let runningSnapshot = await runtime.snapshot(streamID: stream.id)
+        XCTAssertEqual(runningSnapshot?.phase, .running)
+        XCTAssertEqual(try statusStore.status(streamID: stream.id)?.phase, .running)
+
+        await secondGate.release()
+        let stopped = try await nextEvent(from: &iterator)
+        XCTAssertEqual(stopped.phase, .stopped)
+    }
+
     func testSeekToBufferedSecondPublishesPlayerTimelineEvent() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -583,7 +802,7 @@ final class AppStreamRuntimeTests: XCTestCase {
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             },
-            runtimeFactory: { registry, ingester, timeline, rollingBuffer in
+            runtimeFactory: { registry, ingester, timeline, rollingBuffer, _ in
                 recorder.recordRuntimeConstructed()
                 return AppStreamRuntimeService(
                     registry: registry,
@@ -807,6 +1026,94 @@ private struct BlockingAppRuntimeIngester: AppStreamRuntimeIngesting {
         await gate.wait()
         try Task.checkCancellation()
         return AppStreamRuntimeResult(streamID: request.streamID)
+    }
+}
+
+private actor RetrySleepGate {
+    private var waiters: [CheckedContinuation<Void, Error>] = []
+
+    func sleep(seconds: Int) async throws {
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiters.append(continuation)
+            }
+        } onCancel: {
+            Task { await self.releaseAll() }
+        }
+        try Task.checkCancellation()
+    }
+
+    func releaseAll() {
+        let current = waiters
+        waiters.removeAll()
+        for waiter in current { waiter.resume() }
+    }
+}
+
+private actor PerStreamRuntimeIngester: AppStreamRuntimeIngesting {
+    private let flakyStreamID: Int64
+    private let blockingStreamID: Int64
+    private let blockingGate: RuntimeGate
+    private var flakyCalls = 0
+
+    init(flakyStreamID: Int64, blockingStreamID: Int64, blockingGate: RuntimeGate) {
+        self.flakyStreamID = flakyStreamID
+        self.blockingStreamID = blockingStreamID
+        self.blockingGate = blockingGate
+    }
+
+    func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        if request.streamID == flakyStreamID {
+            flakyCalls += 1
+            if flakyCalls == 1 {
+                throw RuntimeFailure(
+                    message:
+                        "decode failed at /tmp/token=secret.raw for https://user:pass@example.test/retry.m3u8?token=secret"
+                )
+            }
+            return AppStreamRuntimeResult(streamID: request.streamID, processedChunks: 1)
+        }
+        if request.streamID == blockingStreamID {
+            await blockingGate.wait()
+            try Task.checkCancellation()
+            return AppStreamRuntimeResult(streamID: request.streamID)
+        }
+        return AppStreamRuntimeResult(streamID: request.streamID)
+    }
+}
+
+private actor AlwaysFailingAppRuntimeIngester: AppStreamRuntimeIngesting {
+    private let message: String
+
+    init(message: String) {
+        self.message = message
+    }
+
+    func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        throw RuntimeFailure(message: message)
+    }
+}
+
+private actor RestartingAppRuntimeIngester: AppStreamRuntimeIngesting {
+    private let firstGate: RuntimeGate
+    private let secondGate: RuntimeGate
+    private var calls = 0
+
+    init(firstGate: RuntimeGate, secondGate: RuntimeGate) {
+        self.firstGate = firstGate
+        self.secondGate = secondGate
+    }
+
+    func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        calls += 1
+        if calls == 1 {
+            await firstGate.wait()
+        } else {
+            await secondGate.wait()
+        }
+        try Task.checkCancellation()
+        return AppStreamRuntimeResult(streamID: request.streamID, processedChunks: calls)
     }
 }
 

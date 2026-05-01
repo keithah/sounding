@@ -40,7 +40,8 @@ public struct SoundingAppRuntimeFactory {
         StreamRegistry,
         any AppStreamRuntimeIngesting,
         AppPlayerTimelineClock,
-        RollingPCMBuffer
+        RollingPCMBuffer,
+        AppStreamRuntimeStatusStore
     ) -> any AppStreamRuntimeControlling
 
     private let fileManager: FileManager
@@ -59,10 +60,11 @@ public struct SoundingAppRuntimeFactory {
                 rollingBuffer: rollingBuffer
             )
         },
-        runtimeFactory: @escaping RuntimeFactory = { registry, ingester, timeline, rollingBuffer in
+        runtimeFactory: @escaping RuntimeFactory = { registry, ingester, timeline, rollingBuffer, statusStore in
             AppStreamRuntimeService(
                 registry: registry,
                 ingester: ingester,
+                statusStore: statusStore,
                 playbackTimeline: timeline,
                 rollingBuffer: rollingBuffer
             )
@@ -139,6 +141,7 @@ public struct SoundingAppRuntimeFactory {
         let registry = StreamRegistry(database: database)
         let timelineStore = StreamAppTimelineStore(database: database)
         let searchStore = StreamAppSearchStore(database: database)
+        let statusStore = AppStreamRuntimeStatusStore(database: database)
         let timeline = AppPlayerTimelineClock()
         let rollingBuffer = RollingPCMBuffer(configuration: configuration.rollingBuffer)
 
@@ -160,7 +163,7 @@ public struct SoundingAppRuntimeFactory {
             )
         }
 
-        let runtime = runtimeFactory(registry, ingester, timeline, rollingBuffer)
+        let runtime = runtimeFactory(registry, ingester, timeline, rollingBuffer, statusStore)
         var viewModel = StreamAppViewModel(configurationIssues: configuration.issues)
         do {
             try viewModel.reload(from: registry)
