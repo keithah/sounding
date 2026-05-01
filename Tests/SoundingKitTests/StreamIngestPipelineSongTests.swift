@@ -61,6 +61,127 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(rows.plays[1]["last_sequence"] as Int, 2)
     }
 
+    func testAcoustIDEnrichmentPersistsKnownSongCacheAndKeepsFingerprintSongKey() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let cache = AcoustIDLookupCache(database: temporary.database)
+        let lookup = CountingSongLookup(outcome: .matched(Self.lookupMatch))
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0), Self.chunk(sequence: 1)]),
+            transcriber: FakeSongTranscriber(),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: StubFingerprinter(outputs: [
+                0: Self.fingerprintOutput(hash: "enriched-song", start: 0, end: 2),
+                1: Self.fingerprintOutput(hash: "enriched-song", start: 2, end: 4),
+            ]),
+            fingerprintEnricher: AcoustIDAudioFingerprintEnricher(
+                cache: cache,
+                lookup: lookup,
+                now: { "2026-05-01T12:30:00Z" }
+            )
+        )
+
+        let result = try await pipeline.run(source: "https://example.test/live", streamType: .hls, maxChunks: 2)
+
+        XCTAssertEqual(result.processedChunks, 2)
+        XCTAssertEqual(result.diagnostics, [])
+        let lookupCount = await lookup.invocationCount
+        XCTAssertEqual(lookupCount, 1, "Second adjacent chunk should use the persisted lookup cache.")
+        let rows = try temporary.database.read { db in
+            try (
+                songs: Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT song_key, title, artist, album, isrc, display_name, is_unknown
+                        FROM songs
+                        """),
+                plays: Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT first_chunk.sequence AS first_sequence, last_chunk.sequence AS last_sequence,
+                               song_plays.start_seconds, song_plays.end_seconds, song_plays.source
+                        FROM song_plays
+                        JOIN ingest_chunks AS first_chunk ON first_chunk.id = song_plays.first_chunk_id
+                        JOIN ingest_chunks AS last_chunk ON last_chunk.id = song_plays.last_chunk_id
+                        """),
+                cacheRows: Row.fetchAll(
+                    db,
+                    sql: "SELECT fingerprint_hash, title, artist, response_json FROM acoustid_lookup_cache")
+            )
+        }
+        XCTAssertEqual(rows.songs.count, 1)
+        XCTAssertEqual(rows.songs[0]["song_key"] as String, "fingerprint:enriched-song")
+        XCTAssertEqual(rows.songs[0]["title"] as String, "Pipeline Lookup Title")
+        XCTAssertEqual(rows.songs[0]["artist"] as String, "Pipeline Lookup Artist")
+        XCTAssertEqual(rows.songs[0]["album"] as String, "Pipeline Lookup Album")
+        XCTAssertEqual(rows.songs[0]["isrc"] as String, "US-SND-26-00003")
+        XCTAssertEqual(rows.songs[0]["display_name"] as String, "Pipeline Lookup Title — Pipeline Lookup Artist")
+        XCTAssertEqual(rows.songs[0]["is_unknown"] as Bool, false)
+        XCTAssertEqual(rows.plays.count, 1)
+        XCTAssertEqual(rows.plays[0]["first_sequence"] as Int, 0)
+        XCTAssertEqual(rows.plays[0]["last_sequence"] as Int, 1)
+        XCTAssertEqual(rows.plays[0]["start_seconds"] as Double, 0)
+        XCTAssertEqual(rows.plays[0]["end_seconds"] as Double, 4)
+        XCTAssertEqual(rows.plays[0]["source"] as String, "test_fingerprint")
+        XCTAssertEqual(rows.cacheRows.count, 1)
+        XCTAssertEqual(rows.cacheRows[0]["fingerprint_hash"] as String, "enriched-song")
+        XCTAssertEqual(rows.cacheRows[0]["title"] as String, "Pipeline Lookup Title")
+    }
+
+    func testAcoustIDLookupFailurePersistsBaseFingerprintSongPlayAndRedactedDiagnostic() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeSongTranscriber(),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: StubFingerprinter(outputs: [
+                0: Self.fingerprintOutput(hash: "fallback-song", start: 0, end: 2)
+            ]),
+            fingerprintEnricher: AcoustIDAudioFingerprintEnricher(
+                cache: AcoustIDLookupCache(database: temporary.database),
+                lookup: CountingSongLookup(
+                    outcome: .transientFailure(
+                        reason: "timeout for https://user:pass@example.test/acoustid?api_key=secret path=/tmp/acoustid-token=secret.json"
+                    )
+                )
+            )
+        )
+
+        let result = try await pipeline.run(source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        XCTAssertEqual(result.diagnostics.map(\.phase), [.fingerprint])
+        XCTAssertEqual(result.diagnostics.map(\.reason), ["acoustid-transient-failure"])
+        let evidence = try temporary.database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT songs.song_key AS song_key, songs.is_unknown AS is_unknown,
+                           (SELECT COUNT(*) FROM audio_fingerprints) AS fingerprints,
+                           (SELECT COUNT(*) FROM song_plays) AS song_plays,
+                           (SELECT COUNT(*) FROM acoustid_lookup_cache) AS cache_rows,
+                           ingest_diagnostics.reason AS reason,
+                           ingest_diagnostics.context_json AS context
+                    FROM songs
+                    JOIN ingest_diagnostics ON ingest_diagnostics.reason = 'acoustid-transient-failure'
+                    LIMIT 1
+                    """)
+        }
+        XCTAssertEqual(evidence?["song_key"] as String?, "fingerprint:fallback-song")
+        XCTAssertEqual(evidence?["is_unknown"] as Bool?, true)
+        XCTAssertEqual(evidence?["fingerprints"] as Int?, 1)
+        XCTAssertEqual(evidence?["song_plays"] as Int?, 1)
+        XCTAssertEqual(evidence?["cache_rows"] as Int?, 0)
+        XCTAssertEqual(evidence?["reason"] as String?, "acoustid-transient-failure")
+        let context: String = evidence?["context"] ?? ""
+        XCTAssertTrue(context.contains("[redacted-path]"), context)
+        Self.assertNoForbiddenLiterals(
+            in: context,
+            forbidden: ["user:pass", "api_key=secret", "token=secret", "/tmp/acoustid-token=secret.json"]
+        )
+    }
+
     func testFingerprintFailurePersistsRedactedDiagnosticAndDoesNotAbortTranscriptPersistence()
         async throws
     {
@@ -225,6 +346,20 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         )
     }
 
+    private static var lookupMatch: AcoustIDMatch {
+        AcoustIDMatch(
+            acoustID: "acoustid-pipeline",
+            recordingID: "recording-pipeline",
+            title: "Pipeline Lookup Title",
+            artist: "Pipeline Lookup Artist",
+            album: "Pipeline Lookup Album",
+            isrc: "US-SND-26-00003",
+            durationSeconds: 2,
+            score: 0.98,
+            responseJSON: #"{"status":"ok","source":"pipeline"}"#
+        )
+    }
+
     private static func chunk(sequence: Int, audio: Data = Data([0x01, 0x02, 0x03]))
         -> DecodedAudioChunk
     {
@@ -330,6 +465,30 @@ private struct RecordingFingerprinter: AudioFingerprinting {
     ) async throws -> AudioFingerprintResult {
         await invocations.record()
         return AudioFingerprintResult()
+    }
+}
+
+private struct CountingSongLookup: AcoustIDLookuping {
+    let outcome: AcoustIDLookupOutcome
+    let invocations = LookupInvocations()
+
+    var invocationCount: Int {
+        get async { await invocations.count }
+    }
+
+    func lookup(_ request: AcoustIDLookupRequest) async -> AcoustIDLookupOutcome {
+        await invocations.record()
+        return outcome
+    }
+}
+
+private actor LookupInvocations {
+    private var value = 0
+
+    var count: Int { value }
+
+    func record() {
+        value += 1
     }
 }
 

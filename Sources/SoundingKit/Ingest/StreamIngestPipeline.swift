@@ -33,6 +33,7 @@ public struct StreamIngestPipeline {
     private let transcriber: any MLTranscription
     private let diarizer: any SpeakerDiarization
     private let fingerprinter: any AudioFingerprinting
+    private let fingerprintEnricher: any AudioFingerprintEnriching
     private let now: TimestampProvider
 
     public init(
@@ -41,6 +42,7 @@ public struct StreamIngestPipeline {
         transcriber: any MLTranscription,
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
+        fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
         now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
     ) {
         self.database = database
@@ -48,6 +50,7 @@ public struct StreamIngestPipeline {
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.fingerprinter = fingerprinter
+        self.fingerprintEnricher = fingerprintEnricher
         self.now = now
     }
 
@@ -280,18 +283,37 @@ public struct StreamIngestPipeline {
                 var songPlays: [SongPlayDraft] = []
                 do {
                     try Task.checkCancellation()
+                    let fingerprintRequest = AudioFingerprintRequest(
+                        source: redactedSource,
+                        streamType: streamType,
+                        streamID: streamID,
+                        runID: runID
+                    )
                     let fingerprintResult = try await fingerprinter.fingerprint(
                         chunk,
-                        request: AudioFingerprintRequest(
-                            source: redactedSource,
-                            streamType: streamType,
-                            streamID: streamID,
-                            runID: runID
-                        )
+                        request: fingerprintRequest
                     )
                     try validate(fingerprintResult)
-                    fingerprints = fingerprintResult.fingerprints
-                    songPlays = fingerprintResult.songPlays
+                    let enrichment = await fingerprintEnricher.enrich(
+                        fingerprintResult,
+                        chunk: chunk,
+                        request: fingerprintRequest
+                    )
+                    fingerprints = enrichment.fingerprintResult.fingerprints
+                    songPlays = enrichment.fingerprintResult.songPlays
+                    chunkDiagnostics.append(
+                        contentsOf: enrichment.diagnostics.map { enrichmentDiagnostic in
+                            diagnostic(
+                                streamID: streamID,
+                                phase: .fingerprint,
+                                severity: enrichmentDiagnostic.severity,
+                                reason: enrichmentDiagnostic.reason,
+                                source: redactedSource,
+                                streamType: streamType,
+                                context: enrichmentDiagnostic.context
+                            )
+                        }
+                    )
                 } catch let cancellation as CancellationError {
                     throw cancellation
                 } catch {

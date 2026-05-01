@@ -211,3 +211,5 @@ public final class AcoustIDLookupCache {
         )
     }
 }
+
+extension AcoustIDLookupCache: @unchecked Sendable {}

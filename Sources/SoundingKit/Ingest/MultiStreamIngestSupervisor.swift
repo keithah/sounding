@@ -84,6 +84,7 @@ public struct MultiStreamIngestSupervisor {
     private let transcriber: any MLTranscription
     private let diarizer: any SpeakerDiarization
     private let fingerprinter: any AudioFingerprinting
+    private let fingerprintEnricher: any AudioFingerprintEnriching
     private let now: TimestampProvider
 
     public init(
@@ -93,6 +94,7 @@ public struct MultiStreamIngestSupervisor {
         transcriber: any MLTranscription,
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
+        fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
         now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
     ) {
         self.database = database
@@ -101,6 +103,7 @@ public struct MultiStreamIngestSupervisor {
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.fingerprinter = fingerprinter
+        self.fingerprintEnricher = fingerprintEnricher
         self.now = now
     }
 
@@ -153,6 +156,7 @@ public struct MultiStreamIngestSupervisor {
                 transcriber: transcriber,
                 diarizer: diarizer,
                 fingerprinter: fingerprinter,
+                fingerprintEnricher: fingerprintEnricher,
                 now: now
             )
             let result = try await pipeline.run(
