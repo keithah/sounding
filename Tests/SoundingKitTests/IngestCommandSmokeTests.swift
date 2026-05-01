@@ -326,16 +326,17 @@ final class IngestCommandSmokeTests: XCTestCase {
         assertSanitized(stderr, forbiddenLiteral: secretStubMode)
 
         let database = try DatabaseQueue(path: dbURL.path)
-        let context = try database.read { db in
-            try String.fetchOne(
-                db,
-                sql: """
-                    SELECT context_json
-                    FROM ingest_diagnostics
-                    WHERE reason = 'acoustid-lookup-disabled'
-                    LIMIT 1
-                    """)
-        } ?? ""
+        let context =
+            try database.read { db in
+                try String.fetchOne(
+                    db,
+                    sql: """
+                        SELECT context_json
+                        FROM ingest_diagnostics
+                        WHERE reason = 'acoustid-lookup-disabled'
+                        LIMIT 1
+                        """)
+            } ?? ""
         XCTAssertTrue(context.contains("unknown SOUNDING_ACOUSTID_STUB value"), context)
         assertSanitized(context, forbiddenLiteral: secretStubMode)
         assertSanitized(context, forbiddenLiteral: "synthetic-secret")
@@ -367,6 +368,131 @@ final class IngestCommandSmokeTests: XCTestCase {
         assertSanitized(stderr, forbiddenLiteral: "letmein")
         assertSanitized(stderr, forbiddenLiteral: "synthetic-secret")
         assertSanitized(stderr, forbiddenLiteral: "private-fragment")
+    }
+
+    func testManagedStreamValidationFailuresHappenBeforeRunsOrSourceSetup() throws {
+        let noDB = try runSounding(arguments: [
+            "ingest",
+            "--stream", "Main",
+            "--max-chunks", "1",
+        ])
+        XCTAssertNotEqual(noDB.exitCode, 0, noDB.diagnosticSummary)
+        XCTAssertEqual(noDB.stdoutLineCount, 0, noDB.diagnosticSummary)
+        XCTAssertTrue(
+            (String(data: noDB.stderr, encoding: .utf8) ?? "").contains("provide --db"),
+            noDB.diagnosticSummary)
+
+        let ambiguityDB = temporaryDatabaseURL(
+            secretComponent: "managed-ambiguous-token=synthetic-secret")
+        defer { removeDatabaseFiles(ambiguityDB) }
+        let ambiguous = try runSounding(arguments: [
+            "ingest",
+            "https://user:pass@example.test/live.m3u8?token=synthetic-secret",
+            "--stream", "Main",
+            "--db", ambiguityDB.path,
+            "--max-chunks", "1",
+        ])
+        XCTAssertNotEqual(ambiguous.exitCode, 0, ambiguous.diagnosticSummary)
+        XCTAssertEqual(ambiguous.stdoutLineCount, 0, ambiguous.diagnosticSummary)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: ambiguityDB.path), ambiguous.diagnosticSummary)
+        let ambiguousStderr = String(data: ambiguous.stderr, encoding: .utf8) ?? ""
+        XCTAssertTrue(
+            ambiguousStderr.contains("either --stream or positional source"),
+            ambiguous.diagnosticSummary)
+        assertSanitized(ambiguousStderr, forbiddenLiteral: "user:pass")
+        assertSanitized(ambiguousStderr, forbiddenLiteral: "synthetic-secret")
+        assertSanitized(ambiguousStderr, forbiddenLiteral: ambiguityDB.path)
+
+        let stateDB = temporaryDatabaseURL(secretComponent: "managed-state-token=synthetic-secret")
+        defer { removeDatabaseFiles(stateDB) }
+        let add = try addManagedStream(dbURL: stateDB, name: "Managed")
+        XCTAssertEqual(add.exitCode, 0, add.diagnosticSummary)
+
+        let unknown = try runSounding(arguments: [
+            "ingest", "--stream", "Missing", "--db", stateDB.path, "--max-chunks", "1",
+        ])
+        XCTAssertNotEqual(unknown.exitCode, 0, unknown.diagnosticSummary)
+        XCTAssertTrue(
+            (String(data: unknown.stderr, encoding: .utf8) ?? "").contains(
+                "stream reference was not found"),
+            unknown.diagnosticSummary)
+
+        let pause = try runSounding(arguments: ["streams", "pause", "--db", stateDB.path, "1"])
+        XCTAssertEqual(pause.exitCode, 0, pause.diagnosticSummary)
+        let paused = try runSounding(arguments: [
+            "ingest", "--stream", "Managed", "--db", stateDB.path, "--max-chunks", "1",
+        ])
+        XCTAssertNotEqual(paused.exitCode, 0, paused.diagnosticSummary)
+        XCTAssertTrue(
+            (String(data: paused.stderr, encoding: .utf8) ?? "").contains("status=paused"),
+            paused.diagnosticSummary)
+
+        let resume = try runSounding(arguments: ["streams", "resume", "--db", stateDB.path, "1"])
+        XCTAssertEqual(resume.exitCode, 0, resume.diagnosticSummary)
+        let remove = try runSounding(arguments: ["streams", "remove", "--db", stateDB.path, "1"])
+        XCTAssertEqual(remove.exitCode, 0, remove.diagnosticSummary)
+        let removed = try runSounding(arguments: [
+            "ingest", "--stream", "1", "--db", stateDB.path, "--max-chunks", "1",
+        ])
+        XCTAssertNotEqual(removed.exitCode, 0, removed.diagnosticSummary)
+        XCTAssertTrue(
+            (String(data: removed.stderr, encoding: .utf8) ?? "").contains("status=removed"),
+            removed.diagnosticSummary)
+
+        let database = try DatabaseQueue(path: stateDB.path)
+        let runCount = try database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_runs")
+        }
+        XCTAssertEqual(runCount, 0)
+    }
+
+    func testManagedActiveStreamIngestReusesStreamRowAcrossRepeatedRuns() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "managed-active")
+        defer { removeDatabaseFiles(dbURL) }
+        let fixture =
+            packageRootURL
+            .appendingPathComponent("Tests/SoundingKitTests/Fixtures/HLS/manifest-scte35.m3u8")
+        let add = try addManagedStream(dbURL: dbURL, name: "Managed", source: fixture.path)
+        XCTAssertEqual(add.exitCode, 0, add.diagnosticSummary)
+
+        for reference in ["Managed", "1"] {
+            let ingest = try runSounding(
+                arguments: [
+                    "ingest",
+                    "--stream", reference,
+                    "--db", dbURL.path,
+                    "--max-chunks", "1",
+                ],
+                environment: [
+                    "SOUNDING_DETERMINISTIC_ML": "1",
+                    "SOUNDING_ACOUSTID_STUB": "success",
+                ]
+            )
+            XCTAssertEqual(ingest.exitCode, 0, ingest.diagnosticSummary)
+            let stdout = String(data: ingest.stdout, encoding: .utf8) ?? ""
+            XCTAssertTrue(stdout.contains("stream=1"), ingest.diagnosticSummary)
+            XCTAssertTrue(stdout.contains("chunks=1"), ingest.diagnosticSummary)
+            assertSanitized(stdout, forbiddenLiteral: fixture.path)
+            assertSanitized(stdout, forbiddenLiteral: dbURL.path)
+        }
+
+        let database = try DatabaseQueue(path: dbURL.path)
+        let row = try database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT (SELECT COUNT(*) FROM streams) AS streams,
+                           (SELECT COUNT(*) FROM ingest_runs) AS runs,
+                           (SELECT COUNT(*) FROM ingest_runs WHERE stream_id = 1 AND status = 'completed') AS linked_runs,
+                           (SELECT COUNT(*) FROM ingest_chunks) AS chunks
+                    """
+            )
+        }
+        XCTAssertEqual(row?["streams"] as Int?, 1)
+        XCTAssertEqual(row?["runs"] as Int?, 2)
+        XCTAssertEqual(row?["linked_runs"] as Int?, 2)
+        XCTAssertEqual(row?["chunks"] as Int?, 2)
     }
 
     func testSourceOpenFailurePersistsRedactedDiagnosticRows() throws {
@@ -412,6 +538,31 @@ final class IngestCommandSmokeTests: XCTestCase {
         assertSanitized(
             stderr, forbiddenLiteral: "/tmp/sounding-missing-audio-token=synthetic-secret.wav")
         assertSanitized(stderr, forbiddenLiteral: dbURL.path)
+    }
+
+    private func addManagedStream(
+        dbURL: URL,
+        name: String,
+        source: String = "https://example.test/live.m3u8?token=synthetic-secret",
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> CLIResult {
+        let add = try runSounding(
+            arguments: [
+                "streams", "add", "--db", dbURL.path, name,
+                "https://example.test/live.m3u8?token=synthetic-secret", "--stream-type", "hls",
+            ], file: file, line: line)
+        guard add.exitCode == 0 else { return add }
+        if source != "https://example.test/live.m3u8?token=synthetic-secret" {
+            let database = try DatabaseQueue(path: dbURL.path)
+            try database.write { db in
+                try db.execute(
+                    sql: "UPDATE streams SET source = ?, stream_type = 'hls' WHERE name = ?",
+                    arguments: [source, name]
+                )
+            }
+        }
+        return add
     }
 
     private func runSounding(

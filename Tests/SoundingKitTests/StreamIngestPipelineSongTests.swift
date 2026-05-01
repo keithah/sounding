@@ -81,12 +81,14 @@ final class StreamIngestPipelineSongTests: XCTestCase {
             )
         )
 
-        let result = try await pipeline.run(source: "https://example.test/live", streamType: .hls, maxChunks: 2)
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 2)
 
         XCTAssertEqual(result.processedChunks, 2)
         XCTAssertEqual(result.diagnostics, [])
         let lookupCount = await lookup.invocationCount
-        XCTAssertEqual(lookupCount, 1, "Second adjacent chunk should use the persisted lookup cache.")
+        XCTAssertEqual(
+            lookupCount, 1, "Second adjacent chunk should use the persisted lookup cache.")
         let rows = try temporary.database.read { db in
             try (
                 songs: Row.fetchAll(
@@ -106,7 +108,9 @@ final class StreamIngestPipelineSongTests: XCTestCase {
                         """),
                 cacheRows: Row.fetchAll(
                     db,
-                    sql: "SELECT fingerprint_hash, title, artist, response_json FROM acoustid_lookup_cache")
+                    sql:
+                        "SELECT fingerprint_hash, title, artist, response_json FROM acoustid_lookup_cache"
+                )
             )
         }
         XCTAssertEqual(rows.songs.count, 1)
@@ -115,7 +119,9 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(rows.songs[0]["artist"] as String, "Pipeline Lookup Artist")
         XCTAssertEqual(rows.songs[0]["album"] as String, "Pipeline Lookup Album")
         XCTAssertEqual(rows.songs[0]["isrc"] as String, "US-SND-26-00003")
-        XCTAssertEqual(rows.songs[0]["display_name"] as String, "Pipeline Lookup Title — Pipeline Lookup Artist")
+        XCTAssertEqual(
+            rows.songs[0]["display_name"] as String,
+            "Pipeline Lookup Title — Pipeline Lookup Artist")
         XCTAssertEqual(rows.songs[0]["is_unknown"] as Bool, false)
         XCTAssertEqual(rows.plays.count, 1)
         XCTAssertEqual(rows.plays[0]["first_sequence"] as Int, 0)
@@ -128,7 +134,9 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(rows.cacheRows[0]["title"] as String, "Pipeline Lookup Title")
     }
 
-    func testAcoustIDLookupFailurePersistsBaseFingerprintSongPlayAndRedactedDiagnostic() async throws {
+    func testAcoustIDLookupFailurePersistsBaseFingerprintSongPlayAndRedactedDiagnostic()
+        async throws
+    {
         let temporary = try TemporarySoundingDatabase()
         let pipeline = StreamIngestPipeline(
             database: temporary.database,
@@ -142,13 +150,15 @@ final class StreamIngestPipelineSongTests: XCTestCase {
                 cache: AcoustIDLookupCache(database: temporary.database),
                 lookup: CountingSongLookup(
                     outcome: .transientFailure(
-                        reason: "timeout for https://user:pass@example.test/acoustid?api_key=secret path=/tmp/acoustid-token=secret.json"
+                        reason:
+                            "timeout for https://user:pass@example.test/acoustid?api_key=secret path=/tmp/acoustid-token=secret.json"
                     )
                 )
             )
         )
 
-        let result = try await pipeline.run(source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
 
         XCTAssertEqual(result.processedChunks, 1)
         XCTAssertEqual(result.diagnostics.map(\.phase), [.fingerprint])
@@ -178,7 +188,9 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertTrue(context.contains("[redacted-path]"), context)
         Self.assertNoForbiddenLiterals(
             in: context,
-            forbidden: ["user:pass", "api_key=secret", "token=secret", "/tmp/acoustid-token=secret.json"]
+            forbidden: [
+                "user:pass", "api_key=secret", "token=secret", "/tmp/acoustid-token=secret.json",
+            ]
         )
     }
 
@@ -313,6 +325,54 @@ final class StreamIngestPipelineSongTests: XCTestCase {
             ]
         }
         XCTAssertEqual(counts, ["audio_fingerprints": 0, "diagnostics": 1])
+    }
+
+    func testManagedStreamRunReusesExistingStreamRowAcrossRuns() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let record = try registry.add(
+            name: "Managed Main",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8?token=synthetic-secret"
+        )
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeSongTranscriber(),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let first = try await pipeline.run(
+            streamID: record.id,
+            source: record.sourceDescription,
+            streamType: .hls,
+            maxChunks: 1
+        )
+        let second = try await pipeline.run(
+            streamID: record.id,
+            source: record.sourceDescription,
+            streamType: .hls,
+            maxChunks: 1
+        )
+
+        XCTAssertEqual(first.streamID, record.id)
+        XCTAssertEqual(second.streamID, record.id)
+        let rows = try temporary.database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT (SELECT COUNT(*) FROM streams) AS streams,
+                           (SELECT COUNT(*) FROM ingest_runs) AS runs,
+                           (SELECT COUNT(DISTINCT stream_id) FROM ingest_runs) AS run_streams,
+                           (SELECT COUNT(*) FROM ingest_runs WHERE stream_id = ?) AS linked_runs
+                    """,
+                arguments: [record.id]
+            )
+        }
+        XCTAssertEqual(rows?["streams"] as Int?, 1)
+        XCTAssertEqual(rows?["runs"] as Int?, 2)
+        XCTAssertEqual(rows?["run_streams"] as Int?, 1)
+        XCTAssertEqual(rows?["linked_runs"] as Int?, 2)
     }
 
     private static func fingerprintOutput(hash: String, start: Double, end: Double)

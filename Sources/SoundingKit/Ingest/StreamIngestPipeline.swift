@@ -63,12 +63,30 @@ public struct StreamIngestPipeline {
         let streamType = resolvedStreamType(for: source, requested: requestedStreamType)
         let persistence = IngestPersistence(database: database)
         let createdAt = now()
-        let redactedSource = IngestRedaction.sourceDescription(source)
         let streamID = try persistence.createStream(
             streamType: streamType.rawValue,
-            source: redactedSource,
+            source: IngestRedaction.sourceDescription(source),
             createdAt: createdAt
         )
+        return try await run(
+            streamID: streamID,
+            source: source,
+            streamType: streamType,
+            durationSeconds: durationSeconds,
+            maxChunks: maxChunks
+        )
+    }
+
+    public func run(
+        streamID: Int64,
+        source: String,
+        streamType requestedStreamType: StreamType,
+        durationSeconds: Double? = nil,
+        maxChunks: Int? = nil
+    ) async throws -> StreamIngestResult {
+        let streamType = resolvedStreamType(for: source, requested: requestedStreamType)
+        let persistence = IngestPersistence(database: database)
+        let redactedSource = IngestRedaction.sourceDescription(source)
         let runID = try persistence.createRun(
             streamID: streamID,
             startedAt: now(),

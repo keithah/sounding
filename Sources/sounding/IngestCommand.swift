@@ -12,7 +12,12 @@ struct IngestCommand: AsyncParsableCommand {
     var sources: [String] = []
 
     @Option(name: .long, help: "Path to the Sounding SQLite database to open or create.")
-    var db: String
+    var db: String?
+
+    @Option(
+        name: .long,
+        help: "Managed stream name or id to ingest from an existing active registry row.")
+    var stream: String?
 
     @Option(name: .long, help: "Stream type hint: auto, hls, icecast, icy, mpegts, or udp.")
     var streamType: StreamTypeArgument = .auto
@@ -39,11 +44,23 @@ struct IngestCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        let dbPath = normalizedDatabasePath
         let database: SoundingDatabase
         do {
-            database = try SoundingDatabase(fileURL: URL(fileURLWithPath: db))
+            database = try SoundingDatabase(fileURL: URL(fileURLWithPath: dbPath))
         } catch {
             standardErrorWrite(IngestCommandError.databaseOpenFailed.description)
+            throw ExitCode.failure
+        }
+
+        let managedStream: StreamRecord?
+        do {
+            managedStream = try resolveManagedStream(database: database)
+        } catch let error as IngestCommandError {
+            standardErrorWrite(error.description)
+            throw ExitCode.failure
+        } catch let error as StreamRegistryError {
+            standardErrorWrite(IngestCommandError.registry(error).description)
             throw ExitCode.failure
         }
 
@@ -57,6 +74,35 @@ struct IngestCommand: AsyncParsableCommand {
         let fingerprintEnricher = makeFingerprintEnricher(database: database)
 
         do {
+            if let managedStream {
+                let result = try await StreamIngestPipeline(
+                    database: database,
+                    decoder: AVFoundationAudioDecoder(),
+                    transcriber: providers.transcriber,
+                    diarizer: providers.diarizer,
+                    fingerprinter: fingerprinter,
+                    fingerprintEnricher: fingerprintEnricher
+                ).run(
+                    streamID: managedStream.id,
+                    source: managedStream.sourceDescription,
+                    streamType: try streamType(for: managedStream),
+                    durationSeconds: duration,
+                    maxChunks: maxChunks
+                )
+                if let setupDiagnostic = result.diagnostics.first(where: {
+                    $0.phase == .modelSetup && $0.severity == .error
+                }) {
+                    standardErrorWrite(
+                        "Ingest modelSetup failed: \(setupDiagnostic.reason). See persisted ingest_diagnostics for redacted run details."
+                    )
+                    throw ExitCode.failure
+                }
+                print(
+                    "ingest completed: stream=\(result.streamID) run=\(result.runID) chunks=\(result.processedChunks) diagnostics=\(result.diagnostics.count)"
+                )
+                return
+            }
+
             if normalizedSources.count == 1 {
                 let result = try await StreamIngestPipeline(
                     database: database,
@@ -128,11 +174,32 @@ struct IngestCommand: AsyncParsableCommand {
             .filter { !$0.isEmpty }
     }
 
+    private var normalizedDatabasePath: String {
+        db?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private var normalizedStreamReference: String? {
+        let trimmed = stream?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private func validateConfiguration() throws {
         let normalizedSources = normalizedSources
-        guard !normalizedSources.isEmpty else {
+        let managedStreamReference = normalizedStreamReference
+        guard !normalizedDatabasePath.isEmpty else {
             throw IngestCommandError.configuration(
-                "provide at least one non-empty source before ingest can start")
+                "provide --db before ingest can start")
+        }
+        if managedStreamReference != nil {
+            guard normalizedSources.isEmpty else {
+                throw IngestCommandError.configuration(
+                    "provide either --stream or positional source arguments, not both")
+            }
+        } else {
+            guard !normalizedSources.isEmpty else {
+                throw IngestCommandError.configuration(
+                    "provide at least one non-empty source before ingest can start")
+            }
         }
         guard normalizedSources.count <= Self.maximumSourceCount else {
             throw IngestCommandError.configuration(
@@ -149,6 +216,32 @@ struct IngestCommand: AsyncParsableCommand {
         if let maxChunks, maxChunks <= 0 {
             throw IngestCommandError.configuration("max-chunks must be greater than zero")
         }
+    }
+
+    private func resolveManagedStream(database: SoundingDatabase) throws -> StreamRecord? {
+        guard let reference = normalizedStreamReference else { return nil }
+        let registry = StreamRegistry(database: database)
+        let record: StreamRecord?
+        if let id = Int64(reference), id > 0 {
+            record = try registry.find(id: id, includeRemoved: true)
+        } else {
+            record = try registry.find(name: reference, includeRemoved: true)
+        }
+        guard let record else {
+            throw IngestCommandError.streamNotFound
+        }
+        guard record.status == .active else {
+            throw IngestCommandError.streamNotActive(status: record.status.rawValue)
+        }
+        _ = try streamType(for: record)
+        return record
+    }
+
+    private func streamType(for record: StreamRecord) throws -> StreamType {
+        guard let streamType = StreamType(rawValue: record.streamType) else {
+            throw IngestCommandError.invalidManagedStreamType(record.streamType)
+        }
+        return streamType
     }
 
     private func makeProviders(
@@ -177,7 +270,9 @@ struct IngestCommand: AsyncParsableCommand {
         return NoOpAudioFingerprinter()
     }
 
-    private func makeFingerprintEnricher(database: SoundingDatabase) -> any AudioFingerprintEnriching {
+    private func makeFingerprintEnricher(database: SoundingDatabase)
+        -> any AudioFingerprintEnriching
+    {
         AcoustIDAudioFingerprintEnricher(
             cache: AcoustIDLookupCache(database: database),
             lookup: makeAcoustIDLookup()
@@ -195,13 +290,15 @@ struct IngestCommand: AsyncParsableCommand {
         case "not-found":
             return StubAcoustIDLookup(
                 outcome: .notFound(
-                    reason: "no AcoustID result for https://user:pass@example.test/lookup?token=synthetic-secret"
+                    reason:
+                        "no AcoustID result for https://user:pass@example.test/lookup?token=synthetic-secret"
                 )
             )
         case "transient":
             return StubAcoustIDLookup(
                 outcome: .transientFailure(
-                    reason: "temporary AcoustID failure reading /tmp/acoustid-token=synthetic-secret.json"
+                    reason:
+                        "temporary AcoustID failure reading /tmp/acoustid-token=synthetic-secret.json"
                 )
             )
         case "rate-limit":
@@ -209,7 +306,8 @@ struct IngestCommand: AsyncParsableCommand {
         case "malformed":
             return StubAcoustIDLookup(
                 outcome: .malformedResponse(
-                    reason: "malformed AcoustID body raw={\"api_key\":\"synthetic-secret\",\"url\":\"https://user:pass@example.test/lookup?token=synthetic-secret\"} file=/tmp/acoustid-token=synthetic-secret.json"
+                    reason:
+                        "malformed AcoustID body raw={\"api_key\":\"synthetic-secret\",\"url\":\"https://user:pass@example.test/lookup?token=synthetic-secret\"} file=/tmp/acoustid-token=synthetic-secret.json"
                 )
             )
         case .some(let stubMode) where !stubMode.isEmpty:
@@ -273,6 +371,10 @@ struct IngestCommand: AsyncParsableCommand {
 private enum IngestCommandError: Error, CustomStringConvertible {
     case configuration(String)
     case databaseOpenFailed
+    case registry(StreamRegistryError)
+    case streamNotFound
+    case streamNotActive(status: String)
+    case invalidManagedStreamType(String)
 
     var description: String {
         switch self {
@@ -280,6 +382,42 @@ private enum IngestCommandError: Error, CustomStringConvertible {
             return "Ingest configuration failed: \(IngestRedaction.redact(reason))."
         case .databaseOpenFailed:
             return "Ingest database failed: could not open redacted database path."
+        case .registry(let error):
+            return registryDescription(error)
+        case .streamNotFound:
+            return "Ingest state failed: stream reference was not found."
+        case .streamNotActive(let status):
+            return
+                "Ingest state failed: stream is not active (status=\(IngestRedaction.redact(status)))."
+        case .invalidManagedStreamType(let streamType):
+            return
+                "Ingest configuration failed: managed stream has invalid stream type \(IngestRedaction.redact(streamType))."
+        }
+    }
+
+    private func registryDescription(_ error: StreamRegistryError) -> String {
+        switch error {
+        case .invalidID:
+            return "Ingest configuration failed: stream id must be greater than zero."
+        case .invalidName:
+            return "Ingest configuration failed: stream name must not be empty."
+        case .invalidSource:
+            return "Ingest configuration failed: stream source must not be empty."
+        case .invalidStreamType:
+            return "Ingest configuration failed: stream type must not be empty."
+        case .invalidStatus(let status):
+            return
+                "Ingest database failed: invalid stream status \(IngestRedaction.redact(status))."
+        case .duplicateName:
+            return "Ingest state failed: duplicate active stream name."
+        case .streamNotFound:
+            return "Ingest state failed: stream reference was not found."
+        case .streamRemoved:
+            return "Ingest state failed: stream is not active (status=removed)."
+        case .databaseReadFailed(let message):
+            return "Ingest database failed: \(IngestRedaction.redact(message))."
+        case .databaseWriteFailed(let message):
+            return "Ingest database failed: \(IngestRedaction.redact(message))."
         }
     }
 }
