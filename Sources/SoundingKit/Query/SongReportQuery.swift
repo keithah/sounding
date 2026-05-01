@@ -137,6 +137,44 @@ public struct SongReportQuery {
         }
     }
 
+    /// A deterministic group of repeated known song plays.
+    ///
+    /// M003 report fixtures are intentionally small, so repeats are derived by grouping the
+    /// already-filtered play report in memory. If operator databases grow large enough to make
+    /// unpaginated grouping expensive, this boundary can move to a SQL aggregate without changing
+    /// the Codable result shape.
+    public struct RepeatResult: Codable, Equatable, Sendable {
+        public var groupKey: String
+        public var song: SongDisplay
+        public var repeatCount: Int
+        public var totalDurationSeconds: Double
+        public var firstStartSeconds: Double
+        public var lastEndSeconds: Double
+        public var plays: [PlayResult]
+
+        public init(
+            groupKey: String,
+            song: SongDisplay,
+            repeatCount: Int,
+            totalDurationSeconds: Double,
+            firstStartSeconds: Double,
+            lastEndSeconds: Double,
+            plays: [PlayResult]
+        ) {
+            self.groupKey = groupKey
+            self.song = song
+            self.repeatCount = repeatCount
+            self.totalDurationSeconds = totalDurationSeconds
+            self.firstStartSeconds = firstStartSeconds
+            self.lastEndSeconds = lastEndSeconds
+            self.plays = plays
+        }
+    }
+
+    private struct RepeatGroupKey: Hashable {
+        var rawValue: String
+    }
+
     private let database: SoundingDatabase
 
     public init(database: SoundingDatabase) {
@@ -215,6 +253,30 @@ public struct SongReportQuery {
         }
     }
 
+    public func repeats(filter: Filter = Filter()) throws -> [RepeatResult] {
+        let grouped = Dictionary(grouping: try plays(filter: filter).filter { !$0.song.isUnknown })
+        {
+            repeatGroupKey(for: $0.song)
+        }
+
+        return grouped.values.compactMap { group -> RepeatResult? in
+            let orderedPlays = group.sorted(by: comparePlays)
+            guard orderedPlays.count >= 2, let representative = orderedPlays.first else {
+                return nil
+            }
+
+            return RepeatResult(
+                groupKey: repeatGroupKey(for: representative.song).rawValue,
+                song: representative.song,
+                repeatCount: orderedPlays.count,
+                totalDurationSeconds: orderedPlays.reduce(0) { $0 + $1.durationSeconds },
+                firstStartSeconds: orderedPlays.map(\.startSeconds).min() ?? 0,
+                lastEndSeconds: orderedPlays.map(\.endSeconds).max() ?? 0,
+                plays: orderedPlays
+            )
+        }.sorted(by: compareRepeatResults)
+    }
+
     private func validate(_ filter: Filter) throws -> Filter {
         let stream = filter.stream?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let stream, stream.isEmpty {
@@ -231,6 +293,53 @@ public struct SongReportQuery {
         }
         return Filter(
             stream: stream, startSeconds: filter.startSeconds, endSeconds: filter.endSeconds)
+    }
+
+    private func repeatGroupKey(for song: SongDisplay) -> RepeatGroupKey {
+        if let artist = normalizedRepeatComponent(song.artist),
+            let title = normalizedRepeatComponent(song.title)
+        {
+            return RepeatGroupKey(rawValue: "artist-title:\(artist):\(title)")
+        }
+
+        return RepeatGroupKey(rawValue: "song-key:\(song.songKey)")
+    }
+
+    private func normalizedRepeatComponent(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized =
+            value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            )
+            .lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func compareRepeatResults(_ lhs: RepeatResult, _ rhs: RepeatResult) -> Bool {
+        if lhs.repeatCount != rhs.repeatCount { return lhs.repeatCount > rhs.repeatCount }
+        if lhs.firstStartSeconds != rhs.firstStartSeconds {
+            return lhs.firstStartSeconds < rhs.firstStartSeconds
+        }
+        if lhs.lastEndSeconds != rhs.lastEndSeconds {
+            return lhs.lastEndSeconds < rhs.lastEndSeconds
+        }
+        if lhs.groupKey != rhs.groupKey { return lhs.groupKey < rhs.groupKey }
+        return lhs.song.songID < rhs.song.songID
+    }
+
+    private func comparePlays(_ lhs: PlayResult, _ rhs: PlayResult) -> Bool {
+        if lhs.identity.streamID != rhs.identity.streamID {
+            return lhs.identity.streamID < rhs.identity.streamID
+        }
+        if lhs.identity.runID != rhs.identity.runID {
+            return lhs.identity.runID < rhs.identity.runID
+        }
+        if lhs.startSeconds != rhs.startSeconds { return lhs.startSeconds < rhs.startSeconds }
+        return lhs.identity.playID < rhs.identity.playID
     }
 
     private func playResult(_ row: Row) throws -> PlayResult {

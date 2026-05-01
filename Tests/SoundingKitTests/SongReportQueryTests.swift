@@ -184,8 +184,99 @@ final class SongReportQueryTests: XCTestCase {
         XCTAssertTrue(indexes.contains("song_plays_on_song_id"), indexes.joined(separator: ","))
     }
 
+    func testRepeatsGroupKnownSongsByNormalizedArtistTitleAndExcludeUnknowns() throws {
+        let fixture = try makeRepeatFixture()
+        let repeats = try fixture.query.repeats()
+
+        XCTAssertEqual(
+            repeats.map(\.groupKey),
+            ["artist-title:repeat artist:echo song", "artist-title:second artist:tie song"])
+
+        let echo = try XCTUnwrap(repeats.first)
+        XCTAssertEqual(echo.repeatCount, 3)
+        XCTAssertEqual(echo.totalDurationSeconds, 30)
+        XCTAssertEqual(echo.firstStartSeconds, 0)
+        XCTAssertEqual(echo.lastEndSeconds, 30)
+        XCTAssertEqual(echo.song.displayName, "Repeat Artist — Echo Song")
+        XCTAssertEqual(echo.plays.map(\.song.isUnknown), [false, false, false])
+        XCTAssertEqual(echo.plays.map(\.startSeconds), [0, 20, 0])
+        XCTAssertFalse(
+            echo.plays.contains { $0.song.songKey == UnresolvedSongDraft.unidentifiedKey })
+    }
+
+    func testRepeatsInheritStreamAndTimeOverlapFiltersFromPlays() throws {
+        let fixture = try makeRepeatFixture()
+
+        let hlsRepeats = try fixture.query.repeats(filter: .init(stream: "hls"))
+        XCTAssertEqual(hlsRepeats.map(\.groupKey), ["artist-title:repeat artist:echo song"])
+        XCTAssertEqual(hlsRepeats.first?.repeatCount, 2)
+        XCTAssertEqual(
+            hlsRepeats.first?.plays.map(\.identity.streamID),
+            [fixture.hlsStreamID, fixture.hlsStreamID])
+
+        let overlappingWindow = try fixture.query.repeats(
+            filter: .init(stream: "hls", startSeconds: 9.5, endSeconds: 20.5)
+        )
+        XCTAssertEqual(overlappingWindow.map(\.groupKey), ["artist-title:repeat artist:echo song"])
+        XCTAssertEqual(overlappingWindow.first?.plays.map(\.startSeconds), [0, 20])
+    }
+
+    func testRepeatsAreCodableEquatableAndStableWithSortedKeys() throws {
+        let fixture = try makeRepeatFixture()
+        let repeats = try fixture.query.repeats()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        let data = try encoder.encode(RepeatPayload(results: repeats))
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.hasPrefix("{\"results\":[{"), text)
+        XCTAssertTrue(text.contains("\"groupKey\":\"artist-title:repeat artist:echo song\""), text)
+        XCTAssertTrue(text.contains("\"repeatCount\":3"), text)
+        XCTAssertFalse(text.contains(UnresolvedSongDraft.unidentifiedKey), text)
+
+        let decoded = try JSONDecoder().decode(RepeatPayload.self, from: data)
+        XCTAssertEqual(decoded.results, repeats)
+    }
+
+    func testRepeatsReturnEmptyForEmptyDatabaseNoMatchesUnknownOnlyAndSingleKnownPlays() throws {
+        let temporary = try TemporarySoundingDatabase()
+        XCTAssertEqual(try SongReportQuery(database: temporary.database).repeats(), [])
+
+        let fixture = try makeFixture()
+        XCTAssertEqual(try fixture.query.repeats(), [])
+        XCTAssertEqual(try fixture.query.repeats(filter: .init(stream: "missing-stream")), [])
+
+        let unknownFixture = try makeUnknownOnlyRepeatFixture()
+        XCTAssertEqual(try unknownFixture.query.repeats(), [])
+    }
+
+    func testRepeatValidationRejectsMalformedFiltersBeforeSql() throws {
+        let fixture = try makeFixture()
+
+        XCTAssertThrowsError(try fixture.query.repeats(filter: .init(stream: "  \t\n"))) { error in
+            XCTAssertEqual(error as? SongReportQuery.QueryError, .emptyStreamFilter)
+        }
+        XCTAssertThrowsError(
+            try fixture.query.repeats(filter: .init(startSeconds: 30, endSeconds: 20))
+        ) { error in
+            XCTAssertEqual(error as? SongReportQuery.QueryError, .invalidTimeRange)
+        }
+        XCTAssertThrowsError(try fixture.query.repeats(filter: .init(startSeconds: .infinity))) {
+            error in
+            XCTAssertEqual(
+                error as? SongReportQuery.QueryError, .nonFiniteTimeFilter("startSeconds"))
+        }
+        XCTAssertThrowsError(try fixture.query.repeats(filter: .init(endSeconds: .nan))) { error in
+            XCTAssertEqual(error as? SongReportQuery.QueryError, .nonFiniteTimeFilter("endSeconds"))
+        }
+    }
+
     private struct Payload: Codable, Equatable {
         var results: [SongReportQuery.PlayResult]
+    }
+
+    private struct RepeatPayload: Codable, Equatable {
+        var results: [SongReportQuery.RepeatResult]
     }
 
     private struct Fixture {
@@ -200,6 +291,233 @@ final class SongReportQueryTests: XCTestCase {
         var icyRunID: Int64
         var knownPlayID: Int64
         var unknownPlayID: Int64
+    }
+
+    private struct RepeatFixture {
+        var temporary: TemporarySoundingDatabase
+        var query: SongReportQuery
+        var hlsStreamID: Int64
+        var icyStreamID: Int64
+    }
+
+    private func makeRepeatFixture() throws -> RepeatFixture {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+
+        let hlsStreamID = try writer.createStream(
+            streamType: "hls",
+            source: "https://example.test/repeats.m3u8?token=fixture-secret",
+            createdAt: "2026-05-01T12:00:00Z"
+        )
+        let hlsRunID = try writer.createRun(
+            streamID: hlsStreamID,
+            startedAt: "2026-05-01T12:00:01Z",
+            status: .running
+        )
+        let hlsChunk0 = try writer.createChunk(
+            runID: hlsRunID,
+            sequence: 0,
+            segmentURI: "repeat-000.ts",
+            startedAt: "2026-05-01T12:00:02Z",
+            endedAt: "2026-05-01T12:00:12Z"
+        )
+        let hlsChunk1 = try writer.createChunk(
+            runID: hlsRunID,
+            sequence: 1,
+            segmentURI: "repeat-001.ts",
+            startedAt: "2026-05-01T12:00:12Z",
+            endedAt: "2026-05-01T12:00:22Z"
+        )
+        let hlsChunk2 = try writer.createChunk(
+            runID: hlsRunID,
+            sequence: 2,
+            segmentURI: "repeat-002.ts",
+            startedAt: "2026-05-01T12:00:22Z",
+            endedAt: "2026-05-01T12:00:32Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: hlsRunID,
+                chunkID: hlsChunk0,
+                songPlays: [
+                    SongPlayDraft(
+                        song: repeatSong,
+                        startSeconds: 0,
+                        endSeconds: 10,
+                        confidence: 0.90,
+                        source: "local_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T12:00:03Z"
+            )
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: hlsRunID,
+                chunkID: hlsChunk1,
+                songPlays: [
+                    SongPlayDraft(
+                        song: .unidentified(),
+                        startSeconds: 11,
+                        endSeconds: 12,
+                        confidence: nil,
+                        source: nil
+                    )
+                ],
+                createdAt: "2026-05-01T12:00:13Z"
+            )
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: hlsRunID,
+                chunkID: hlsChunk2,
+                songPlays: [
+                    SongPlayDraft(
+                        song: repeatSong,
+                        startSeconds: 20,
+                        endSeconds: 30,
+                        confidence: 0.88,
+                        source: "local_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T12:00:23Z"
+            )
+        )
+
+        let icyStreamID = try writer.createStream(
+            streamType: "icy",
+            source: "https://example.test/repeats-radio",
+            createdAt: "2026-05-01T13:00:00Z"
+        )
+        let icyRunID = try writer.createRun(
+            streamID: icyStreamID,
+            startedAt: "2026-05-01T13:00:01Z",
+            status: .running
+        )
+        let icyChunk0 = try writer.createChunk(
+            runID: icyRunID,
+            sequence: 0,
+            segmentURI: "icy-repeat-000",
+            startedAt: "2026-05-01T13:00:02Z",
+            endedAt: "2026-05-01T13:00:12Z"
+        )
+        let icyChunk1 = try writer.createChunk(
+            runID: icyRunID,
+            sequence: 1,
+            segmentURI: "icy-repeat-001",
+            startedAt: "2026-05-01T13:00:12Z",
+            endedAt: "2026-05-01T13:00:22Z"
+        )
+        let icyChunk2 = try writer.createChunk(
+            runID: icyRunID,
+            sequence: 3,
+            segmentURI: "icy-repeat-002",
+            startedAt: "2026-05-01T13:00:22Z",
+            endedAt: "2026-05-01T13:00:32Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: icyRunID,
+                chunkID: icyChunk0,
+                songPlays: [
+                    SongPlayDraft(
+                        song: repeatSongAlternateKey,
+                        startSeconds: 0,
+                        endSeconds: 10,
+                        confidence: 0.87,
+                        source: "remote_enrichment"
+                    )
+                ],
+                createdAt: "2026-05-01T13:00:03Z"
+            )
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: icyRunID,
+                chunkID: icyChunk1,
+                songPlays: [
+                    SongPlayDraft(
+                        song: tieSong,
+                        startSeconds: 40,
+                        endSeconds: 50,
+                        confidence: 0.80,
+                        source: "local_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T13:00:13Z"
+            )
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: icyRunID,
+                chunkID: icyChunk2,
+                songPlays: [
+                    SongPlayDraft(
+                        song: tieSong,
+                        startSeconds: 60,
+                        endSeconds: 70,
+                        confidence: 0.81,
+                        source: "local_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T13:00:23Z"
+            )
+        )
+
+        return RepeatFixture(
+            temporary: temporary,
+            query: SongReportQuery(database: temporary.database),
+            hlsStreamID: hlsStreamID,
+            icyStreamID: icyStreamID
+        )
+    }
+
+    private func makeUnknownOnlyRepeatFixture() throws -> RepeatFixture {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(
+            streamType: "hls",
+            source: "https://example.test/unknowns.m3u8",
+            createdAt: "2026-05-01T14:00:00Z"
+        )
+        let runID = try writer.createRun(
+            streamID: streamID,
+            startedAt: "2026-05-01T14:00:01Z",
+            status: .running
+        )
+
+        for sequence in 0..<2 {
+            let chunkID = try writer.createChunk(
+                runID: runID,
+                sequence: sequence * 2,
+                segmentURI: "unknown-\(sequence).ts",
+                startedAt: "2026-05-01T14:00:0\(sequence + 2)Z",
+                endedAt: "2026-05-01T14:00:1\(sequence + 2)Z"
+            )
+            try writer.persistTimeline(
+                IngestChunkTimeline(
+                    runID: runID,
+                    chunkID: chunkID,
+                    songPlays: [
+                        SongPlayDraft(
+                            song: .unidentified(),
+                            startSeconds: Double(sequence * 20),
+                            endSeconds: Double(sequence * 20 + 10),
+                            confidence: nil,
+                            source: nil
+                        )
+                    ],
+                    createdAt: "2026-05-01T14:00:0\(sequence + 3)Z"
+                )
+            )
+        }
+
+        return RepeatFixture(
+            temporary: temporary,
+            query: SongReportQuery(database: temporary.database),
+            hlsStreamID: streamID,
+            icyStreamID: streamID
+        )
     }
 
     private func makeFixture() throws -> Fixture {
@@ -365,5 +683,38 @@ private var otherSong: UnresolvedSongDraft {
         album: nil,
         isrc: nil,
         displayName: "Second Fixture — Overnight Theme"
+    )
+}
+
+private var repeatSong: UnresolvedSongDraft {
+    UnresolvedSongDraft(
+        songKey: "local:repeat-artist:echo-song",
+        title: "Echo Song",
+        artist: "Repeat Artist",
+        album: "Repeat Proofs",
+        isrc: "US-S03-26-00001",
+        displayName: "Repeat Artist — Echo Song"
+    )
+}
+
+private var repeatSongAlternateKey: UnresolvedSongDraft {
+    UnresolvedSongDraft(
+        songKey: "acoustid:alternate-echo-song",
+        title: "  echo   song  ",
+        artist: "Répeat Artist",
+        album: "Alternate Metadata",
+        isrc: nil,
+        displayName: "Répeat Artist — echo song"
+    )
+}
+
+private var tieSong: UnresolvedSongDraft {
+    UnresolvedSongDraft(
+        songKey: "local:second-artist:tie-song",
+        title: "Tie Song",
+        artist: "Second Artist",
+        album: nil,
+        isrc: nil,
+        displayName: "Second Artist — Tie Song"
     )
 }
