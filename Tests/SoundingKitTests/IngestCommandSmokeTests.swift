@@ -124,6 +124,10 @@ final class IngestCommandSmokeTests: XCTestCase {
                 "words": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_words"),
                 "turns": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM speaker_turns"),
                 "ads": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+                "audio_fingerprints": Int.fetchOne(
+                    db, sql: "SELECT COUNT(*) FROM audio_fingerprints"),
+                "songs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM songs"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
             ]
         }
         XCTAssertEqual(counts["streams"] as? Int, 2)
@@ -133,6 +137,9 @@ final class IngestCommandSmokeTests: XCTestCase {
         XCTAssertEqual(counts["words"] as? Int, 10)
         XCTAssertEqual(counts["turns"] as? Int, 2)
         XCTAssertEqual(counts["ads"] as? Int, 2)
+        XCTAssertEqual(counts["audio_fingerprints"] as? Int, 2)
+        XCTAssertEqual(counts["songs"] as? Int, 1)
+        XCTAssertEqual(counts["song_plays"] as? Int, 2)
 
         let search = try runSounding(arguments: [
             "search", "cli shared phrase",

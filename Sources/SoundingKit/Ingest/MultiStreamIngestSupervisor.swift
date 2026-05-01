@@ -59,9 +59,9 @@ public enum MultiStreamIngestSupervisorError: Error, Equatable, LocalizedError, 
         switch self {
         case .emptyRequests:
             return "At least one bounded stream ingest request is required."
-        case let .tooManyRequests(count, maximum):
+        case .tooManyRequests(let count, let maximum):
             return "Requested \(count) streams, but the supervisor maximum is \(maximum)."
-        case let .unboundedRequest(index):
+        case .unboundedRequest(let index):
             return "Stream request \(index) must specify durationSeconds or maxChunks."
         }
     }
@@ -74,7 +74,8 @@ public enum MultiStreamIngestSupervisorError: Error, Equatable, LocalizedError, 
 /// multi-stream aware. Child tasks catch their own errors so a failed stream cannot
 /// cancel sibling ingests in the non-throwing task group.
 public struct MultiStreamIngestSupervisor {
-    public typealias DecoderFactory = @Sendable (StreamIngestRequest) async throws -> any AudioDecoding
+    public typealias DecoderFactory =
+        @Sendable (StreamIngestRequest) async throws -> any AudioDecoding
     public typealias TimestampProvider = StreamIngestPipeline.TimestampProvider
 
     private let database: SoundingDatabase
@@ -82,6 +83,7 @@ public struct MultiStreamIngestSupervisor {
     private let decoderFactory: DecoderFactory
     private let transcriber: any MLTranscription
     private let diarizer: any SpeakerDiarization
+    private let fingerprinter: any AudioFingerprinting
     private let now: TimestampProvider
 
     public init(
@@ -90,6 +92,7 @@ public struct MultiStreamIngestSupervisor {
         decoderFactory: @escaping DecoderFactory,
         transcriber: any MLTranscription,
         diarizer: any SpeakerDiarization,
+        fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
         now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
     ) {
         self.database = database
@@ -97,6 +100,7 @@ public struct MultiStreamIngestSupervisor {
         self.decoderFactory = decoderFactory
         self.transcriber = transcriber
         self.diarizer = diarizer
+        self.fingerprinter = fingerprinter
         self.now = now
     }
 
@@ -115,7 +119,8 @@ public struct MultiStreamIngestSupervisor {
             for await outcome in group {
                 indexedOutcomes.append(outcome)
             }
-            return indexedOutcomes
+            return
+                indexedOutcomes
                 .sorted { $0.0 < $1.0 }
                 .map(\.1)
         }
@@ -147,6 +152,7 @@ public struct MultiStreamIngestSupervisor {
                 decoder: decoder,
                 transcriber: transcriber,
                 diarizer: diarizer,
+                fingerprinter: fingerprinter,
                 now: now
             )
             let result = try await pipeline.run(
@@ -206,23 +212,25 @@ public struct MultiStreamIngestSupervisor {
 
     private func latestRunSummary(sourceDescription: String) throws -> PersistedRunSummary? {
         try database.read { db in
-            guard let row = try Row.fetchOne(
-                db,
-                sql: """
-                    SELECT
-                        streams.id AS stream_id,
-                        ingest_runs.id AS run_id,
-                        ingest_runs.status AS status,
-                        (SELECT COUNT(*) FROM ingest_chunks WHERE ingest_chunks.run_id = ingest_runs.id AND sequence >= 0) AS processed_chunks,
-                        (SELECT COUNT(*) FROM ingest_diagnostics WHERE ingest_diagnostics.run_id = ingest_runs.id) AS diagnostic_count
-                    FROM streams
-                    JOIN ingest_runs ON ingest_runs.stream_id = streams.id
-                    WHERE streams.source = ?
-                    ORDER BY ingest_runs.id DESC
-                    LIMIT 1
-                    """,
-                arguments: [sourceDescription]
-            ) else {
+            guard
+                let row = try Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT
+                            streams.id AS stream_id,
+                            ingest_runs.id AS run_id,
+                            ingest_runs.status AS status,
+                            (SELECT COUNT(*) FROM ingest_chunks WHERE ingest_chunks.run_id = ingest_runs.id AND sequence >= 0) AS processed_chunks,
+                            (SELECT COUNT(*) FROM ingest_diagnostics WHERE ingest_diagnostics.run_id = ingest_runs.id) AS diagnostic_count
+                        FROM streams
+                        JOIN ingest_runs ON ingest_runs.stream_id = streams.id
+                        WHERE streams.source = ?
+                        ORDER BY ingest_runs.id DESC
+                        LIMIT 1
+                        """,
+                    arguments: [sourceDescription]
+                )
+            else {
                 return nil
             }
             guard

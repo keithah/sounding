@@ -53,6 +53,7 @@ struct IngestCommand: AsyncParsableCommand {
         })
         let queue = InferenceQueue()
         let providers = makeProviders(cache: cache, queue: queue)
+        let fingerprinter = makeFingerprinter()
 
         do {
             if normalizedSources.count == 1 {
@@ -60,7 +61,8 @@ struct IngestCommand: AsyncParsableCommand {
                     database: database,
                     decoder: AVFoundationAudioDecoder(),
                     transcriber: providers.transcriber,
-                    diarizer: providers.diarizer
+                    diarizer: providers.diarizer,
+                    fingerprinter: fingerprinter
                 ).run(
                     source: normalizedSources[0],
                     streamType: streamType.value,
@@ -86,7 +88,8 @@ struct IngestCommand: AsyncParsableCommand {
                 maximumRequests: Self.maximumSourceCount,
                 decoderFactory: { _ in AVFoundationAudioDecoder() },
                 transcriber: providers.transcriber,
-                diarizer: providers.diarizer
+                diarizer: providers.diarizer,
+                fingerprinter: fingerprinter
             )
             let outcomes = try await supervisor.run(
                 normalizedSources.map { source in
@@ -159,6 +162,16 @@ struct IngestCommand: AsyncParsableCommand {
             QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
             QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue)
         )
+    }
+
+    private func makeFingerprinter() -> any AudioFingerprinting {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["SOUNDING_DETERMINISTIC_FINGERPRINT"] == "1"
+            || environment["SOUNDING_DETERMINISTIC_ML"] == "1"
+        {
+            return DeterministicAudioFingerprinter()
+        }
+        return NoOpAudioFingerprinter()
     }
 
     private func summaryLine(for outcome: MultiStreamIngestOutcome, index: Int) -> String {

@@ -32,6 +32,7 @@ public struct StreamIngestPipeline {
     private let decoder: any AudioDecoding
     private let transcriber: any MLTranscription
     private let diarizer: any SpeakerDiarization
+    private let fingerprinter: any AudioFingerprinting
     private let now: TimestampProvider
 
     public init(
@@ -39,12 +40,14 @@ public struct StreamIngestPipeline {
         decoder: any AudioDecoding,
         transcriber: any MLTranscription,
         diarizer: any SpeakerDiarization,
+        fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
         now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
     ) {
         self.database = database
         self.decoder = decoder
         self.transcriber = transcriber
         self.diarizer = diarizer
+        self.fingerprinter = fingerprinter
         self.now = now
     }
 
@@ -97,11 +100,14 @@ public struct StreamIngestPipeline {
                     )
                 }
                 try persistence.persistTimeline(
-                    IngestChunkTimeline(runID: runID, chunkID: diagnosticChunkID, diagnostics: [diagnostic], createdAt: now())
+                    IngestChunkTimeline(
+                        runID: runID, chunkID: diagnosticChunkID, diagnostics: [diagnostic],
+                        createdAt: now())
                 )
             }
 
-            try persistence.finishRun(runID: runID, endedAt: now(), status: status, context: context)
+            try persistence.finishRun(
+                runID: runID, endedAt: now(), status: status, context: context)
             terminalRunFinished = true
         }
 
@@ -114,7 +120,7 @@ public struct StreamIngestPipeline {
             var context: [String: JSONValue] = [
                 "processedChunks": .number(Double(processedChunks)),
                 "diagnosticCount": .number(Double(diagnosticCount)),
-                "terminalStatus": .string(status.rawValue)
+                "terminalStatus": .string(status.rawValue),
             ]
             if let phase {
                 context["terminalPhase"] = .string(phase.rawValue)
@@ -136,7 +142,8 @@ public struct StreamIngestPipeline {
                 )
             )
             try Task.checkCancellation()
-            let bounded = applyBounds(decoded, durationSeconds: durationSeconds, maxChunks: maxChunks)
+            let bounded = applyBounds(
+                decoded, durationSeconds: durationSeconds, maxChunks: maxChunks)
 
             for chunk in bounded {
                 try Task.checkCancellation()
@@ -188,20 +195,22 @@ public struct StreamIngestPipeline {
                 do {
                     try Task.checkCancellation()
                     segments = try await transcriber.transcribe(chunk)
-                    let validation = validateAndNormalize(segments, nextSequence: nextSegmentSequence)
+                    let validation = validateAndNormalize(
+                        segments, nextSequence: nextSegmentSequence)
                     segments = validation.segments
                     nextSegmentSequence += segments.count
-                    chunkDiagnostics.append(contentsOf: validation.diagnostics.map { template in
-                        diagnostic(
-                            streamID: streamID,
-                            phase: .transcribe,
-                            severity: .warning,
-                            reason: template.reason,
-                            source: redactedSource,
-                            streamType: streamType,
-                            context: template.context
-                        )
-                    })
+                    chunkDiagnostics.append(
+                        contentsOf: validation.diagnostics.map { template in
+                            diagnostic(
+                                streamID: streamID,
+                                phase: .transcribe,
+                                severity: .warning,
+                                reason: template.reason,
+                                source: redactedSource,
+                                streamType: streamType,
+                                context: template.context
+                            )
+                        })
                 } catch let cancellation as CancellationError {
                     throw cancellation
                 } catch {
@@ -222,7 +231,9 @@ public struct StreamIngestPipeline {
                             status: .failed,
                             diagnostic: providerDiagnostic,
                             chunkID: chunkID,
-                            context: terminalContext(status: .failed, diagnosticCount: diagnostics.count + 1, phase: phase, reason: reason)
+                            context: terminalContext(
+                                status: .failed, diagnosticCount: diagnostics.count + 1,
+                                phase: phase, reason: reason)
                         )
                         throw error
                     }
@@ -254,12 +265,48 @@ public struct StreamIngestPipeline {
                             status: .failed,
                             diagnostic: providerDiagnostic,
                             chunkID: chunkID,
-                            context: terminalContext(status: .failed, diagnosticCount: diagnostics.count + chunkDiagnostics.count + 1, phase: phase, reason: reason)
+                            context: terminalContext(
+                                status: .failed,
+                                diagnosticCount: diagnostics.count + chunkDiagnostics.count + 1,
+                                phase: phase, reason: reason)
                         )
                         throw error
                     }
                     chunkDiagnostics.append(providerDiagnostic)
                     speakerTurns = []
+                }
+
+                var fingerprints: [AudioFingerprintDraft] = []
+                var songPlays: [SongPlayDraft] = []
+                do {
+                    try Task.checkCancellation()
+                    let fingerprintResult = try await fingerprinter.fingerprint(
+                        chunk,
+                        request: AudioFingerprintRequest(
+                            source: redactedSource,
+                            streamType: streamType,
+                            streamID: streamID,
+                            runID: runID
+                        )
+                    )
+                    try validate(fingerprintResult)
+                    fingerprints = fingerprintResult.fingerprints
+                    songPlays = fingerprintResult.songPlays
+                } catch let cancellation as CancellationError {
+                    throw cancellation
+                } catch {
+                    let diagnosticError = error as? IngestDiagnosticError
+                    chunkDiagnostics.append(
+                        diagnostic(
+                            streamID: streamID,
+                            phase: diagnosticError?.ingestDiagnosticPhase ?? .fingerprint,
+                            severity: .error,
+                            reason: diagnosticError?.ingestDiagnosticReason ?? "fingerprint-failed",
+                            source: redactedSource,
+                            streamType: streamType,
+                            context: errorContext(error, chunk: chunk)
+                        )
+                    )
                 }
 
                 try persistence.persistTimeline(
@@ -270,6 +317,8 @@ public struct StreamIngestPipeline {
                         speakerTurns: speakerTurns,
                         adMarkers: redactedMarkers(chunk.adMarkers),
                         diagnostics: chunkDiagnostics,
+                        fingerprints: fingerprints,
+                        songPlays: songPlays,
                         createdAt: now()
                     )
                 )
@@ -281,7 +330,9 @@ public struct StreamIngestPipeline {
                 status: .completed,
                 context: terminalContext(status: .completed, diagnosticCount: diagnostics.count)
             )
-            return StreamIngestResult(streamID: streamID, runID: runID, processedChunks: processedChunks, diagnostics: diagnostics)
+            return StreamIngestResult(
+                streamID: streamID, runID: runID, processedChunks: processedChunks,
+                diagnostics: diagnostics)
         } catch is CancellationError {
             let diagnostic = self.diagnostic(
                 streamID: streamID,
@@ -292,13 +343,15 @@ public struct StreamIngestPipeline {
                 streamType: streamType,
                 context: [
                     "processedChunks": .number(Double(processedChunks)),
-                    "error": .string("CancellationError")
+                    "error": .string("CancellationError"),
                 ]
             )
             try? finishRunOnce(
                 status: .cancelled,
                 diagnostic: diagnostic,
-                context: terminalContext(status: .cancelled, diagnosticCount: diagnostics.count + 1, phase: .decode, reason: "ingest-cancelled")
+                context: terminalContext(
+                    status: .cancelled, diagnosticCount: diagnostics.count + 1, phase: .decode,
+                    reason: "ingest-cancelled")
             )
             throw CancellationError()
         } catch {
@@ -320,7 +373,9 @@ public struct StreamIngestPipeline {
             try finishRunOnce(
                 status: .failed,
                 diagnostic: diagnostic,
-                context: terminalContext(status: .failed, diagnosticCount: diagnostics.count + 1, phase: phase, reason: reason)
+                context: terminalContext(
+                    status: .failed, diagnosticCount: diagnostics.count + 1, phase: phase,
+                    reason: reason)
             )
             throw error
         }
@@ -359,7 +414,8 @@ public struct StreamIngestPipeline {
             var invalidWordCount = 0
 
             for word in segment.words.sorted(by: { $0.sequence < $1.sequence }) {
-                guard word.startSeconds >= previousStart, word.endSeconds >= word.startSeconds else {
+                guard word.startSeconds >= previousStart, word.endSeconds >= word.startSeconds
+                else {
                     invalidWordCount += 1
                     continue
                 }
@@ -373,7 +429,7 @@ public struct StreamIngestPipeline {
                         reason: "non-monotonic-word-timestamps",
                         context: [
                             "segmentSequence": .number(Double(segment.sequence)),
-                            "invalidWordCount": .number(Double(invalidWordCount))
+                            "invalidWordCount": .number(Double(invalidWordCount)),
                         ]
                     )
                 )
@@ -402,6 +458,46 @@ public struct StreamIngestPipeline {
         return (accepted, diagnostics)
     }
 
+    private func validate(_ fingerprintResult: AudioFingerprintResult) throws {
+        for fingerprint in fingerprintResult.fingerprints {
+            guard !fingerprint.algorithm.isEmpty else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "empty algorithm")
+            }
+            guard !fingerprint.algorithmVersion.isEmpty else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "empty algorithm version")
+            }
+            guard !fingerprint.fingerprint.isEmpty else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "empty fingerprint")
+            }
+            guard !fingerprint.fingerprintHash.isEmpty else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "empty fingerprint hash")
+            }
+            guard fingerprint.endSeconds >= fingerprint.startSeconds else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "invalid fingerprint interval")
+            }
+        }
+
+        for play in fingerprintResult.songPlays {
+            guard !play.song.songKey.isEmpty else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "empty song key")
+            }
+            guard !play.song.displayName.isEmpty else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "empty song display name")
+            }
+            guard play.endSeconds >= play.startSeconds else {
+                throw FingerprintOutputValidationError(
+                    reason: "malformed-fingerprint-output", detail: "invalid song play interval")
+            }
+        }
+    }
+
     private func diagnostic(
         streamID: Int64,
         phase: IngestDiagnosticPhase,
@@ -427,14 +523,14 @@ public struct StreamIngestPipeline {
     private func errorContext(_ error: Error, chunk: DecodedAudioChunk) -> [String: JSONValue] {
         [
             "chunkSequence": .number(Double(chunk.sequence)),
-            "error": .string(IngestRedaction.redact(String(describing: error)))
+            "error": .string(IngestRedaction.redact(String(describing: error))),
         ]
     }
 
     private func chunkContext(_ chunk: DecodedAudioChunk) -> [String: JSONValue] {
         [
             "startSeconds": .number(chunk.startSeconds),
-            "endSeconds": .number(chunk.endSeconds)
+            "endSeconds": .number(chunk.endSeconds),
         ]
     }
 
@@ -463,7 +559,9 @@ public struct StreamIngestPipeline {
         return IngestRedaction.sourceDescription(value)
     }
 
-    private func resolvedStreamType(for source: String, requested streamType: StreamType) -> StreamType {
+    private func resolvedStreamType(for source: String, requested streamType: StreamType)
+        -> StreamType
+    {
         guard streamType == .auto else {
             return streamType
         }
@@ -489,5 +587,22 @@ public struct StreamIngestPipeline {
         case .auto:
             return "auto_stream"
         }
+    }
+}
+
+private struct FingerprintOutputValidationError: Error, CustomStringConvertible,
+    IngestDiagnosticError
+{
+    var ingestDiagnosticPhase: IngestDiagnosticPhase { .fingerprint }
+    let ingestDiagnosticReason: String
+    let detail: String
+
+    init(reason: String, detail: String) {
+        self.ingestDiagnosticReason = reason
+        self.detail = detail
+    }
+
+    var description: String {
+        "\(ingestDiagnosticReason): \(detail)"
     }
 }
