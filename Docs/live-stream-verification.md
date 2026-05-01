@@ -71,18 +71,37 @@ Malformed or missing configs should fail before streams run. The diagnostic shou
 
 Output write failures should report a redacted output path. If a diagnostic includes a raw URL, credential, token, local config path, or evidence path, fix the CLI redaction before trusting new evidence.
 
+## S05 live-proof workspace and redaction checklist
+
+For M002/S05 operator proof, keep all secret-bearing inputs and generated outputs under ignored local paths. The preferred workspace is `live-proof.local/`, with any large evidence payloads or CLI exports nested below it. The legacy `live-verification-evidence/` and `live-verify-evidence/` paths remain ignored for `live-verify` compatibility.
+
+Before running live commands, create local-only files from safe examples and never commit the populated copies:
+
+```sh
+mkdir -p live-proof.local
+cp live-streams.example.json live-proof.local/live-streams.local.json
+```
+
+Use this checklist for every proof note, summary, and command transcript that may become tracked:
+
+- Replace live URLs with placeholders such as `[authorized-live-url-a]`; never include userinfo, query strings, fragments, signed URLs, or tokens.
+- Replace local database, evidence, config, audio segment, and model cache paths with `[redacted-path]` or a relative ignored workspace label such as `live-proof.local/...`.
+- Preserve non-secret proof facts only: command shape, exit code, bounded duration/chunk count, stream index, run/stream identifiers, aggregate table counts, and redacted diagnostic phase/reason.
+- Inspect stdout, stderr, JSON, NDJSON, SQLite-derived counts, and copied command transcripts for `://`, `?`, `#`, `token`, `password`, `/Users/`, `/tmp/`, `/private/tmp/`, `/var/`, and model cache directory names before citing them in tracked artifacts.
+- If redaction fails, stop the live proof, fix the CLI or evidence producer, rerun from the ignored workspace, and only then update tracked validation notes.
+
 ## Source-control hygiene
 
 Before finishing a live verification run, confirm local-only artifacts remain ignored:
 
 ```sh
-git status --short -- live-streams.local.json live-verification-evidence
+git status --short --ignored -- live-streams.local.json live-verification-evidence live-verify-evidence live-proof.local
 ```
 
-That command should print nothing for ignored local artifacts. Also confirm generated SwiftPM output remains untracked:
+That command should show ignored (`!!`) entries only for populated local artifacts. Also confirm generated SwiftPM output remains untracked:
 
 ```sh
 git ls-files .build | wc -l | tr -d ' '
 ```
 
-The expected count is `0`. Do not paste private stream URLs, credentials, or raw evidence paths into summaries, docs, commits, or issue comments.
+The expected count is `0`. Do not paste private stream URLs, credentials, raw evidence paths, generated database paths, model cache paths, or runtime evidence files into summaries, docs, commits, or issue comments.

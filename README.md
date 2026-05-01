@@ -118,6 +118,13 @@ sqlite3 /tmp/sounding-two-stream.sqlite \
   "SELECT streams.id, streams.type, COUNT(transcript_segments.id) AS segments FROM streams LEFT JOIN ingest_runs ON ingest_runs.stream_id = streams.id LEFT JOIN ingest_chunks ON ingest_chunks.run_id = ingest_runs.id LEFT JOIN transcript_segments ON transcript_segments.chunk_id = ingest_chunks.id GROUP BY streams.id, streams.type;"
 ```
 
+For M002/S05 proof, use the ignored `live-proof.local/` workspace for populated configs, command transcripts, generated databases, and copied evidence. Before any tracked summary or validation note cites live proof, apply this redaction checklist:
+
+- Raw live URLs, signed query strings, fragments, userinfo, credentials, and tokens are replaced with placeholders such as `[authorized-live-url-a]`.
+- Local database, evidence, config, audio segment, and model cache paths are replaced with `[redacted-path]` or the non-secret ignored workspace label `live-proof.local/...`.
+- Only non-secret proof facts are preserved: command shape, exit code, bounded duration or chunk count, stream index, run/stream identifiers, aggregate table counts, and redacted diagnostic phase/reason.
+- Candidate tracked text is scanned for `://`, `?`, `#`, `token`, `password`, `/Users/`, `/tmp/`, `/private/tmp/`, `/var/`, and model cache directory names before it is committed.
+
 Real ML/live proof is intentionally local-only: provide an authorized `SOUNDING_LIVE_URL`, let WhisperKit/FluidAudio download or reuse cached models, then inspect the SQLite counts with `sqlite3` or GRDB. Do not commit live URLs, model cache paths, generated databases, or runtime evidence files.
 
 After ingest writes transcript rows, use `search` for timestamped transcript blocks with stream/run/chunk/segment identity, speaker labels, context, and word ranges:
