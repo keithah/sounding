@@ -10,7 +10,7 @@ struct SoundingCommand: AsyncParsableCommand {
         version: SoundingKitVersion.current.string,
         subcommands: [
             MonitorCommand.self, LiveVerifyCommand.self, IngestCommand.self, SearchCommand.self,
-            CountCommand.self, ReportCommand.self,
+            CountCommand.self, ReportCommand.self, StreamsCommand.self,
         ]
     )
 
