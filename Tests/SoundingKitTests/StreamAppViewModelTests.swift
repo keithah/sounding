@@ -136,7 +136,6 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.lastLifecycleMessage.contains("token=secret"))
     }
 
-
     func testRuntimeReconnectIssueProjectsLastRedactedMessageForVisibleStatus() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -152,7 +151,8 @@ final class StreamAppViewModelTests: XCTestCase {
             AppStreamRuntimeEvent(
                 streamID: item.id,
                 phase: .reconnecting(nextRetrySeconds: 5),
-                message: "Runtime failed for Retry HLS at /tmp/token=secret.raw for https://user:pass@example.test/retry.m3u8?token=secret#frag. Reconnecting in 5 second(s)."
+                message:
+                    "Runtime failed for Retry HLS at /tmp/token=secret.raw for https://user:pass@example.test/retry.m3u8?token=secret#frag. Reconnecting in 5 second(s)."
             )
         )
 
@@ -183,7 +183,8 @@ final class StreamAppViewModelTests: XCTestCase {
         )
         let timeline = AppPlayerTimelineSnapshot(
             streamID: item.id,
-            state: .failed(message: "Audio device failed at /Users/example/private/device.raw?token=secret"),
+            state: .failed(
+                message: "Audio device failed at /Users/example/private/device.raw?token=secret"),
             rollingBuffer: RollingBufferSnapshot(
                 streamID: item.id,
                 bufferedRange: RollingBufferRange(startSeconds: 0, endSeconds: 12),
@@ -192,7 +193,8 @@ final class StreamAppViewModelTests: XCTestCase {
                 memoryFrameCount: 2,
                 spillAvailable: false,
                 memoryOnlyFallback: true,
-                lastMessage: "Rolling buffer spill failed at /Users/example/private/spill.pcm?token=secret"
+                lastMessage:
+                    "Rolling buffer spill failed at /Users/example/private/spill.pcm?token=secret"
             ),
             lastMessage: "Audio device failed at /Users/example/private/device.raw?token=secret"
         )
@@ -276,6 +278,248 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.lastLifecycleMessage, "A stream with this name already exists.")
     }
 
+    func testRuntimeStatusSnapshotProjectsReconnectBackoffAndUpdatedAt() throws {
+        let (first, _, viewModel) = try makeTwoStreamViewModel()
+        var model = viewModel
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: first.id,
+                name: first.name,
+                streamType: "hls",
+                sourceDescription: first.sourceDescription,
+                phase: .reconnecting,
+                attempt: 2,
+                maxAttempts: 4,
+                nextRetrySeconds: 8,
+                nextRetryAt: "2026-05-01T20:00:08Z",
+                updatedAt: "2026-05-01T20:00:00Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message:
+                        "Decoder failed for https://user:pass@example.test/live.m3u8?token=secret at /Users/example/private/chunk.ts",
+                    occurredAt: "2026-05-01T19:59:59Z"
+                )
+            )
+        )
+
+        let selected = try XCTUnwrap(model.selectedStream)
+        XCTAssertEqual(selected.item.status, .reconnecting(nextRetrySeconds: 8))
+        XCTAssertEqual(
+            selected.runtimeStatusDetail,
+            "Retrying attempt 2 of 4 in 8 seconds (next retry 2026-05-01T20:00:08Z).")
+        XCTAssertEqual(
+            selected.runtimeRetryDetail,
+            "Attempt 2 of 4 • next retry in 8s • at 2026-05-01T20:00:08Z")
+        XCTAssertEqual(selected.runtimeUpdatedAtDetail, "Updated 2026-05-01T20:00:00Z")
+        XCTAssertTrue(try XCTUnwrap(selected.runtimeRecentFailureDetail).contains("Recent failure"))
+        XCTAssertEqual(selected.runtimeIssue?.id, "runtime.reconnecting")
+        XCTAssertEqual(
+            model.streams.first(where: { $0.id == first.id })?.runtimeStatusDetail,
+            selected.runtimeStatusDetail)
+        assertNoRuntimeSecrets(String(describing: selected))
+    }
+
+    func testRuntimeStatusSnapshotProjectsTerminalRedactedFailure() throws {
+        let (first, _, viewModel) = try makeTwoStreamViewModel()
+        var model = viewModel
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: first.id,
+                name: first.name,
+                streamType: "hls",
+                sourceDescription: first.sourceDescription,
+                phase: .error,
+                attempt: 3,
+                maxAttempts: 3,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:03Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message:
+                        "Max retries hit for https://user:pass@example.test/live.m3u8?token=secret#frag in /tmp/private-output.wav",
+                    occurredAt: "2026-05-01T20:00:03Z"
+                )
+            )
+        )
+
+        let selected = try XCTUnwrap(model.selectedStream)
+        XCTAssertEqual(selected.item.status.title, "Error")
+        XCTAssertEqual(selected.runtimeRetryDetail, "Attempt 3 of 3")
+        XCTAssertEqual(selected.runtimeIssue?.severity, .blocking)
+        XCTAssertTrue(
+            selected.runtimeStatusDetail.contains("Max retries"), selected.runtimeStatusDetail)
+        assertNoRuntimeSecrets(String(describing: selected))
+    }
+
+    func testRuntimeStatusSnapshotsRemainIsolatedAcrossSiblingStreams() throws {
+        let (first, second, viewModel) = try makeTwoStreamViewModel()
+        var model = viewModel
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: first.id,
+                name: first.name,
+                streamType: "hls",
+                sourceDescription: first.sourceDescription,
+                phase: .running,
+                attempt: 0,
+                maxAttempts: 3,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:00Z",
+                recentFailure: nil
+            )
+        )
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: second.id,
+                name: second.name,
+                streamType: "icy",
+                sourceDescription: second.sourceDescription,
+                phase: .reconnecting,
+                attempt: 1,
+                maxAttempts: 3,
+                nextRetrySeconds: 5,
+                nextRetryAt: "2026-05-01T20:00:05Z",
+                updatedAt: "2026-05-01T20:00:01Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message: "Network timeout", occurredAt: "2026-05-01T20:00:01Z")
+            )
+        )
+
+        XCTAssertEqual(model.streams.first(where: { $0.id == first.id })?.status, .running)
+        XCTAssertEqual(
+            model.streams.first(where: { $0.id == second.id })?.status,
+            .reconnecting(nextRetrySeconds: 5))
+        XCTAssertEqual(model.selectedStreamID, first.id)
+        XCTAssertEqual(model.selectedStream?.item.status, .running)
+
+        model.selectedStreamID = second.id
+        XCTAssertEqual(
+            model.selectedStream?.runtimeRetryDetail,
+            "Attempt 1 of 3 • next retry in 5s • at 2026-05-01T20:00:05Z")
+    }
+
+    func testRuntimeStatusForRemovedOrUnselectedStreamDoesNotCrashAndIsCleared() throws {
+        let (first, second, viewModel) = try makeTwoStreamViewModel()
+        var model = viewModel
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: 9_999,
+                name: "Removed secret stream",
+                streamType: "hls",
+                sourceDescription: "https://user:pass@example.test/removed.m3u8?token=secret",
+                phase: .error,
+                attempt: 1,
+                maxAttempts: 1,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:00Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message: "Removed stream at /Users/example/private/db.sqlite",
+                    occurredAt: "2026-05-01T20:00:00Z")
+            )
+        )
+        XCTAssertNil(model.runtimeStatuses[9_999])
+        XCTAssertEqual(model.selectedStreamID, first.id)
+        XCTAssertNotNil(model.selectedStream)
+
+        model.applyRuntimeStatuses([
+            AppStreamRuntimeStatusSnapshot(
+                streamID: second.id,
+                name: second.name,
+                streamType: "icy",
+                sourceDescription: second.sourceDescription,
+                phase: .paused,
+                attempt: 0,
+                maxAttempts: 3,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:02Z",
+                recentFailure: nil
+            )
+        ])
+        XCTAssertNil(model.runtimeStatuses[first.id])
+        XCTAssertEqual(model.streams.first(where: { $0.id == second.id })?.status, .paused)
+    }
+
+    func testMalformedRuntimeStatusRendersRedactedIssueState() throws {
+        let (first, _, viewModel) = try makeTwoStreamViewModel()
+        var model = viewModel
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: first.id,
+                name: first.name,
+                streamType: "hls",
+                sourceDescription: first.sourceDescription,
+                phase: .error,
+                attempt: 0,
+                maxAttempts: 0,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:00Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message:
+                        "Runtime status row contains an unsupported phase value. Clear or refresh the status row.",
+                    occurredAt: "2026-05-01T20:00:00Z"
+                )
+            )
+        )
+
+        let selected = try XCTUnwrap(model.selectedStream)
+        XCTAssertEqual(selected.item.status.title, "Error")
+        XCTAssertEqual(selected.runtimeIssue?.id, "runtime.error")
+        XCTAssertTrue(
+            selected.runtimeStatusDetail.contains("unsupported phase"), selected.runtimeStatusDetail
+        )
+        assertNoRuntimeSecrets(String(describing: selected))
+    }
+
+    private func makeTwoStreamViewModel() throws -> (
+        StreamAppListItem, StreamAppListItem, StreamAppViewModel
+    ) {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        var viewModel = StreamAppViewModel()
+        viewModel.addDraft = StreamAppAddDraft(
+            name: "Primary HLS",
+            source: "https://user:pass@example.test/primary.m3u8?token=secret",
+            transport: .hls
+        )
+        let first = try viewModel.addStream(using: registry)
+        viewModel.addDraft = StreamAppAddDraft(
+            name: "Sibling ICY",
+            source: "https://listener:pass@example.test/sibling?api_key=secret",
+            transport: .icecast
+        )
+        let second = try viewModel.addStream(using: registry)
+        viewModel.selectedStreamID = first.id
+        return (first, second, viewModel)
+    }
+
+    private func assertNoRuntimeSecrets(
+        _ text: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for forbidden in [
+            "user:pass",
+            "listener:pass",
+            "token=secret",
+            "api_key=secret",
+            "#frag",
+            "/Users/example",
+            "/tmp/private-output.wav",
+        ] {
+            XCTAssertFalse(
+                text.contains(forbidden), "Expected redaction of \(forbidden), got: \(text)",
+                file: file, line: line)
+        }
+    }
+
     func testConfigurationIssuesProjectRedactedBlockingStatusForSettingsAndRuntime() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -308,7 +552,8 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.configurationIssues, [issue])
         XCTAssertEqual(viewModel.blockingConfigurationIssues, [issue])
         XCTAssertEqual(viewModel.lastLifecycleMessage, issue.message)
-        XCTAssertFalse(viewModel.lastLifecycleMessage.contains(rawPath), viewModel.lastLifecycleMessage)
+        XCTAssertFalse(
+            viewModel.lastLifecycleMessage.contains(rawPath), viewModel.lastLifecycleMessage)
         XCTAssertFalse(viewModel.configurationIssues[0].detail?.contains("user:pass") ?? true)
         XCTAssertFalse(viewModel.configurationIssues[0].detail?.contains("token=secret") ?? true)
         XCTAssertFalse(viewModel.configurationIssues[0].detail?.contains(rawPath) ?? true)

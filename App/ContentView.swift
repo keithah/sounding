@@ -6,6 +6,7 @@ struct ContentView: View {
     private let runtime: (any AppStreamRuntimeControlling)?
     private let timelineStore: StreamAppTimelineStore?
     private let searchStore: StreamAppSearchStore?
+    private let statusStore: AppStreamRuntimeStatusStore?
     @State private var viewModel: StreamAppViewModel
     @State private var persistenceError: String?
     @State private var timelineActionMessage: String?
@@ -16,6 +17,7 @@ struct ContentView: View {
         runtime = initial.runtime
         timelineStore = initial.timelineStore
         searchStore = initial.searchStore
+        statusStore = initial.statusStore
         _viewModel = State(initialValue: initial.viewModel)
         _persistenceError = State(initialValue: initial.persistenceError)
     }
@@ -29,12 +31,14 @@ struct ContentView: View {
         }
         .frame(minWidth: 920, minHeight: 560)
         .task {
+            refreshRuntimeStatuses()
             await observeRuntime()
         }
         .task(id: viewModel.selectedStreamID) {
             await refreshSelectedTimelineLoop(streamID: viewModel.selectedStreamID)
         }
         .onChange(of: viewModel.selectedStreamID) { _, _ in
+            refreshRuntimeStatuses()
             refreshSelectedTimeline()
         }
     }
@@ -147,13 +151,15 @@ struct ContentView: View {
                 selected: selected,
                 timelineActionMessage: timelineActionMessage,
                 startRuntime: { startRuntime(for: selected.item.id) },
-                pauseRuntime: { pauseRuntime() },
-                resumeRuntime: { resumeRuntime() },
-                stopRuntime: { stopRuntime() },
+                pauseRuntime: { pauseRuntime(for: selected.item.id) },
+                resumeRuntime: { resumeRuntime(for: selected.item.id) },
+                stopRuntime: { stopRuntime(for: selected.item.id) },
                 seekToLive: { seekToLive() },
                 scrubBackward: { scrubBackward(seconds: 30) },
                 seekToSeconds: { seekToSeconds($0) },
-                seekUnavailable: { seconds in reportSeekUnavailable(seconds: seconds, selected: selected) },
+                seekUnavailable: { seconds in
+                    reportSeekUnavailable(seconds: seconds, selected: selected)
+                },
                 refreshTimeline: { refreshSelectedTimeline() },
                 searchDraft: Binding(
                     get: { viewModel.searchDraft },
@@ -163,7 +169,8 @@ struct ContentView: View {
                 clearSearch: { clearSearch() },
                 selectSearchResult: { resultID in selectSearchResult(resultID) },
                 updateSpeakerDisplay: { rawLabel, displayLabel, colorToken in
-                    updateSpeakerDisplay(rawLabel: rawLabel, displayLabel: displayLabel, colorToken: colorToken)
+                    updateSpeakerDisplay(
+                        rawLabel: rawLabel, displayLabel: displayLabel, colorToken: colorToken)
                 }
             )
         } else {
@@ -188,6 +195,7 @@ struct ContentView: View {
             _ = try viewModel.addStream(using: registry)
             persistenceError = nil
             timelineActionMessage = nil
+            refreshRuntimeStatuses()
             refreshSelectedTimeline()
         } catch {
             // The view model stores redacted, user-facing validation errors.
@@ -209,19 +217,19 @@ struct ContentView: View {
         }
     }
 
-    private func pauseRuntime() {
+    private func pauseRuntime(for streamID: Int64) {
         guard let runtime else { return }
-        Task { await runtime.pause() }
+        Task { await runtime.pause(streamID: streamID) }
     }
 
-    private func resumeRuntime() {
+    private func resumeRuntime(for streamID: Int64) {
         guard let runtime else { return }
-        Task { await runtime.resume() }
+        Task { await runtime.resume(streamID: streamID) }
     }
 
-    private func stopRuntime() {
+    private func stopRuntime(for streamID: Int64) {
         guard let runtime else { return }
-        Task { await runtime.stop() }
+        Task { await runtime.stop(streamID: streamID) }
     }
 
     private func seekToLive() {
@@ -244,7 +252,8 @@ struct ContentView: View {
     }
 
     private func reportSeekUnavailable(seconds: Double, selected: StreamAppSelectedStream) {
-        timelineActionMessage = selected.bufferedSeekUnavailableMessage
+        timelineActionMessage =
+            selected.bufferedSeekUnavailableMessage
             ?? String(
                 format: "%.1fs is outside the current buffered range. %@",
                 seconds,
@@ -256,12 +265,36 @@ struct ContentView: View {
         guard let runtime else { return }
         for await event in await runtime.events() {
             viewModel.applyRuntimeEvent(event)
+            refreshRuntimeStatus(streamID: event.streamID)
             if event.streamID == viewModel.selectedStreamID {
-                timelineActionMessage = event.result?.playerTimeline?.unavailableRangeMessage
+                timelineActionMessage =
+                    event.result?.playerTimeline?.unavailableRangeMessage
                     ?? event.result?.playerTimeline?.lastMessage
                     ?? event.message
+                refreshRuntimeStatuses()
                 refreshSelectedTimeline()
             }
+        }
+    }
+
+    private func refreshRuntimeStatuses() {
+        guard let statusStore else { return }
+        do {
+            viewModel.applyRuntimeStatuses(try statusStore.statuses())
+            persistenceError = nil
+        } catch {
+            persistenceError = IngestRedaction.redact(String(describing: error))
+        }
+    }
+
+    private func refreshRuntimeStatus(streamID: Int64) {
+        guard let statusStore else { return }
+        do {
+            if let snapshot = try statusStore.status(streamID: streamID) {
+                viewModel.applyRuntimeStatus(snapshot)
+            }
+        } catch {
+            persistenceError = IngestRedaction.redact(String(describing: error))
         }
     }
 
@@ -276,6 +309,7 @@ struct ContentView: View {
             }
             guard !Task.isCancelled, streamID == viewModel.selectedStreamID else { return }
             if viewModel.selectedStream?.item.status == .running {
+                refreshRuntimeStatuses()
                 refreshSelectedTimeline()
             }
         }
@@ -347,7 +381,9 @@ struct ContentView: View {
         }
     }
 
-    private static func makeInitialState(preferences: SoundingAppPreferences? = nil) -> SoundingAppRuntimeStartupState {
+    private static func makeInitialState(preferences: SoundingAppPreferences? = nil)
+        -> SoundingAppRuntimeStartupState
+    {
         if let preferences {
             return SoundingAppRuntimeFactory().makeStartupState(preferences: preferences)
         }
@@ -425,6 +461,12 @@ private struct StreamRow: View {
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+            if let detail = item.runtimeStatusDetail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
@@ -503,7 +545,9 @@ private struct StreamDetail: View {
                 .padding(28)
             }
             .onChange(of: selected.recentTranscriptParagraphs.last?.id) { _, _ in
-                guard transcriptAutoscrolls, let lastID = selected.recentTranscriptParagraphs.last?.id else {
+                guard transcriptAutoscrolls,
+                    let lastID = selected.recentTranscriptParagraphs.last?.id
+                else {
                     return
                 }
                 withAnimation(.easeOut(duration: 0.2)) {
@@ -565,8 +609,23 @@ private struct RuntimeStatusCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(selected.item.status.title)
                         .font(.headline)
-                    Text(selected.item.status.detail)
+                    Text(selected.runtimeStatusDetail)
                         .foregroundStyle(.secondary)
+                    if let retry = selected.runtimeRetryDetail {
+                        Text(retry)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    if let updated = selected.runtimeUpdatedAtDetail {
+                        Text(updated)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    if let failure = selected.runtimeRecentFailureDetail {
+                        Label(failure, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     if let issue = selected.runtimeIssue {
                         VisibleIssueRow(issue: issue)
                     }
@@ -652,7 +711,8 @@ private struct VisibleIssueRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(issue.severity.rawValue) issue: \(issue.message). Action: \(issue.actionLabel)")
+        .accessibilityLabel(
+            "\(issue.severity.rawValue) issue: \(issue.message). Action: \(issue.actionLabel)")
     }
 
     private var systemImage: String {
@@ -755,7 +815,8 @@ private struct MetadataCard: View {
                     ContentUnavailableView(
                         "No current metadata",
                         systemImage: "music.note.list",
-                        description: Text("Metadata appears here after the stream yields song or event timing.")
+                        description: Text(
+                            "Metadata appears here after the stream yields song or event timing.")
                     )
                     .frame(minHeight: 80)
                 }
@@ -814,7 +875,8 @@ private struct SpeakerDisplayEditor: View {
                 ContentUnavailableView(
                     "No speaker labels yet",
                     systemImage: "person.2.wave.2",
-                    description: Text("Speaker display overrides appear once transcript speaker labels arrive.")
+                    description: Text(
+                        "Speaker display overrides appear once transcript speaker labels arrive.")
                 )
                 .frame(minHeight: 80)
             } else {
@@ -839,7 +901,8 @@ private struct SpeakerDisplayEditor: View {
                                     set: { colorDrafts[speaker.rawLabel] = $0 }
                                 )
                             ) {
-                                ForEach(StreamAppTimelineStore.allowedColorTokens, id: \.self) { token in
+                                ForEach(StreamAppTimelineStore.allowedColorTokens, id: \.self) {
+                                    token in
                                     Text(token.capitalized).tag(token)
                                 }
                             }
@@ -882,7 +945,8 @@ private struct SearchCard: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(runSearch)
                     .accessibilityLabel("Search transcript text")
-                    .accessibilityHint("Enter text to find in persisted transcript paragraphs, then press Search.")
+                    .accessibilityHint(
+                        "Enter text to find in persisted transcript paragraphs, then press Search.")
 
                     Picker(
                         "Scope",
@@ -896,7 +960,9 @@ private struct SearchCard: View {
                     }
                     .pickerStyle(.segmented)
                     .accessibilityLabel("Search scope")
-                    .accessibilityHint("Choose whether transcript search is limited to the selected stream or all persisted streams.")
+                    .accessibilityHint(
+                        "Choose whether transcript search is limited to the selected stream or all persisted streams."
+                    )
                 }
 
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
@@ -907,7 +973,9 @@ private struct SearchCard: View {
                         TextField("host, guest", text: speakerLabelsText)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityLabel("Speaker filter")
-                            .accessibilityHint("Optional comma-separated raw speaker labels to filter search results.")
+                            .accessibilityHint(
+                                "Optional comma-separated raw speaker labels to filter search results."
+                            )
                     }
                     GridRow {
                         Text("Run from")
@@ -916,7 +984,8 @@ private struct SearchCard: View {
                         TextField("2026-05-01T18:00:00Z", text: optionalText(\.runStartedAtFrom))
                             .textFieldStyle(.roundedBorder)
                             .accessibilityLabel("Run date from filter")
-                            .accessibilityHint("Optional ISO timestamp for the earliest ingest run to search.")
+                            .accessibilityHint(
+                                "Optional ISO timestamp for the earliest ingest run to search.")
                     }
                     GridRow {
                         Text("Run through")
@@ -925,7 +994,8 @@ private struct SearchCard: View {
                         TextField("2026-05-01T19:00:00Z", text: optionalText(\.runStartedAtThrough))
                             .textFieldStyle(.roundedBorder)
                             .accessibilityLabel("Run date through filter")
-                            .accessibilityHint("Optional ISO timestamp for the latest ingest run to search.")
+                            .accessibilityHint(
+                                "Optional ISO timestamp for the latest ingest run to search.")
                     }
                 }
 
@@ -933,13 +1003,17 @@ private struct SearchCard: View {
                     Button("Search", systemImage: "magnifyingglass", action: runSearch)
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: .command)
-                        .accessibilityHint("Runs one bounded persisted transcript search with the current filters.")
+                        .accessibilityHint(
+                            "Runs one bounded persisted transcript search with the current filters."
+                        )
                     Button("Clear", systemImage: "xmark.circle") {
-                        draft = StreamAppSearchDraft(scopeToSelectedStream: draft.scopeToSelectedStream)
+                        draft = StreamAppSearchDraft(
+                            scopeToSelectedStream: draft.scopeToSelectedStream)
                         clearSearch()
                     }
                     .buttonStyle(.bordered)
-                    .accessibilityHint("Clears the search text, filters, results, and selected transcript jump.")
+                    .accessibilityHint(
+                        "Clears the search text, filters, results, and selected transcript jump.")
                 }
 
                 SearchStatusView(selected: selected)
@@ -949,7 +1023,8 @@ private struct SearchCard: View {
                         ContentUnavailableView(
                             "No search results",
                             systemImage: "doc.text.magnifyingglass",
-                            description: Text("Try a different phrase, speaker, scope, or run date filter.")
+                            description: Text(
+                                "Try a different phrase, speaker, scope, or run date filter.")
                         )
                         .frame(minHeight: 96)
                     }
@@ -975,7 +1050,8 @@ private struct SearchCard: View {
         Binding(
             get: { draft.speakerLabels.joined(separator: ", ") },
             set: { value in
-                draft.speakerLabels = value
+                draft.speakerLabels =
+                    value
                     .split(separator: ",")
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             }
@@ -1003,16 +1079,19 @@ private struct SearchStatusView: View {
             if let diagnostics = selected.searchDiagnostics {
                 Label(
                     diagnostics.statusMessage,
-                    systemImage: diagnostics.status == .empty ? "magnifyingglass" : "checkmark.circle"
+                    systemImage: diagnostics.status == .empty
+                        ? "magnifyingglass" : "checkmark.circle"
                 )
                 .font(.caption)
                 .foregroundStyle(diagnostics.status == .empty ? Color.secondary : Color.green)
                 .accessibilityLabel("Search status: \(diagnostics.statusMessage)")
 
-                Text("\(diagnostics.resultCount) result\(diagnostics.resultCount == 1 ? "" : "s") • refreshed \(diagnostics.refreshedAt)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Search result count \(diagnostics.resultCount)")
+                Text(
+                    "\(diagnostics.resultCount) result\(diagnostics.resultCount == 1 ? "" : "s") • refreshed \(diagnostics.refreshedAt)"
+                )
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Search result count \(diagnostics.resultCount)")
 
                 if diagnostics.unseekableResultCount > 0 {
                     Label(
@@ -1021,7 +1100,9 @@ private struct SearchStatusView: View {
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .accessibilityHint("Selecting these results scrolls the transcript but does not seek playback.")
+                    .accessibilityHint(
+                        "Selecting these results scrolls the transcript but does not seek playback."
+                    )
                 }
 
                 ForEach(diagnostics.validationErrors, id: \.self) { message in
@@ -1037,9 +1118,12 @@ private struct SearchStatusView: View {
                         .accessibilityLabel("Search database error: \(message)")
                 }
             } else {
-                Label("Enter a phrase and run Search to query persisted transcripts.", systemImage: "magnifyingglass")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Label(
+                    "Enter a phrase and run Search to query persisted transcripts.",
+                    systemImage: "magnifyingglass"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             if let message = selected.searchErrorMessage {
@@ -1082,9 +1166,12 @@ private struct SearchResultButton: View {
                         Label("Selected", systemImage: "checkmark.circle.fill")
                             .font(.caption.weight(.semibold))
                     }
-                    Label(result.isSeekable ? "Buffered" : "Not buffered", systemImage: result.isSeekable ? "play.circle" : "exclamationmark.circle")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(result.isSeekable ? .blue : .secondary)
+                    Label(
+                        result.isSeekable ? "Buffered" : "Not buffered",
+                        systemImage: result.isSeekable ? "play.circle" : "exclamationmark.circle"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(result.isSeekable ? .blue : .secondary)
                 }
 
                 Text(result.text)
@@ -1100,9 +1187,11 @@ private struct SearchResultButton: View {
                                     .font(.caption2.weight(.semibold))
                                     .foregroundStyle(.secondary)
                                     .frame(width: 44, alignment: .leading)
-                                Text(timeRange(start: context.startSeconds, end: context.endSeconds))
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                                Text(
+                                    timeRange(start: context.startSeconds, end: context.endSeconds)
+                                )
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
                                 Text(context.speakerDisplay.displayLabel)
                                     .font(.caption2.weight(.semibold))
                                     .foregroundStyle(.secondary)
@@ -1137,8 +1226,14 @@ private struct SearchResultButton: View {
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Search result from \(result.speakerDisplay.displayLabel) at \(timeRange(start: result.startSeconds, end: result.endSeconds)): \(result.text)")
-        .accessibilityHint(result.isSeekable ? "Reveals this transcript result and seeks playback because it is buffered." : "Reveals this transcript result without seeking because it is outside the playback buffer.")
+        .accessibilityLabel(
+            "Search result from \(result.speakerDisplay.displayLabel) at \(timeRange(start: result.startSeconds, end: result.endSeconds)): \(result.text)"
+        )
+        .accessibilityHint(
+            result.isSeekable
+                ? "Reveals this transcript result and seeks playback because it is buffered."
+                : "Reveals this transcript result without seeking because it is outside the playback buffer."
+        )
     }
 }
 
@@ -1165,7 +1260,9 @@ private struct TranscriptCard: View {
                     ContentUnavailableView(
                         "No transcript yet",
                         systemImage: "text.bubble",
-                        description: Text("Bounded transcript paragraphs appear as the selected stream is processed.")
+                        description: Text(
+                            "Bounded transcript paragraphs appear as the selected stream is processed."
+                        )
                     )
                     .frame(minHeight: 120)
                 } else {
@@ -1231,8 +1328,13 @@ private struct TranscriptParagraphButton: View {
             .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Transcript from \(paragraph.speakerDisplay.displayLabel) at \(timeRange(start: paragraph.startSeconds, end: paragraph.endSeconds)): \(paragraph.text)")
-        .accessibilityHint(isSeekable ? "Seeks playback to this buffered transcript paragraph." : "Reports that this transcript paragraph is outside the buffered range.")
+        .accessibilityLabel(
+            "Transcript from \(paragraph.speakerDisplay.displayLabel) at \(timeRange(start: paragraph.startSeconds, end: paragraph.endSeconds)): \(paragraph.text)"
+        )
+        .accessibilityHint(
+            isSeekable
+                ? "Seeks playback to this buffered transcript paragraph."
+                : "Reports that this transcript paragraph is outside the buffered range.")
     }
 }
 
@@ -1247,7 +1349,8 @@ private struct TimelineItemsCard: View {
                 ContentUnavailableView(
                     "No timeline items yet",
                     systemImage: "list.bullet.indent",
-                    description: Text("Transcript, metadata, and event moments appear here once refreshed.")
+                    description: Text(
+                        "Transcript, metadata, and event moments appear here once refreshed.")
                 )
                 .frame(minHeight: 100)
             } else {
@@ -1307,8 +1410,13 @@ private struct TimelineItemButton: View {
             .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(item.kind.title) at \(timeRange(start: item.startSeconds, end: item.endSeconds)): \(item.title)")
-        .accessibilityHint(item.isSeekable ? "Seeks playback to this buffered timeline item." : "Reports that this timeline item is outside the buffered range.")
+        .accessibilityLabel(
+            "\(item.kind.title) at \(timeRange(start: item.startSeconds, end: item.endSeconds)): \(item.title)"
+        )
+        .accessibilityHint(
+            item.isSeekable
+                ? "Seeks playback to this buffered timeline item."
+                : "Reports that this timeline item is outside the buffered range.")
     }
 }
 
@@ -1365,15 +1473,15 @@ private func timeRange(start: Double, end: Double?) -> String {
     return String(format: "%.1f–%.1fs", start, end)
 }
 
-private extension StreamAppSearchResult {
-    var streamTitle: String {
+extension StreamAppSearchResult {
+    fileprivate var streamTitle: String {
         if let streamName, !streamName.isEmpty { return streamName }
         return streamType.uppercased()
     }
 }
 
-private extension TranscriptQuery.ContextRole {
-    var searchCardTitle: String {
+extension TranscriptQuery.ContextRole {
+    fileprivate var searchCardTitle: String {
         switch self {
         case .before:
             return "Before"
@@ -1385,8 +1493,8 @@ private extension TranscriptQuery.ContextRole {
     }
 }
 
-private extension StreamAppMetadataKind {
-    var title: String {
+extension StreamAppMetadataKind {
+    fileprivate var title: String {
         switch self {
         case .song:
             return "Song"
@@ -1396,8 +1504,8 @@ private extension StreamAppMetadataKind {
     }
 }
 
-private extension StreamAppTimelineItemKind {
-    var title: String {
+extension StreamAppTimelineItemKind {
+    fileprivate var title: String {
         switch self {
         case .transcript:
             return "Transcript"
@@ -1408,7 +1516,7 @@ private extension StreamAppTimelineItemKind {
         }
     }
 
-    var systemImage: String {
+    fileprivate var systemImage: String {
         switch self {
         case .transcript:
             return "text.bubble"
@@ -1420,8 +1528,8 @@ private extension StreamAppTimelineItemKind {
     }
 }
 
-private extension StreamAppSpeakerDisplay {
-    var color: Color {
+extension StreamAppSpeakerDisplay {
+    fileprivate var color: Color {
         switch colorToken {
         case "blue": return .blue
         case "green": return .green
@@ -1436,8 +1544,8 @@ private extension StreamAppSpeakerDisplay {
     }
 }
 
-private extension Color {
-    var accessibleForeground: Color {
+extension Color {
+    fileprivate var accessibleForeground: Color {
         self == .yellow ? .black : .white
     }
 }

@@ -5,6 +5,7 @@ public struct SoundingAppRuntimeStartupState: Sendable {
     public var runtime: (any AppStreamRuntimeControlling)?
     public var timelineStore: StreamAppTimelineStore?
     public var searchStore: StreamAppSearchStore?
+    public var statusStore: AppStreamRuntimeStatusStore?
     public var viewModel: StreamAppViewModel
     public var persistenceError: String?
     public var configuration: SoundingAppConfiguration
@@ -14,6 +15,7 @@ public struct SoundingAppRuntimeStartupState: Sendable {
         runtime: (any AppStreamRuntimeControlling)?,
         timelineStore: StreamAppTimelineStore?,
         searchStore: StreamAppSearchStore?,
+        statusStore: AppStreamRuntimeStatusStore?,
         viewModel: StreamAppViewModel,
         persistenceError: String?,
         configuration: SoundingAppConfiguration
@@ -22,6 +24,7 @@ public struct SoundingAppRuntimeStartupState: Sendable {
         self.runtime = runtime
         self.timelineStore = timelineStore
         self.searchStore = searchStore
+        self.statusStore = statusStore
         self.viewModel = viewModel
         self.persistenceError = persistenceError.map(IngestRedaction.redact)
         self.configuration = configuration
@@ -30,19 +33,21 @@ public struct SoundingAppRuntimeStartupState: Sendable {
 
 public struct SoundingAppRuntimeFactory {
     public typealias DatabaseFactory = @Sendable (URL) throws -> SoundingDatabase
-    public typealias IngesterFactory = @Sendable (
-        SoundingDatabase,
-        SoundingAppConfiguration,
-        AppPlayerTimelineClock,
-        RollingPCMBuffer
-    ) throws -> any AppStreamRuntimeIngesting
-    public typealias RuntimeFactory = @Sendable (
-        StreamRegistry,
-        any AppStreamRuntimeIngesting,
-        AppPlayerTimelineClock,
-        RollingPCMBuffer,
-        AppStreamRuntimeStatusStore
-    ) -> any AppStreamRuntimeControlling
+    public typealias IngesterFactory =
+        @Sendable (
+            SoundingDatabase,
+            SoundingAppConfiguration,
+            AppPlayerTimelineClock,
+            RollingPCMBuffer
+        ) throws -> any AppStreamRuntimeIngesting
+    public typealias RuntimeFactory =
+        @Sendable (
+            StreamRegistry,
+            any AppStreamRuntimeIngesting,
+            AppPlayerTimelineClock,
+            RollingPCMBuffer,
+            AppStreamRuntimeStatusStore
+        ) -> any AppStreamRuntimeControlling
 
     private let fileManager: FileManager
     private let databaseFactory: DatabaseFactory
@@ -52,7 +57,8 @@ public struct SoundingAppRuntimeFactory {
     public init(
         fileManager: FileManager = .default,
         databaseFactory: @escaping DatabaseFactory = { try SoundingDatabase(fileURL: $0) },
-        ingesterFactory: @escaping IngesterFactory = { database, configuration, timeline, rollingBuffer in
+        ingesterFactory: @escaping IngesterFactory = {
+            database, configuration, timeline, rollingBuffer in
             try SoundingAppRuntimeFactory.defaultIngesterFactory(
                 database: database,
                 configuration: configuration,
@@ -60,7 +66,8 @@ public struct SoundingAppRuntimeFactory {
                 rollingBuffer: rollingBuffer
             )
         },
-        runtimeFactory: @escaping RuntimeFactory = { registry, ingester, timeline, rollingBuffer, statusStore in
+        runtimeFactory: @escaping RuntimeFactory = {
+            registry, ingester, timeline, rollingBuffer, statusStore in
             AppStreamRuntimeService(
                 registry: registry,
                 ingester: ingester,
@@ -100,7 +107,8 @@ public struct SoundingAppRuntimeFactory {
     }
 
     public func makeStartupState(
-        preferences: SoundingAppPreferences = SoundingAppRuntimeFactory.defaultAppStoragePreferences()
+        preferences: SoundingAppPreferences =
+            SoundingAppRuntimeFactory.defaultAppStoragePreferences()
     ) -> SoundingAppRuntimeStartupState {
         var configuration = SoundingAppConfiguration.validated(
             preferences: preferences,
@@ -114,6 +122,7 @@ public struct SoundingAppRuntimeFactory {
                 runtime: nil,
                 timelineStore: nil,
                 searchStore: nil,
+                statusStore: nil,
                 viewModel: viewModel,
                 persistenceError: configuration.issues.first(where: { $0.blocksRuntime })?.message,
                 configuration: configuration
@@ -132,6 +141,7 @@ public struct SoundingAppRuntimeFactory {
                 runtime: nil,
                 timelineStore: nil,
                 searchStore: nil,
+                statusStore: nil,
                 viewModel: viewModel,
                 persistenceError: configuration.issues.last?.message,
                 configuration: configuration
@@ -157,6 +167,7 @@ public struct SoundingAppRuntimeFactory {
                 runtime: nil,
                 timelineStore: timelineStore,
                 searchStore: searchStore,
+                statusStore: statusStore,
                 viewModel: viewModel,
                 persistenceError: configuration.issues.last?.message,
                 configuration: configuration
@@ -175,6 +186,7 @@ public struct SoundingAppRuntimeFactory {
                 runtime: runtime,
                 timelineStore: timelineStore,
                 searchStore: searchStore,
+                statusStore: statusStore,
                 viewModel: viewModel,
                 persistenceError: nil,
                 configuration: configuration
@@ -188,6 +200,7 @@ public struct SoundingAppRuntimeFactory {
                 runtime: nil,
                 timelineStore: nil,
                 searchStore: nil,
+                statusStore: nil,
                 viewModel: failedViewModel,
                 persistenceError: configuration.issues.last?.message,
                 configuration: configuration
@@ -228,7 +241,8 @@ public struct SoundingAppRuntimeFactory {
             severity: .blocking,
             phase: .startup,
             category: .database,
-            message: "Choose a writable Sounding database location before starting the app runtime.",
+            message:
+                "Choose a writable Sounding database location before starting the app runtime.",
             detail: "Database open or migration failed: \(String(describing: error))",
             action: SoundingAppConfigurationAction(
                 kind: .chooseDatabaseLocation,

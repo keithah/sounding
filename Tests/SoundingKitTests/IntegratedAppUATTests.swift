@@ -8,7 +8,9 @@ final class IntegratedAppUATTests: XCTestCase {
     func testAppSupportRuntimePersistsSearchableTimelineAndCLIConfirmsSameSQLite() async throws {
         let temporary = try TemporarySoundingDatabase()
         let spillDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("SoundingIntegratedAppUAT-spill-token=spill-secret-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent(
+                "SoundingIntegratedAppUAT-spill-token=spill-secret-\(UUID().uuidString)",
+                isDirectory: true)
         defer { try? FileManager.default.removeItem(at: spillDirectory) }
 
         let gate = UATRuntimeGate()
@@ -50,6 +52,7 @@ final class IntegratedAppUATTests: XCTestCase {
         XCTAssertNotNil(state.runtime)
         XCTAssertNotNil(state.timelineStore)
         XCTAssertNotNil(state.searchStore)
+        XCTAssertNotNil(state.statusStore)
         XCTAssertNil(state.persistenceError)
         XCTAssertEqual(state.configuration.issues.map(\.id), ["acoustid.key-missing"])
         XCTAssertEqual(state.configuration.issues.first?.severity, .warning)
@@ -59,7 +62,8 @@ final class IntegratedAppUATTests: XCTestCase {
         let runtime = try XCTUnwrap(state.runtime)
         let timelineStore = try XCTUnwrap(state.timelineStore)
         let searchStore = try XCTUnwrap(state.searchStore)
-        let secretSource = "https://listener:pass@example.test/private/live.m3u8?token=uat-secret&query=hidden#frag"
+        let secretSource =
+            "https://listener:pass@example.test/private/live.m3u8?token=uat-secret&query=hidden#frag"
         state.viewModel.addDraft = StreamAppAddDraft(
             name: "Integrated UAT HLS",
             source: secretSource,
@@ -93,21 +97,26 @@ final class IntegratedAppUATTests: XCTestCase {
             refreshedAt: "2026-05-01T20:00:20Z"
         )
         XCTAssertEqual(initialTimeline.streamID, added.id)
-        XCTAssertEqual(initialTimeline.transcriptParagraphs.map(\.text).suffix(2), [
-            "closing context only",
-            "late alpha beta unbuffered result"
-        ])
+        XCTAssertEqual(
+            initialTimeline.transcriptParagraphs.map(\.text).suffix(2),
+            [
+                "closing context only",
+                "late alpha beta unbuffered result",
+            ])
         XCTAssertTrue(initialTimeline.currentMetadata?.title.hasPrefix("Unknown song (") == true)
         XCTAssertTrue(initialTimeline.timelineItems.contains { $0.kind == .event })
         XCTAssertTrue(initialTimeline.timelineItems.contains { $0.kind == .song })
         XCTAssertNil(initialTimeline.diagnostics.bufferedSeekUnavailableMessage)
-        assertNoSecrets(String(describing: initialTimeline), temporary: temporary, spillDirectory: spillDirectory)
+        assertNoSecrets(
+            String(describing: initialTimeline), temporary: temporary,
+            spillDirectory: spillDirectory)
 
         await runtime.scrubBackward(seconds: 4)
         let scrubbed = try await nextEvent(from: &iterator)
         state.viewModel.applyRuntimeEvent(scrubbed)
         XCTAssertEqual(scrubbed.result?.playerTimeline?.positionSeconds, 30)
-        XCTAssertEqual(scrubbed.result?.playerTimeline?.lastMessage, "Playback seeked to buffered frame 2.")
+        XCTAssertEqual(
+            scrubbed.result?.playerTimeline?.lastMessage, "Playback seeked to buffered frame 2.")
 
         await runtime.seekToLive()
         let live = try await nextEvent(from: &iterator)
@@ -124,10 +133,13 @@ final class IntegratedAppUATTests: XCTestCase {
         )
         let unavailableSelected = try XCTUnwrap(state.viewModel.selectedStream)
         XCTAssertEqual(unavailableSelected.bufferIssue?.id, "buffer.seek-unavailable")
-        XCTAssertTrue(try XCTUnwrap(unavailableSelected.bufferedSeekUnavailableMessage).contains("unavailable"))
+        XCTAssertTrue(
+            try XCTUnwrap(unavailableSelected.bufferedSeekUnavailableMessage).contains(
+                "unavailable"))
 
         state.viewModel.updateSearchDraft(
-            StreamAppSearchDraft(phrase: "alpha beta", scopeToSelectedStream: true, limit: 10, contextSegments: 1)
+            StreamAppSearchDraft(
+                phrase: "alpha beta", scopeToSelectedStream: true, limit: 10, contextSegments: 1)
         )
         let search = try state.viewModel.runSearch(
             using: searchStore,
@@ -138,7 +150,8 @@ final class IntegratedAppUATTests: XCTestCase {
         XCTAssertEqual(search.results.map(\.isSeekable), [true, false])
         XCTAssertEqual(search.diagnostics.statusMessage, "Found 2 transcript result(s).")
         XCTAssertEqual(search.diagnostics.unseekableResultCount, 1)
-        assertNoSecrets(String(describing: search), temporary: temporary, spillDirectory: spillDirectory)
+        assertNoSecrets(
+            String(describing: search), temporary: temporary, spillDirectory: spillDirectory)
 
         let bufferedResult = try XCTUnwrap(search.results.first { $0.isSeekable })
         let bufferedAction = try state.viewModel.selectSearchResult(
@@ -152,7 +165,9 @@ final class IntegratedAppUATTests: XCTestCase {
         let searchSeek = try await nextEvent(from: &iterator)
         state.viewModel.applyRuntimeEvent(searchSeek)
         XCTAssertEqual(searchSeek.result?.playerTimeline?.positionSeconds, 10)
-        XCTAssertEqual(state.viewModel.selectedStream?.transcriptScrollTargetSegmentID, bufferedResult.segmentID)
+        XCTAssertEqual(
+            state.viewModel.selectedStream?.transcriptScrollTargetSegmentID,
+            bufferedResult.segmentID)
 
         let unbufferedResult = try XCTUnwrap(search.results.first { !$0.isSeekable })
         let unbufferedAction = try state.viewModel.selectSearchResult(
@@ -162,38 +177,50 @@ final class IntegratedAppUATTests: XCTestCase {
         )
         XCTAssertFalse(unbufferedAction.shouldSeek)
         XCTAssertNil(unbufferedAction.seekSeconds)
-        XCTAssertTrue(try XCTUnwrap(unbufferedAction.message).contains("outside the current playback buffer"))
-        XCTAssertEqual(state.viewModel.selectedStream?.transcriptScrollTargetSegmentID, unbufferedResult.segmentID)
+        XCTAssertTrue(
+            try XCTUnwrap(unbufferedAction.message).contains("outside the current playback buffer"))
+        XCTAssertEqual(
+            state.viewModel.selectedStream?.transcriptScrollTargetSegmentID,
+            unbufferedResult.segmentID)
 
         state.viewModel.updateSearchDraft(StreamAppSearchDraft(phrase: "   ", limit: 10))
         XCTAssertThrowsError(try state.viewModel.runSearch(using: searchStore)) { error in
             XCTAssertEqual(error as? StreamAppSearchStoreError, .emptyPhrase)
         }
-        XCTAssertEqual(state.viewModel.selectedStream?.searchErrorMessage, "Search phrase must not be empty.")
+        XCTAssertEqual(
+            state.viewModel.selectedStream?.searchErrorMessage, "Search phrase must not be empty.")
 
         let cli = CLIRunner()
         let streamsList = try cli.runSounding(arguments: [
-            "streams", "list", "--db", temporary.fileURL.path, "--json"
+            "streams", "list", "--db", temporary.fileURL.path, "--json",
         ])
         XCTAssertEqual(streamsList.exitCode, 0, streamsList.diagnosticSummary)
         XCTAssertEqual(streamsList.stderrText, "", streamsList.diagnosticSummary)
         let streamsPayload = try streamsList.decodeJSON(StreamsPayload.self)
         XCTAssertEqual(streamsPayload.streams.map(\.id), [added.id])
-        XCTAssertEqual(streamsPayload.streams.first?.source, "https://example.test/private/live.m3u8")
+        XCTAssertEqual(
+            streamsPayload.streams.first?.source, "https://example.test/private/live.m3u8")
 
         let cliSearch = try cli.runSounding(arguments: [
-            "search", "alpha beta", "--db", temporary.fileURL.path, "--json", "--limit", "10", "--context", "1"
+            "search", "alpha beta", "--db", temporary.fileURL.path, "--json", "--limit", "10",
+            "--context", "1",
         ])
         XCTAssertEqual(cliSearch.exitCode, 0, cliSearch.diagnosticSummary)
         XCTAssertEqual(cliSearch.stderrText, "", cliSearch.diagnosticSummary)
         let searchPayload = try cliSearch.decodeJSON(SearchPayload.self)
         XCTAssertEqual(searchPayload.results.map { $0.identity.streamID }, [added.id, added.id])
-        XCTAssertEqual(searchPayload.results.map(\.text), [
-            "alpha beta buffered result",
-            "late alpha beta unbuffered result"
-        ])
-        assertNoSecrets(streamsList.stdoutText + streamsList.stderrText, temporary: temporary, spillDirectory: spillDirectory)
-        assertNoSecrets(cliSearch.stdoutText + cliSearch.stderrText, temporary: temporary, spillDirectory: spillDirectory)
+        XCTAssertEqual(
+            searchPayload.results.map(\.text),
+            [
+                "alpha beta buffered result",
+                "late alpha beta unbuffered result",
+            ])
+        assertNoSecrets(
+            streamsList.stdoutText + streamsList.stderrText, temporary: temporary,
+            spillDirectory: spillDirectory)
+        assertNoSecrets(
+            cliSearch.stdoutText + cliSearch.stderrText, temporary: temporary,
+            spillDirectory: spillDirectory)
 
         await gate.release()
         let stopped = try await nextEvent(from: &iterator)
@@ -378,9 +405,12 @@ private struct RecordingDeterministicPlayer: AppPCMPlaybackAdapting {
     let recorder: UATRuntimeRecorder
     private let adapter = DeterministicAppPCMPlayerAdapter()
 
-    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock) async throws {
+    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock)
+        async throws
+    {
         await recorder.recordPreparedStream(streamID)
-        try await adapter.prepare(streamID: streamID, sourceDescription: sourceDescription, timeline: timeline)
+        try await adapter.prepare(
+            streamID: streamID, sourceDescription: sourceDescription, timeline: timeline)
     }
 
     func play(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws {
@@ -400,7 +430,8 @@ private struct IntegratedUATDecoder: AudioDecoding {
         return [
             DecodedAudioChunk(
                 sequence: 0,
-                segmentURI: "https://listener:pass@example.test/private/segment-0.ts?token=uat-secret#frag",
+                segmentURI:
+                    "https://listener:pass@example.test/private/segment-0.ts?token=uat-secret#frag",
                 audio: Data([0x01, 0x02, 0x03, 0x04]),
                 startSeconds: 0,
                 endSeconds: 8,
@@ -419,7 +450,8 @@ private struct IntegratedUATDecoder: AudioDecoding {
             ),
             DecodedAudioChunk(
                 sequence: 1,
-                segmentURI: "https://listener:pass@example.test/private/segment-1.ts?token=uat-secret#frag",
+                segmentURI:
+                    "https://listener:pass@example.test/private/segment-1.ts?token=uat-secret#frag",
                 audio: Data([0x05, 0x06, 0x07, 0x08]),
                 startSeconds: 10,
                 endSeconds: 14,
@@ -438,7 +470,8 @@ private struct IntegratedUATDecoder: AudioDecoding {
             ),
             DecodedAudioChunk(
                 sequence: 2,
-                segmentURI: "https://listener:pass@example.test/private/segment-2.ts?token=uat-secret#frag",
+                segmentURI:
+                    "https://listener:pass@example.test/private/segment-2.ts?token=uat-secret#frag",
                 audio: Data([0x09, 0x0a, 0x0b, 0x0c]),
                 startSeconds: 30,
                 endSeconds: 34,
