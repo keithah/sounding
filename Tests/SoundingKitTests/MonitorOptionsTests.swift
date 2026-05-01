@@ -59,31 +59,97 @@ final class MonitorOptionsTests: XCTestCase {
         }
     }
 
-    func testPipelineKeepsUnsupportedTypesAsRedactedNotImplementedErrors() async throws {
+    func testURLSourceRedactionRemovesCredentialsQueryAndFragment() {
+        let description = MonitorError.redactedSourceDescription("https://viewer:letmein@example.test/live/manifest.m3u8?token=synthetic-secret#private-fragment")
+
+        XCTAssertEqual(description, "https://example.test/live/manifest.m3u8", description)
+        XCTAssertFalse(description.contains("viewer"), description)
+        XCTAssertFalse(description.contains("letmein"), description)
+        XCTAssertFalse(description.contains("token="), description)
+        XCTAssertFalse(description.contains("synthetic-secret"), description)
+        XCTAssertFalse(description.contains("private-fragment"), description)
+        XCTAssertFalse(description.contains("?"), description)
+        XCTAssertFalse(description.contains("#"), description)
+    }
+
+    func testRelativeSourceRedactionRemovesSecretLikePathComponents() {
+        let description = MonitorError.redactedSourceDescription("/tmp/output/user:pass-token=secret-api_key=hunter2/out.ndjson")
+
+        XCTAssertTrue(description.contains("/tmp/output/"), description)
+        XCTAssertFalse(description.contains("user:pass"), description)
+        XCTAssertFalse(description.contains("token=secret"), description)
+        XCTAssertFalse(description.contains("api_key=hunter2"), description)
+        XCTAssertFalse(description.contains("hunter2"), description)
+    }
+
+    func testOperationFailureFullyMasksOutputPathContextValues() {
+        let outputPath = "/tmp/sounding-output/user:pass-token=secret-api_key=hunter2/private.ndjson"
+        let error = MonitorError.operationFailed(
+            phase: .output,
+            source: "fixture.ts",
+            streamType: .mpegts,
+            context: [
+                "attempt": "1",
+                "outputPath": outputPath,
+            ],
+            reason: "could not write to \(outputPath)"
+        )
+
+        let description = error.description
+        XCTAssertTrue(description.contains("Monitor output failed"), description)
+        XCTAssertTrue(description.contains("outputPath=[redacted]"), description)
+        XCTAssertTrue(description.contains("attempt=1"), description)
+        XCTAssertFalse(description.contains(outputPath), description)
+        XCTAssertFalse(description.contains("user:pass"), description)
+        XCTAssertFalse(description.contains("token=secret"), description)
+        XCTAssertFalse(description.contains("api_key=hunter2"), description)
+        XCTAssertFalse(description.contains("hunter2"), description)
+        XCTAssertFalse(description.contains("private.ndjson"), description)
+    }
+
+    func testOperationFailureMasksAlternateOutputPathContextKeys() {
+        let error = MonitorError.operationFailed(
+            phase: .output,
+            source: "fixture.ts",
+            streamType: .mpegts,
+            context: [
+                "jsonOut": "/tmp/private-json-out.ndjson",
+                "path": "/tmp/private-path.ndjson",
+            ],
+            reason: "write failed"
+        )
+
+        let description = error.description
+        XCTAssertTrue(description.contains("jsonOut=[redacted]"), description)
+        XCTAssertTrue(description.contains("path=[redacted]"), description)
+        XCTAssertFalse(description.contains("private-json-out"), description)
+        XCTAssertFalse(description.contains("private-path"), description)
+    }
+
+    func testPipelineMPEGTSSourceOpenFailuresAreRedactedOperationErrors() async throws {
         let options = try MonitorOptions(
-            source: "https://user:pass@example.test/live.ts?token=secret#frag",
-            streamType: .icecast,
+            source: "file:///tmp/missing-live.ts?token=secret#frag",
+            streamType: .mpegts,
             filter: "all"
         )
 
         do {
             _ = try await MonitorPipeline.run(options: options)
-            XCTFail("Expected unsupported monitor pipeline source to throw")
+            XCTFail("Expected MPEG-TS monitor pipeline source-open failure")
         } catch let error as MonitorError {
-            guard case let .notImplemented(phase, source, streamType) = error else {
-                return XCTFail("Expected notImplemented, got \(error)")
+            guard case let .operationFailed(phase, source, streamType, context, _) = error else {
+                return XCTFail("Expected operationFailed, got \(error)")
             }
 
             XCTAssertEqual(phase, .sourceOpen)
             XCTAssertEqual(source, options.source)
-            XCTAssertEqual(streamType, .icecast)
+            XCTAssertEqual(streamType, .mpegts)
+            XCTAssertEqual(context["sourceClass"], "mpegts_stream")
 
             let description = error.description
             XCTAssertTrue(description.contains("sourceOpen"))
-            XCTAssertTrue(description.contains("icecast"))
-            XCTAssertTrue(description.contains("https://example.test/live.ts"))
-            XCTAssertFalse(description.contains("user"))
-            XCTAssertFalse(description.contains("pass"))
+            XCTAssertTrue(description.contains("mpegts"))
+            XCTAssertTrue(description.contains("file:///tmp/missing-live.ts"))
             XCTAssertFalse(description.contains("token"))
             XCTAssertFalse(description.contains("secret"))
             XCTAssertFalse(description.contains("?"))

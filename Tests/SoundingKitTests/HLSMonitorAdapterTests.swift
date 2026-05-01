@@ -152,6 +152,24 @@ final class HLSMonitorAdapterTests: XCTestCase {
         XCTAssertEqual(markers.map(\.segment), ["7", "7"])
     }
 
+    func testPipelineClassifiesHLSFixtureBeforeAdFiltering() async throws {
+        let options = try MonitorOptions(
+            source: hlsFixturePath(),
+            streamType: .hls,
+            filter: "ad",
+            quiet: true,
+            emitJSON: true
+        )
+
+        let markers = try await MonitorPipeline.run(options: options)
+
+        XCTAssertEqual(markers.count, 1)
+        XCTAssertEqual(markers.first?.type, "SCTE35")
+        XCTAssertEqual(markers.first?.source, "hls_segment")
+        XCTAssertEqual(markers.first?.tag, "mpegts_scte35_section")
+        XCTAssertEqual(markers.first?.classification, .adStart)
+    }
+
     func testPipelineAutoDetectsLocalM3U8FixtureAsHLS() async throws {
         let options = try MonitorOptions(
             source: hlsFixturePath(),
@@ -178,7 +196,7 @@ final class HLSMonitorAdapterTests: XCTestCase {
 
     func testPipelineAutoNonHLSRemainsUnsupported() async throws {
         let options = try MonitorOptions(
-            source: "fixture.ts",
+            source: "fixture.aac",
             streamType: .auto,
             filter: "all"
         )
@@ -191,7 +209,7 @@ final class HLSMonitorAdapterTests: XCTestCase {
                 return XCTFail("Expected notImplemented, got \(error)")
             }
             XCTAssertEqual(phase, .sourceOpen)
-            XCTAssertEqual(source, "fixture.ts")
+            XCTAssertEqual(source, "fixture.aac")
             XCTAssertEqual(streamType, .auto)
         } catch {
             XCTFail("Expected MonitorError, got \(error)")
@@ -216,6 +234,29 @@ final class HLSMonitorAdapterTests: XCTestCase {
             XCTAssertEqual(source, "missing-fixture.m3u8")
             XCTAssertEqual(streamType, .hls)
             XCTAssertEqual(context["sourceClass"], "hls_manifest")
+        } catch {
+            XCTFail("Expected MonitorError, got \(error)")
+        }
+    }
+
+    func testHLSMissingPrivateManifestWrapsSourceOpenWithRedactedDescription() async throws {
+        let source = "/tmp/user:pass-token=secret/missing-manifest.m3u8?token=secret#frag"
+        let adapter = HLSMonitorAdapter(manifestSource: source)
+
+        do {
+            _ = try await adapter.markers()
+            XCTFail("Expected source-open MonitorError")
+        } catch let error as MonitorError {
+            let description = error.description
+            XCTAssertTrue(description.contains("sourceOpen"), description)
+            XCTAssertTrue(description.contains("hls"), description)
+            XCTAssertTrue(description.contains("sourceClass=hls_manifest"), description)
+            XCTAssertTrue(description.contains("/tmp/"), description)
+            XCTAssertTrue(description.contains("missing-manifest.m3u8"), description)
+            assertSanitized(description, forbiddenLiteral: source)
+            assertSanitized(description, forbiddenLiteral: "user:pass")
+            assertSanitized(description, forbiddenLiteral: "token=secret")
+            assertSanitized(description, forbiddenLiteral: "#frag")
         } catch {
             XCTFail("Expected MonitorError, got \(error)")
         }

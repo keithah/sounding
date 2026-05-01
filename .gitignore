@@ -15,6 +15,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+.build/
+.swiftpm/
+DerivedData/
 node_modules/
 .next/
 dist/
@@ -29,3 +32,15 @@ vendor/
 coverage/
 .cache/
 tmp/
+
+# Local-only live verification inputs and evidence. Keep real stream URLs,
+# credentials, and captured live-run output out of source control.
+live-streams.local.json
+live-streams.*.local.json
+live-streams.private.json
+live-streams.*.private.json
+live-verification-evidence/
+live-verify-evidence/
+*.live-evidence.json
+*.live-evidence.ndjson
+!live-streams.example.json

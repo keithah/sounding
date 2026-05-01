@@ -31,7 +31,7 @@ final class SCTE35FixtureTests: XCTestCase {
             timestamp: "2026-04-30T08:00:00Z"
         )
         let hexMarker = try SCTE35Decoder.decodeMarker(.hex(hex), source: "hls://fixture")
-        let binaryMarker = try SCTE35Decoder.decodeMarker(.data(section), source: "udp://fixture")
+        let binaryMarker = try SCTE35Decoder.decodeMarker(.data(section), source: "udp://stream.example.test")
         let binaryCue = try SCTE35Decoder.decodeSection(section)
 
         XCTAssertEqual(binaryCue.commandName, "Splice Insert")

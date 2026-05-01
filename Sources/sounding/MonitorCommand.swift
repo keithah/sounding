@@ -42,7 +42,7 @@ struct MonitorCommand: AsyncParsableCommand {
 
         do {
             let markers = try await MonitorPipeline.run(options: options)
-            try emit(markers)
+            try emit(markers, options: options)
         } catch let error as MonitorError {
             standardErrorWrite(error.description)
             throw ExitCode.failure
@@ -61,24 +61,43 @@ struct MonitorCommand: AsyncParsableCommand {
         )
     }
 
-    private func emit(_ markers: [AdMarker]) throws {
+    private func emit(_ markers: [AdMarker], options: MonitorOptions) throws {
         guard json || jsonOut != nil else {
             return
         }
 
-        let encoder = JSONEncoder()
-        let lines = try markers.map { marker in
-            String(decoding: try encoder.encode(marker), as: UTF8.self)
-        }
-        let payload = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+        do {
+            let encoder = JSONEncoder()
+            let lines = try markers.map { marker in
+                String(decoding: try encoder.encode(marker), as: UTF8.self)
+            }
+            let payload = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
 
-        if json {
-            print(payload, terminator: "")
-        }
+            if json {
+                print(payload, terminator: "")
+            }
 
-        if let jsonOut {
-            try payload.write(toFile: jsonOut, atomically: true, encoding: .utf8)
+            if let jsonOut {
+                try payload.write(toFile: jsonOut, atomically: true, encoding: .utf8)
+            }
+        } catch let error as MonitorError {
+            throw error
+        } catch {
+            throw MonitorError.operationFailed(
+                phase: .output,
+                source: options.source,
+                streamType: options.streamType,
+                context: outputContext(options: options),
+                reason: String(describing: error)
+            )
         }
+    }
+
+    private func outputContext(options: MonitorOptions) -> [String: String] {
+        guard let jsonOut = options.jsonOut else {
+            return [:]
+        }
+        return ["outputPath": jsonOut]
     }
 
     private func standardErrorWrite(_ message: String) {

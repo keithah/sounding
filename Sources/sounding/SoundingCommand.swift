@@ -8,7 +8,7 @@ struct SoundingCommand: AsyncParsableCommand {
         commandName: "sounding",
         abstract: "Command line interface for \(SoundingKitVersion.current.name).",
         version: SoundingKitVersion.current.string,
-        subcommands: [MonitorCommand.self]
+        subcommands: [MonitorCommand.self, LiveVerifyCommand.self]
     )
 
     mutating func run() async throws {

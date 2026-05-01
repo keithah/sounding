@@ -32,7 +32,7 @@ public enum MonitorError: Error, Equatable, CustomStringConvertible, Sendable {
             return "Monitor \(phase.rawValue) failed for \(streamType.rawValue) source \(Self.redactedSourceDescription(source)): monitor execution is not implemented."
         case let .operationFailed(phase, source, streamType, context, reason):
             let contextDescription = Self.redactedContextDescription(context)
-            let safeReason = Self.redactedSourceDescription(reason)
+            let safeReason = Self.redactedReasonDescription(reason, phase: phase)
             return "Monitor \(phase.rawValue) failed for \(streamType.rawValue) source \(Self.redactedSourceDescription(source))\(contextDescription): \(safeReason)."
         }
     }
@@ -61,7 +61,25 @@ public enum MonitorError: Error, Equatable, CustomStringConvertible, Sendable {
         if let atIndex = safe.lastIndex(of: "@") {
             safe = String(safe[safe.index(after: atIndex)...])
         }
+        safe = redactSecretAssignments(in: safe)
+        safe = redactCredentialLikePathSegments(in: safe)
         return safe
+    }
+
+    private static func redactSecretAssignments(in value: String) -> String {
+        value.replacingOccurrences(
+            of: #"(?i)\b(token|access_token|api[_-]?key|secret|password|passwd|pwd)=([^/\s?&#]+)"#,
+            with: "$1=[redacted]",
+            options: .regularExpression
+        )
+    }
+
+    private static func redactCredentialLikePathSegments(in value: String) -> String {
+        value.replacingOccurrences(
+            of: #"(?i)\b(user|username|login|account|client):([^/\s?&#]+)"#,
+            with: "$1:[redacted]",
+            options: .regularExpression
+        )
     }
 
     private static func redactedContextDescription(_ context: [String: String]) -> String {
@@ -75,10 +93,21 @@ public enum MonitorError: Error, Equatable, CustomStringConvertible, Sendable {
 
     private static func redactedContextValue(_ value: String, forKey key: String) -> String {
         switch key {
+        case "outputPath", "jsonOut", "path":
+            return "[redacted]"
         case "source", "segmentURI", "manifestURI", "url", "uri":
             return redactedSourceDescription(value)
         default:
             return value
+        }
+    }
+
+    private static func redactedReasonDescription(_ reason: String, phase: MonitorPhase) -> String {
+        switch phase {
+        case .output:
+            return "[redacted-output-error]"
+        case .configuration, .sourceOpen, .ingest, .decode:
+            return redactedSourceDescription(reason)
         }
     }
 }

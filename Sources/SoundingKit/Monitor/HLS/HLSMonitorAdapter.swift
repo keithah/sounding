@@ -4,23 +4,26 @@ import FoundationNetworking
 #endif
 
 /// Orchestrates HLS manifest parsing, manifest-level marker conversion, sequential segment loading,
-/// and segment-level SCTE-35 extraction.
+/// and segment-level SCTE-35 and ID3 extraction.
 public struct HLSMonitorAdapter {
     private let manifestSource: String
     private let manifestText: String?
     private let segmentLoader: HLSSegmentLoading
     private let segmentExtractor: HLSSegmentSCTE35Extracting
+    private let id3SegmentExtractor: HLSSegmentID3Extracting
 
     public init(
         manifestSource: String,
         manifestText: String? = nil,
         segmentLoader: HLSSegmentLoading = HLSSegmentLoader(),
-        segmentExtractor: HLSSegmentSCTE35Extracting = HLSSegmentSCTE35Extractor()
+        segmentExtractor: HLSSegmentSCTE35Extracting = HLSSegmentSCTE35Extractor(),
+        id3SegmentExtractor: HLSSegmentID3Extracting = HLSSegmentID3Extractor()
     ) {
         self.manifestSource = manifestSource
         self.manifestText = manifestText
         self.segmentLoader = segmentLoader
         self.segmentExtractor = segmentExtractor
+        self.id3SegmentExtractor = id3SegmentExtractor
     }
 
     public func markers() async throws -> [AdMarker] {
@@ -59,6 +62,22 @@ public struct HLSMonitorAdapter {
                     segment: segment,
                     sourceClass: "hls_segment",
                     tag: "mpegts_scte35_section",
+                    reason: sanitizedReason(for: error)
+                )
+            }
+
+            do {
+                markers.append(contentsOf: try id3SegmentExtractor.extractMarkers(
+                    from: segmentData,
+                    mediaSequence: segment.mediaSequence,
+                    segmentURI: segment.uri
+                ))
+            } catch {
+                throw operationError(
+                    phase: .decode,
+                    segment: segment,
+                    sourceClass: "hls_segment",
+                    tag: "ID3",
                     reason: sanitizedReason(for: error)
                 )
             }
@@ -134,10 +153,8 @@ public struct HLSMonitorAdapter {
     }
 
     private func sanitizedReason(for error: Error) -> String {
-        if let described = error as? CustomStringConvertible {
-            return MonitorError.redactedSourceDescription(described.description)
-        }
-        return String(describing: type(of: error))
+        let described = error as CustomStringConvertible
+        return MonitorError.redactedSourceDescription(described.description)
     }
 }
 
