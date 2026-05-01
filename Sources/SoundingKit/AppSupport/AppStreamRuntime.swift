@@ -27,17 +27,20 @@ public struct AppStreamRuntimeResult: Equatable, Sendable {
     public var runID: Int64?
     public var processedChunks: Int
     public var diagnosticCount: Int
+    public var playerTimeline: AppPlayerTimelineSnapshot?
 
     public init(
         streamID: Int64,
         runID: Int64? = nil,
         processedChunks: Int = 0,
-        diagnosticCount: Int = 0
+        diagnosticCount: Int = 0,
+        playerTimeline: AppPlayerTimelineSnapshot? = nil
     ) {
         self.streamID = streamID
         self.runID = runID
         self.processedChunks = processedChunks
         self.diagnosticCount = diagnosticCount
+        self.playerTimeline = playerTimeline
     }
 }
 
@@ -53,6 +56,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     private let fingerprinter: any AudioFingerprinting
     private let fingerprintEnricher: any AudioFingerprintEnriching
     private let now: StreamIngestPipeline.TimestampProvider
+    private let player: (any AppPCMPlaybackAdapting)?
+    private let timeline: AppPlayerTimelineClock
 
     public init(
         database: SoundingDatabase,
@@ -61,6 +66,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
+        player: (any AppPCMPlaybackAdapting)? = nil,
+        timeline: AppPlayerTimelineClock = AppPlayerTimelineClock(),
         now: @escaping StreamIngestPipeline.TimestampProvider = {
             ISO8601DateFormatter().string(from: Date())
         }
@@ -71,29 +78,62 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         self.diarizer = diarizer
         self.fingerprinter = fingerprinter
         self.fingerprintEnricher = fingerprintEnricher
+        self.player = player
+        self.timeline = timeline
         self.now = now
     }
 
     public func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
-        let result = try await StreamIngestPipeline(
-            database: database,
-            decoder: decoder,
-            transcriber: transcriber,
-            diarizer: diarizer,
-            fingerprinter: fingerprinter,
-            fingerprintEnricher: fingerprintEnricher,
-            now: now
-        ).run(
-            streamID: request.streamID,
-            source: request.source,
-            streamType: request.streamType
-        )
-        return AppStreamRuntimeResult(
-            streamID: result.streamID,
-            runID: result.runID,
-            processedChunks: result.processedChunks,
-            diagnosticCount: result.diagnostics.count
-        )
+        let runtimeDecoder: any AudioDecoding
+        if let player {
+            try await player.prepare(
+                streamID: request.streamID,
+                sourceDescription: request.sourceDescription,
+                timeline: timeline
+            )
+            runtimeDecoder = SinglePathPCMDecoder(
+                streamID: request.streamID,
+                upstream: decoder,
+                player: player,
+                timeline: timeline
+            )
+        } else {
+            runtimeDecoder = decoder
+        }
+
+        do {
+            let result = try await StreamIngestPipeline(
+                database: database,
+                decoder: runtimeDecoder,
+                transcriber: transcriber,
+                diarizer: diarizer,
+                fingerprinter: fingerprinter,
+                fingerprintEnricher: fingerprintEnricher,
+                now: now
+            ).run(
+                streamID: request.streamID,
+                source: request.source,
+                streamType: request.streamType
+            )
+            if let player {
+                await player.stop(timeline: timeline)
+            }
+            return AppStreamRuntimeResult(
+                streamID: result.streamID,
+                runID: result.runID,
+                processedChunks: result.processedChunks,
+                diagnosticCount: result.diagnostics.count,
+                playerTimeline: await timeline.snapshot()
+            )
+        } catch {
+            if let player {
+                await player.stop(timeline: timeline)
+                await timeline.updatePlayerState(
+                    .failed(message: String(describing: error)),
+                    message: "Runtime playback failed: \(error).")
+            }
+            throw error
+        }
     }
 }
 
@@ -287,7 +327,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                         event: AppStreamRuntimeEvent(
                             streamID: streamID,
                             phase: .stopped,
-                            message: "Stopped \(request.name) after \(result.processedChunks) chunk(s).",
+                            message:
+                                "Stopped \(request.name) after \(result.processedChunks) chunk(s).",
                             result: result
                         )
                     )

@@ -211,7 +211,8 @@ struct ContentView: View {
                 database: database,
                 decoder: AVFoundationAudioDecoder(),
                 transcriber: QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
-                diarizer: QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue)
+                diarizer: QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue),
+                player: AVFoundationAppPCMPlayerAdapter()
             )
             let runtime = AppStreamRuntimeService(registry: registry, ingester: runner)
             var viewModel = StreamAppViewModel()
