@@ -44,9 +44,7 @@ public enum StreamAppTimelineStoreError: Error, Equatable, Sendable, CustomStrin
 
 public struct StreamAppTimelineStore: Sendable {
     public static let maximumDisplayLabelLength = 64
-    public static let allowedColorTokens: [String] = [
-        "blue", "green", "orange", "pink", "purple", "teal", "violet", "yellow"
-    ]
+    public static let allowedColorTokens = StreamAppSpeakerDisplayProjection.allowedColorTokens
 
     private let database: SoundingDatabase
 
@@ -67,7 +65,8 @@ public struct StreamAppTimelineStore: Sendable {
                     return max(0, player.liveEdgeSeconds - lookback)
                 }
                 let overrides = try speakerOverrides(streamID: request.streamID, db: db)
-                let segmentRows = try fetchSegmentRows(request: request, lowerBound: lowerBound, db: db)
+                let segmentRows = try fetchSegmentRows(
+                    request: request, lowerBound: lowerBound, db: db)
                 let segmentIDs = segmentRows.map(\.id)
                 let wordsBySegment = try fetchWords(
                     segmentIDs: segmentIDs,
@@ -92,8 +91,10 @@ public struct StreamAppTimelineStore: Sendable {
                     )
                 }
                 let speakers = speakerDisplays(from: segmentRows, overrides: overrides)
-                let songMetadata = try fetchSongMetadata(request: request, lowerBound: lowerBound, db: db)
-                let eventMetadata = try fetchEventMetadata(request: request, lowerBound: lowerBound, db: db)
+                let songMetadata = try fetchSongMetadata(
+                    request: request, lowerBound: lowerBound, db: db)
+                let eventMetadata = try fetchEventMetadata(
+                    request: request, lowerBound: lowerBound, db: db)
                 let recentMetadata = Array(
                     (songMetadata + eventMetadata)
                         .sorted(by: metadataSort)
@@ -109,7 +110,8 @@ public struct StreamAppTimelineStore: Sendable {
                     player: request.player,
                     limit: request.timelineLimit
                 )
-                let latestSegmentEnd = try latestSegmentEndSeconds(streamID: request.streamID, db: db)
+                let latestSegmentEnd = try latestSegmentEndSeconds(
+                    streamID: request.streamID, db: db)
                 let diagnostics = makeDiagnostics(
                     request: request,
                     latestSegmentEndSeconds: latestSegmentEnd
@@ -152,14 +154,14 @@ public struct StreamAppTimelineStore: Sendable {
                 }
                 try db.execute(
                     sql: """
-                    INSERT INTO stream_app_speaker_overrides (
-                        stream_id, raw_label, display_label, color_token, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(stream_id, raw_label) DO UPDATE SET
-                        display_label = excluded.display_label,
-                        color_token = excluded.color_token,
-                        updated_at = excluded.updated_at
-                    """,
+                        INSERT INTO stream_app_speaker_overrides (
+                            stream_id, raw_label, display_label, color_token, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(stream_id, raw_label) DO UPDATE SET
+                            display_label = excluded.display_label,
+                            color_token = excluded.color_token,
+                            updated_at = excluded.updated_at
+                        """,
                     arguments: [streamID, rawLabel, displayLabel, colorToken, updatedAt, updatedAt]
                 )
             }
@@ -172,10 +174,18 @@ public struct StreamAppTimelineStore: Sendable {
 
     private func validate(_ request: StreamAppTimelineRequest) throws {
         guard request.streamID > 0 else { throw StreamAppTimelineStoreError.invalidStreamID }
-        if request.paragraphLimit <= 0 { throw StreamAppTimelineStoreError.invalidLimit("paragraphLimit") }
-        if request.wordLimitPerParagraph <= 0 { throw StreamAppTimelineStoreError.invalidLimit("wordLimitPerParagraph") }
-        if request.metadataLimit <= 0 { throw StreamAppTimelineStoreError.invalidLimit("metadataLimit") }
-        if request.timelineLimit <= 0 { throw StreamAppTimelineStoreError.invalidLimit("timelineLimit") }
+        if request.paragraphLimit <= 0 {
+            throw StreamAppTimelineStoreError.invalidLimit("paragraphLimit")
+        }
+        if request.wordLimitPerParagraph <= 0 {
+            throw StreamAppTimelineStoreError.invalidLimit("wordLimitPerParagraph")
+        }
+        if request.metadataLimit <= 0 {
+            throw StreamAppTimelineStoreError.invalidLimit("metadataLimit")
+        }
+        if request.timelineLimit <= 0 {
+            throw StreamAppTimelineStoreError.invalidLimit("timelineLimit")
+        }
         if let lookback = request.lookbackSeconds, !lookback.isFinite || lookback < 0 {
             throw StreamAppTimelineStoreError.invalidWindow
         }
@@ -191,7 +201,8 @@ public struct StreamAppTimelineStore: Sendable {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw StreamAppTimelineStoreError.emptyDisplayLabel }
         guard trimmed.count <= Self.maximumDisplayLabelLength else {
-            throw StreamAppTimelineStoreError.displayLabelTooLong(max: Self.maximumDisplayLabelLength)
+            throw StreamAppTimelineStoreError.displayLabelTooLong(
+                max: Self.maximumDisplayLabelLength)
         }
         return trimmed
     }
@@ -240,39 +251,53 @@ public struct StreamAppTimelineStore: Sendable {
         let rows = try Row.fetchAll(
             db,
             sql: """
-            SELECT * FROM (
-                SELECT
-                    transcript_segments.id,
-                    transcript_segments.run_id,
-                    transcript_segments.chunk_id,
-                    transcript_segments.sequence,
-                    transcript_segments.speaker_label,
-                    transcript_segments.start_seconds,
-                    transcript_segments.end_seconds,
-                    transcript_segments.text,
-                    transcript_segments.confidence
-                FROM transcript_segments
-                JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
-                WHERE ingest_runs.stream_id = ?
-                  \(windowClause)
-                ORDER BY transcript_segments.end_seconds DESC,
-                         transcript_segments.start_seconds DESC,
-                         transcript_segments.id DESC
-                LIMIT ?
-            ) AS bounded_segments
-            ORDER BY start_seconds, id
-            """,
+                SELECT * FROM (
+                    SELECT
+                        transcript_segments.id,
+                        transcript_segments.run_id,
+                        transcript_segments.chunk_id,
+                        transcript_segments.sequence,
+                        transcript_segments.speaker_label,
+                        transcript_segments.start_seconds,
+                        transcript_segments.end_seconds,
+                        transcript_segments.text,
+                        transcript_segments.confidence
+                    FROM transcript_segments
+                    JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                    WHERE ingest_runs.stream_id = ?
+                      \(windowClause)
+                    ORDER BY transcript_segments.end_seconds DESC,
+                             transcript_segments.start_seconds DESC,
+                             transcript_segments.id DESC
+                    LIMIT ?
+                ) AS bounded_segments
+                ORDER BY start_seconds, id
+                """,
             arguments: arguments
         )
 
         return try rows.map { row in
-            guard let id: Int64 = row["id"] else { throw StreamAppTimelineStoreError.malformedRow("segment_id") }
-            guard let runID: Int64 = row["run_id"] else { throw StreamAppTimelineStoreError.malformedRow("run_id") }
-            guard let chunkID: Int64 = row["chunk_id"] else { throw StreamAppTimelineStoreError.malformedRow("chunk_id") }
-            guard let sequence: Int = row["sequence"] else { throw StreamAppTimelineStoreError.malformedRow("sequence") }
-            guard let startSeconds: Double = row["start_seconds"] else { throw StreamAppTimelineStoreError.malformedRow("start_seconds") }
-            guard let endSeconds: Double = row["end_seconds"] else { throw StreamAppTimelineStoreError.malformedRow("end_seconds") }
-            guard let text: String = row["text"] else { throw StreamAppTimelineStoreError.malformedRow("text") }
+            guard let id: Int64 = row["id"] else {
+                throw StreamAppTimelineStoreError.malformedRow("segment_id")
+            }
+            guard let runID: Int64 = row["run_id"] else {
+                throw StreamAppTimelineStoreError.malformedRow("run_id")
+            }
+            guard let chunkID: Int64 = row["chunk_id"] else {
+                throw StreamAppTimelineStoreError.malformedRow("chunk_id")
+            }
+            guard let sequence: Int = row["sequence"] else {
+                throw StreamAppTimelineStoreError.malformedRow("sequence")
+            }
+            guard let startSeconds: Double = row["start_seconds"] else {
+                throw StreamAppTimelineStoreError.malformedRow("start_seconds")
+            }
+            guard let endSeconds: Double = row["end_seconds"] else {
+                throw StreamAppTimelineStoreError.malformedRow("end_seconds")
+            }
+            guard let text: String = row["text"] else {
+                throw StreamAppTimelineStoreError.malformedRow("text")
+            }
             return SegmentRow(
                 id: id,
                 runID: runID,
@@ -300,37 +325,49 @@ public struct StreamAppTimelineStore: Sendable {
         let rows = try Row.fetchAll(
             db,
             sql: """
-            SELECT * FROM (
-                SELECT
-                    transcript_words.id,
-                    transcript_words.segment_id,
-                    transcript_words.sequence,
-                    transcript_words.speaker_label,
-                    transcript_words.start_seconds,
-                    transcript_words.end_seconds,
-                    transcript_words.text,
-                    transcript_words.confidence,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY transcript_words.segment_id
-                        ORDER BY transcript_words.sequence, transcript_words.id
-                    ) AS word_rank
-                FROM transcript_words
-                WHERE transcript_words.segment_id IN (\(placeholders))
-            ) AS ranked_words
-            WHERE word_rank <= ?
-            ORDER BY segment_id, sequence, id
-            """,
+                SELECT * FROM (
+                    SELECT
+                        transcript_words.id,
+                        transcript_words.segment_id,
+                        transcript_words.sequence,
+                        transcript_words.speaker_label,
+                        transcript_words.start_seconds,
+                        transcript_words.end_seconds,
+                        transcript_words.text,
+                        transcript_words.confidence,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY transcript_words.segment_id
+                            ORDER BY transcript_words.sequence, transcript_words.id
+                        ) AS word_rank
+                    FROM transcript_words
+                    WHERE transcript_words.segment_id IN (\(placeholders))
+                ) AS ranked_words
+                WHERE word_rank <= ?
+                ORDER BY segment_id, sequence, id
+                """,
             arguments: arguments
         )
 
         var result: [Int64: [StreamAppTranscriptWord]] = [:]
         for row in rows {
-            guard let id: Int64 = row["id"] else { throw StreamAppTimelineStoreError.malformedRow("word_id") }
-            guard let segmentID: Int64 = row["segment_id"] else { throw StreamAppTimelineStoreError.malformedRow("segment_id") }
-            guard let sequence: Int = row["sequence"] else { throw StreamAppTimelineStoreError.malformedRow("word_sequence") }
-            guard let startSeconds: Double = row["start_seconds"] else { throw StreamAppTimelineStoreError.malformedRow("word_start_seconds") }
-            guard let endSeconds: Double = row["end_seconds"] else { throw StreamAppTimelineStoreError.malformedRow("word_end_seconds") }
-            guard let text: String = row["text"] else { throw StreamAppTimelineStoreError.malformedRow("word_text") }
+            guard let id: Int64 = row["id"] else {
+                throw StreamAppTimelineStoreError.malformedRow("word_id")
+            }
+            guard let segmentID: Int64 = row["segment_id"] else {
+                throw StreamAppTimelineStoreError.malformedRow("segment_id")
+            }
+            guard let sequence: Int = row["sequence"] else {
+                throw StreamAppTimelineStoreError.malformedRow("word_sequence")
+            }
+            guard let startSeconds: Double = row["start_seconds"] else {
+                throw StreamAppTimelineStoreError.malformedRow("word_start_seconds")
+            }
+            guard let endSeconds: Double = row["end_seconds"] else {
+                throw StreamAppTimelineStoreError.malformedRow("word_end_seconds")
+            }
+            guard let text: String = row["text"] else {
+                throw StreamAppTimelineStoreError.malformedRow("word_text")
+            }
             let display = speakerDisplay(rawLabel: row["speaker_label"], overrides: overrides)
             result[segmentID, default: []].append(
                 StreamAppTranscriptWord(
@@ -364,28 +401,36 @@ public struct StreamAppTimelineStore: Sendable {
         let rows = try Row.fetchAll(
             db,
             sql: """
-            SELECT
-                song_plays.id,
-                song_plays.start_seconds,
-                song_plays.end_seconds,
-                song_plays.confidence,
-                songs.display_name,
-                songs.album
-            FROM song_plays INDEXED BY song_plays_on_stream_run_time
-            JOIN songs ON songs.id = song_plays.song_id
-            WHERE song_plays.stream_id = ?
-              \(windowClause)
-            ORDER BY song_plays.start_seconds, song_plays.id
-            LIMIT ?
-            """,
+                SELECT
+                    song_plays.id,
+                    song_plays.start_seconds,
+                    song_plays.end_seconds,
+                    song_plays.confidence,
+                    songs.display_name,
+                    songs.album
+                FROM song_plays INDEXED BY song_plays_on_stream_run_time
+                JOIN songs ON songs.id = song_plays.song_id
+                WHERE song_plays.stream_id = ?
+                  \(windowClause)
+                ORDER BY song_plays.start_seconds, song_plays.id
+                LIMIT ?
+                """,
             arguments: arguments
         )
 
         return try rows.map { row in
-            guard let id: Int64 = row["id"] else { throw StreamAppTimelineStoreError.malformedRow("song_play_id") }
-            guard let startSeconds: Double = row["start_seconds"] else { throw StreamAppTimelineStoreError.malformedRow("song_start_seconds") }
-            guard let endSeconds: Double = row["end_seconds"] else { throw StreamAppTimelineStoreError.malformedRow("song_end_seconds") }
-            guard let displayName: String = row["display_name"] else { throw StreamAppTimelineStoreError.malformedRow("song_display_name") }
+            guard let id: Int64 = row["id"] else {
+                throw StreamAppTimelineStoreError.malformedRow("song_play_id")
+            }
+            guard let startSeconds: Double = row["start_seconds"] else {
+                throw StreamAppTimelineStoreError.malformedRow("song_start_seconds")
+            }
+            guard let endSeconds: Double = row["end_seconds"] else {
+                throw StreamAppTimelineStoreError.malformedRow("song_end_seconds")
+            }
+            guard let displayName: String = row["display_name"] else {
+                throw StreamAppTimelineStoreError.malformedRow("song_display_name")
+            }
             return StreamAppMetadataItem(
                 id: "song:\(id)",
                 kind: .song,
@@ -413,28 +458,36 @@ public struct StreamAppTimelineStore: Sendable {
         let rows = try Row.fetchAll(
             db,
             sql: """
-            SELECT
-                ad_events.id,
-                ad_events.classification,
-                ad_events.marker_type,
-                ad_events.pts,
-                ad_events.segment
-            FROM ad_events
-            JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
-            WHERE ingest_runs.stream_id = ?
-              AND ad_events.pts IS NOT NULL
-              \(windowClause)
-            ORDER BY ad_events.pts, ad_events.observed_at, ad_events.id
-            LIMIT ?
-            """,
+                SELECT
+                    ad_events.id,
+                    ad_events.classification,
+                    ad_events.marker_type,
+                    ad_events.pts,
+                    ad_events.segment
+                FROM ad_events
+                JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
+                WHERE ingest_runs.stream_id = ?
+                  AND ad_events.pts IS NOT NULL
+                  \(windowClause)
+                ORDER BY ad_events.pts, ad_events.observed_at, ad_events.id
+                LIMIT ?
+                """,
             arguments: arguments
         )
 
         return try rows.map { row in
-            guard let id: Int64 = row["id"] else { throw StreamAppTimelineStoreError.malformedRow("event_id") }
-            guard let classification: String = row["classification"] else { throw StreamAppTimelineStoreError.malformedRow("event_classification") }
-            guard let markerType: String = row["marker_type"] else { throw StreamAppTimelineStoreError.malformedRow("event_marker_type") }
-            guard let pts: Double = row["pts"] else { throw StreamAppTimelineStoreError.malformedRow("event_pts") }
+            guard let id: Int64 = row["id"] else {
+                throw StreamAppTimelineStoreError.malformedRow("event_id")
+            }
+            guard let classification: String = row["classification"] else {
+                throw StreamAppTimelineStoreError.malformedRow("event_classification")
+            }
+            guard let markerType: String = row["marker_type"] else {
+                throw StreamAppTimelineStoreError.malformedRow("event_marker_type")
+            }
+            guard let pts: Double = row["pts"] else {
+                throw StreamAppTimelineStoreError.malformedRow("event_pts")
+            }
             return StreamAppMetadataItem(
                 id: "event:\(id)",
                 kind: .event,
@@ -449,75 +502,44 @@ public struct StreamAppTimelineStore: Sendable {
         try Double.fetchOne(
             db,
             sql: """
-            SELECT MAX(transcript_segments.end_seconds)
-            FROM transcript_segments
-            JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
-            WHERE ingest_runs.stream_id = ?
-            """,
+                SELECT MAX(transcript_segments.end_seconds)
+                FROM transcript_segments
+                JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                WHERE ingest_runs.stream_id = ?
+                """,
             arguments: [streamID]
         )
     }
 
-    private func speakerOverrides(streamID: Int64, db: Database) throws -> [String: StreamAppSpeakerDisplay] {
-        let rows = try Row.fetchAll(
-            db,
-            sql: """
-            SELECT raw_label, display_label, color_token, updated_at
-            FROM stream_app_speaker_overrides
-            WHERE stream_id = ?
-            ORDER BY raw_label COLLATE NOCASE
-            """,
-            arguments: [streamID]
-        )
-        var result: [String: StreamAppSpeakerDisplay] = [:]
-        for row in rows {
-            guard let rawLabel: String = row["raw_label"] else { throw StreamAppTimelineStoreError.malformedRow("override_raw_label") }
-            guard let displayLabel: String = row["display_label"] else { throw StreamAppTimelineStoreError.malformedRow("override_display_label") }
-            guard let colorToken: String = row["color_token"] else { throw StreamAppTimelineStoreError.malformedRow("override_color_token") }
-            result[rawLabel] = StreamAppSpeakerDisplay(
-                rawLabel: rawLabel,
-                displayLabel: displayLabel,
-                colorToken: colorToken,
-                updatedAt: row["updated_at"]
-            )
+    private func speakerOverrides(streamID: Int64, db: Database) throws -> [String:
+        StreamAppSpeakerDisplay]
+    {
+        do {
+            return try StreamAppSpeakerDisplayProjection.overrides(streamID: streamID, db: db)
+        } catch StreamAppSpeakerDisplayProjectionError.malformedRow(let field) {
+            throw StreamAppTimelineStoreError.malformedRow(field)
         }
-        return result
     }
 
     private func speakerDisplay(
         rawLabel: String?,
         overrides: [String: StreamAppSpeakerDisplay]
     ) -> StreamAppSpeakerDisplay {
-        let rawLabel = rawLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = rawLabel?.isEmpty == false ? rawLabel! : "Unknown speaker"
-        if let override = overrides[normalized] { return override }
-        return StreamAppSpeakerDisplay(
-            rawLabel: normalized,
-            displayLabel: normalized,
-            colorToken: fallbackColorToken(for: normalized)
-        )
+        StreamAppSpeakerDisplayProjection.display(rawLabel: rawLabel, overrides: overrides)
     }
 
     private func speakerDisplays(
         from segmentRows: [SegmentRow],
         overrides: [String: StreamAppSpeakerDisplay]
     ) -> [StreamAppSpeakerDisplay] {
-        var seen: Set<String> = []
-        var displays: [StreamAppSpeakerDisplay] = []
-        for row in segmentRows {
-            let display = speakerDisplay(rawLabel: row.speakerLabel, overrides: overrides)
-            if seen.insert(display.rawLabel).inserted {
-                displays.append(display)
-            }
-        }
-        return displays.sorted { lhs, rhs in
-            lhs.displayLabel.localizedCaseInsensitiveCompare(rhs.displayLabel) == .orderedAscending
-        }
+        StreamAppSpeakerDisplayProjection.displays(
+            rawLabels: segmentRows.map(\.speakerLabel),
+            overrides: overrides
+        )
     }
 
     private func fallbackColorToken(for rawLabel: String) -> String {
-        let total = rawLabel.unicodeScalars.reduce(0) { $0 + Int($1.value) }
-        return Self.allowedColorTokens[abs(total) % Self.allowedColorTokens.count]
+        StreamAppSpeakerDisplayProjection.fallbackColorToken(for: rawLabel)
     }
 
     private func metadataSort(_ lhs: StreamAppMetadataItem, _ rhs: StreamAppMetadataItem) -> Bool {
@@ -532,9 +554,11 @@ public struct StreamAppTimelineStore: Sendable {
         guard let playerPosition else {
             return items.sorted(by: metadataSort).first
         }
-        return items
+        return
+            items
             .filter { item in
-                item.startSeconds <= playerPosition && (item.endSeconds ?? item.startSeconds) >= playerPosition
+                item.startSeconds <= playerPosition
+                    && (item.endSeconds ?? item.startSeconds) >= playerPosition
             }
             .sorted(by: metadataSort)
             .first
@@ -596,7 +620,8 @@ public struct StreamAppTimelineStore: Sendable {
         let player = request.player
         let lagSeconds: Double?
         if let latestSegmentEndSeconds {
-            lagSeconds = max(0, (player?.liveEdgeSeconds ?? latestSegmentEndSeconds) - latestSegmentEndSeconds)
+            lagSeconds = max(
+                0, (player?.liveEdgeSeconds ?? latestSegmentEndSeconds) - latestSegmentEndSeconds)
         } else if let player {
             lagSeconds = max(0, player.liveEdgeSeconds - player.positionSeconds)
         } else {
