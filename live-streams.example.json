@@ -1,0 +1,31 @@
+{
+  "streams": [
+    {
+      "id": "example-hls-required",
+      "streamType": "hls",
+      "source": "https://example.com/live/manifest.m3u8",
+      "filter": "all",
+      "timeoutSeconds": 10,
+      "minimumMarkers": 1,
+      "required": true
+    },
+    {
+      "id": "fixture-mpegts-required",
+      "streamType": "mpegts",
+      "source": "Tests/SoundingKitTests/Fixtures/MPEGTS/scte35_splice_null.ts",
+      "filter": "scte35",
+      "timeoutSeconds": 5,
+      "minimumMarkers": 1,
+      "required": true
+    },
+    {
+      "id": "example-icy-optional",
+      "streamType": "icy",
+      "source": "https://example.org/radio/stream",
+      "filter": "all",
+      "timeoutSeconds": 10,
+      "minimumMarkers": 0,
+      "required": false
+    }
+  ]
+}

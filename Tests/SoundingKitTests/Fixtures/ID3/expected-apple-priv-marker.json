@@ -1,0 +1,50 @@
+{
+  "Type": "ID3",
+  "Classification": "UNKNOWN",
+  "Source": "hls_segment",
+  "Tag": "ID3",
+  "PTS": 2.0,
+  "Segment": "segment-0001.ts",
+  "RawBase64": null,
+  "Command": null,
+  "Descriptors": [],
+  "Tags": {
+    "TIT2": "Primary Cue",
+    "TIT3": "Subtitle Cue",
+    "TXXX:TIDEMARK": "AD|START"
+  },
+  "Fields": {
+    "FrameIDs": ["PRIV", "TIT2", "TIT3", "TXXX"],
+    "Frames": [
+      {
+        "ID": "PRIV",
+        "Index": 3,
+        "Owner": "com.apple.streaming.transportStreamTimestamp",
+        "DataLength": 8,
+        "TimestampTicks": 180000,
+        "TimestampSeconds": 2.0
+      },
+      {
+        "ID": "TIT2",
+        "Index": 0,
+        "Texts": ["Primary Cue"]
+      },
+      {
+        "ID": "TIT3",
+        "Index": 1,
+        "Texts": ["Subtitle Cue"]
+      },
+      {
+        "ID": "TXXX",
+        "Index": 2,
+        "Description": "TIDEMARK",
+        "Texts": ["AD", "START"]
+      }
+    ],
+    "PrivateOwners": ["com.apple.streaming.transportStreamTimestamp"],
+    "PrivateFrameCount": 1,
+    "TimestampTicks": 180000,
+    "TimestampSeconds": 2.0
+  },
+  "Timestamp": "2026-04-30T08:00:00Z"
+}
