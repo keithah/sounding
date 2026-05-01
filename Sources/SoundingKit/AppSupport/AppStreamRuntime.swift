@@ -152,6 +152,96 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     }
 }
 
+public enum AppStreamRuntimeStatusPhase: String, CaseIterable, Codable, Equatable, Sendable {
+    case connecting
+    case running
+    case paused
+    case reconnecting
+    case stopped
+    case error
+}
+
+public struct AppStreamRuntimeRecentFailure: Equatable, Sendable {
+    public var message: String
+    public var occurredAt: String
+
+    public init(message: String, occurredAt: String) {
+        self.message = IngestRedaction.redact(message)
+        self.occurredAt = occurredAt
+    }
+}
+
+public struct AppStreamRuntimeStatusUpdate: Equatable, Sendable {
+    public var streamID: Int64
+    public var phase: AppStreamRuntimeStatusPhase
+    public var attempt: Int
+    public var maxAttempts: Int
+    public var nextRetrySeconds: Int?
+    public var nextRetryAt: String?
+    public var updatedAt: String
+    public var recentFailure: AppStreamRuntimeRecentFailure?
+
+    public init(
+        streamID: Int64,
+        phase: AppStreamRuntimeStatusPhase,
+        attempt: Int = 0,
+        maxAttempts: Int = 0,
+        nextRetrySeconds: Int? = nil,
+        nextRetryAt: String? = nil,
+        updatedAt: String,
+        recentFailure: AppStreamRuntimeRecentFailure? = nil
+    ) {
+        self.streamID = streamID
+        self.phase = phase
+        self.attempt = max(0, attempt)
+        self.maxAttempts = max(0, maxAttempts)
+        self.nextRetrySeconds = nextRetrySeconds.map { max(0, $0) }
+        self.nextRetryAt = nextRetryAt.map(IngestRedaction.redact)
+        self.updatedAt = updatedAt
+        self.recentFailure = recentFailure
+    }
+}
+
+public struct AppStreamRuntimeStatusSnapshot: Equatable, Sendable {
+    public var streamID: Int64
+    public var name: String
+    public var streamType: String
+    public var sourceDescription: String
+    public var phase: AppStreamRuntimeStatusPhase
+    public var attempt: Int
+    public var maxAttempts: Int
+    public var nextRetrySeconds: Int?
+    public var nextRetryAt: String?
+    public var updatedAt: String
+    public var recentFailure: AppStreamRuntimeRecentFailure?
+
+    public init(
+        streamID: Int64,
+        name: String,
+        streamType: String,
+        sourceDescription: String,
+        phase: AppStreamRuntimeStatusPhase,
+        attempt: Int,
+        maxAttempts: Int,
+        nextRetrySeconds: Int?,
+        nextRetryAt: String?,
+        updatedAt: String,
+        recentFailure: AppStreamRuntimeRecentFailure?
+    ) {
+        self.streamID = streamID
+        self.name = IngestRedaction.redact(name)
+        self.streamType = IngestRedaction.redact(streamType)
+        self.sourceDescription = IngestRedaction.sourceDescription(sourceDescription)
+        self.phase = phase
+        self.attempt = max(0, attempt)
+        self.maxAttempts = max(0, maxAttempts)
+        self.nextRetrySeconds = nextRetrySeconds.map { max(0, $0) }
+        self.nextRetryAt = nextRetryAt.map(IngestRedaction.redact)
+        self.updatedAt = updatedAt
+        self.recentFailure = recentFailure
+    }
+}
+
 public enum AppStreamRuntimePhase: Equatable, Sendable {
     case connecting
     case running
@@ -159,6 +249,23 @@ public enum AppStreamRuntimePhase: Equatable, Sendable {
     case reconnecting(nextRetrySeconds: Int?)
     case stopped
     case error(message: String)
+
+    public var statusPhase: AppStreamRuntimeStatusPhase {
+        switch self {
+        case .connecting:
+            return .connecting
+        case .running:
+            return .running
+        case .paused:
+            return .paused
+        case .reconnecting:
+            return .reconnecting
+        case .stopped:
+            return .stopped
+        case .error:
+            return .error
+        }
+    }
 
     public var appStatus: StreamAppStatus {
         switch self {

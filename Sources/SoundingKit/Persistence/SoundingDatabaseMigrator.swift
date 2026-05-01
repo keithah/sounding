@@ -322,6 +322,37 @@ enum SoundingDatabaseMigrator {
             )
         }
 
+        migrator.registerMigration("addStreamRuntimeStatus") { db in
+            try db.create(table: "stream_runtime_status") { table in
+                table.column("stream_id", .integer)
+                    .notNull()
+                    .primaryKey(onConflict: .replace)
+                    .references("streams", onDelete: .cascade)
+                table.column("phase", .text).notNull()
+                    .check(sql: "length(trim(phase)) > 0")
+                table.column("attempt", .integer).notNull().defaults(to: 0)
+                    .check(sql: "attempt >= 0")
+                table.column("max_attempts", .integer).notNull().defaults(to: 0)
+                    .check(sql: "max_attempts >= 0")
+                table.column("next_retry_seconds", .integer)
+                    .check(sql: "next_retry_seconds IS NULL OR next_retry_seconds >= 0")
+                table.column("next_retry_at", .text)
+                table.column("recent_failure_message", .text)
+                table.column("recent_failure_at", .text)
+                table.column("updated_at", .text).notNull()
+            }
+            try db.create(
+                index: "stream_runtime_status_on_phase",
+                on: "stream_runtime_status",
+                columns: ["phase"]
+            )
+            try db.create(
+                index: "stream_runtime_status_on_updated_at",
+                on: "stream_runtime_status",
+                columns: ["updated_at"]
+            )
+        }
+
         try migrator.migrate(writer)
     }
 }

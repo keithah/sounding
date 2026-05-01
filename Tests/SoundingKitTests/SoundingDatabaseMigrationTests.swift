@@ -46,6 +46,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "song_plays",
                 "acoustid_lookup_cache",
                 "stream_app_speaker_overrides",
+                "stream_runtime_status",
                 "grdb_migrations"
             ]
         )
@@ -69,7 +70,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "songs": columnNames(in: "songs", db),
                 "song_plays": columnNames(in: "song_plays", db),
                 "acoustid_lookup_cache": columnNames(in: "acoustid_lookup_cache", db),
-                "stream_app_speaker_overrides": columnNames(in: "stream_app_speaker_overrides", db)
+                "stream_app_speaker_overrides": columnNames(in: "stream_app_speaker_overrides", db),
+                "stream_runtime_status": columnNames(in: "stream_runtime_status", db)
             ]
         }
 
@@ -230,6 +232,17 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "created_at",
             "updated_at"
         ])
+        XCTAssertEqual(columnsByTable["stream_runtime_status"], [
+            "stream_id",
+            "phase",
+            "attempt",
+            "max_attempts",
+            "next_retry_seconds",
+            "next_retry_at",
+            "recent_failure_message",
+            "recent_failure_at",
+            "updated_at"
+        ])
     }
 
     func testTimelineAndStreamManagementMigrationsCreateIndexes() throws {
@@ -240,7 +253,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'index'
-                  AND tbl_name IN ('streams', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides')
+                  AND tbl_name IN ('streams', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides', 'stream_runtime_status')
                 ORDER BY name
                 """))
         }
@@ -263,6 +276,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "song_plays_on_last_chunk_id",
             "stream_app_speaker_overrides_on_stream_label",
             "stream_app_speaker_overrides_on_stream_id",
+            "stream_runtime_status_on_phase",
+            "stream_runtime_status_on_updated_at",
             "acoustid_lookup_cache_on_identity",
             "acoustid_lookup_cache_on_acoustid_id",
             "acoustid_lookup_cache_on_recording_id",
@@ -317,7 +332,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "songs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM songs"),
                 "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
                 "acoustid_lookup_cache": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM acoustid_lookup_cache"),
-                "stream_app_speaker_overrides": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_app_speaker_overrides")
+                "stream_app_speaker_overrides": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_app_speaker_overrides"),
+                "stream_runtime_status": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_runtime_status")
             ]
         }
 
@@ -335,7 +351,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "songs": 0,
             "song_plays": 0,
             "acoustid_lookup_cache": 0,
-            "stream_app_speaker_overrides": 0
+            "stream_app_speaker_overrides": 0,
+            "stream_runtime_status": 0
         ])
     }
 
