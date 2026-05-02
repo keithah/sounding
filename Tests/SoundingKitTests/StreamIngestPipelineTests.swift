@@ -5,6 +5,104 @@ import XCTest
 @testable import SoundingKit
 
 final class StreamIngestPipelineTests: XCTestCase {
+    func testHLSReconnectOverlapSkipsDuplicateBeforeInferenceAndPersistsContiguousSequence() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let probe = RecordingCollaboratorProbe()
+
+        let firstPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [
+                Self.hlsChunk(sequence: 0, mediaSequence: 7),
+                Self.hlsChunk(sequence: 1, mediaSequence: 8),
+            ]),
+            transcriber: FakeTranscriber(segmentsBySequence: [
+                0: [Self.segment(text: "media seven")],
+                1: [Self.segment(text: "media eight")],
+            ], probe: probe),
+            diarizer: FakeDiarizer(turnsBySequence: [
+                0: [SpeakerTurnDraft(speakerLabel: "speaker-1", startSeconds: 0, endSeconds: 1)],
+                1: [SpeakerTurnDraft(speakerLabel: "speaker-1", startSeconds: 2, endSeconds: 3)],
+            ], probe: probe),
+            fingerprinter: RecordingFingerprinter(probe: probe)
+        )
+        let firstResult = try await firstPipeline.run(
+            streamID: streamID,
+            source: "https://user:pass@example.test/live.m3u8?token=secret#frag",
+            streamType: .hls,
+            maxChunks: 2
+        )
+
+        let secondPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [
+                Self.hlsChunk(sequence: 0, mediaSequence: 8),
+                Self.hlsChunk(sequence: 1, mediaSequence: 9),
+            ]),
+            transcriber: FakeTranscriber(segmentsBySequence: [
+                0: [Self.segment(text: "duplicate eight must not run")],
+                1: [Self.segment(text: "media nine")],
+            ], errorByMediaSequence: [8: FakeIngestError("duplicate media sequence reached transcriber")], probe: probe),
+            diarizer: FakeDiarizer(turnsBySequence: [
+                1: [SpeakerTurnDraft(speakerLabel: "speaker-1", startSeconds: 4, endSeconds: 5)],
+            ], errorByMediaSequence: [8: FakeIngestError("duplicate media sequence reached diarizer")], probe: probe),
+            fingerprinter: RecordingFingerprinter(errorByMediaSequence: [
+                8: FakeIngestError("duplicate media sequence reached fingerprinter")
+            ], probe: probe)
+        )
+        let secondResult = try await secondPipeline.run(
+            streamID: streamID,
+            source: "https://user:pass@example.test/live.m3u8?token=secret#frag",
+            streamType: .hls,
+            maxChunks: 2
+        )
+
+        let transcribedMediaSequences = await probe.transcribedMediaSequences()
+        let diarizedMediaSequences = await probe.diarizedMediaSequences()
+        let fingerprintedMediaSequences = await probe.fingerprintedMediaSequences()
+
+        XCTAssertEqual(firstResult.processedChunks, 2)
+        XCTAssertEqual(secondResult.processedChunks, 1)
+        XCTAssertEqual(transcribedMediaSequences, [7, 8, 9])
+        XCTAssertEqual(diarizedMediaSequences, [7, 8, 9])
+        XCTAssertEqual(fingerprintedMediaSequences, [7, 8, 9])
+
+        let evidence = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT
+                    (SELECT COUNT(*) FROM ingest_chunks) AS chunks,
+                    (SELECT GROUP_CONCAT(media_sequence, ',') FROM hls_ingest_segments ORDER BY media_sequence) AS media_sequences,
+                    (SELECT COUNT(*) FROM hls_ingest_segments WHERE media_sequence = 8) AS media_eight_claims,
+                    (SELECT COUNT(*) FROM transcript_segments) AS segments,
+                    (SELECT COUNT(*) FROM ad_events) AS ad_events,
+                    (SELECT COUNT(*) FROM audio_fingerprints) AS fingerprints,
+                    (SELECT COUNT(*) FROM song_plays) AS song_plays,
+                    (SELECT COUNT(*) FROM ingest_diagnostics WHERE reason = 'hls-segment-duplicate') AS duplicate_diagnostics,
+                    (SELECT GROUP_CONCAT(context_json, '\n') FROM ingest_diagnostics WHERE reason LIKE 'hls-%' ORDER BY id) AS hls_context
+                """)
+        }
+        XCTAssertEqual(evidence?["chunks"] as Int?, 3)
+        XCTAssertEqual(evidence?["media_sequences"] as String?, "7,8,9")
+        XCTAssertEqual(evidence?["media_eight_claims"] as Int?, 1)
+        XCTAssertEqual(evidence?["segments"] as Int?, 3)
+        XCTAssertEqual(evidence?["ad_events"] as Int?, 3)
+        XCTAssertEqual(evidence?["fingerprints"] as Int?, 3)
+        XCTAssertEqual(evidence?["song_plays"] as Int?, 3)
+        XCTAssertEqual(evidence?["duplicate_diagnostics"] as Int?, 1)
+        let hlsContext: String = evidence?["hls_context"] ?? ""
+        XCTAssertTrue(hlsContext.contains("duplicate-skip"), hlsContext)
+        XCTAssertTrue(hlsContext.contains("mediaSequence"), hlsContext)
+        Self.assertNoForbiddenLiterals(
+            in: hlsContext,
+            forbidden: ["user:pass", "token=secret", "#frag", "duplicate media sequence"]
+        )
+    }
+
     func testMaxChunksOnePersistsExactlyOneChunkWithTranscriptSpeakerAndMarkerRows() async throws {
         let temporary = try TemporarySoundingDatabase()
         let pipeline = StreamIngestPipeline(
@@ -668,6 +766,36 @@ final class StreamIngestPipelineTests: XCTestCase {
         )
     }
 
+    private static func hlsChunk(sequence: Int, mediaSequence: Int) -> DecodedAudioChunk {
+        DecodedAudioChunk(
+            sequence: sequence,
+            segmentURI:
+                "https://user:pass@example.test/segment-\(String(format: "%03d", mediaSequence)).ts?token=secret#frag",
+            hlsIdentity: HLSDecodedAudioChunkIdentity(
+                mediaSequence: mediaSequence,
+                segmentIdentity:
+                    "https://user:pass@example.test/segment-\(String(format: "%03d", mediaSequence)).ts?token=secret#frag",
+                manifestPosition: sequence
+            ),
+            audio: Data([UInt8(mediaSequence), 0x02, 0x03]),
+            startSeconds: Double(mediaSequence) * 2.0,
+            endSeconds: Double(mediaSequence + 1) * 2.0,
+            startedAt: "2026-05-01T10:00:\(String(format: "%02d", mediaSequence))Z",
+            endedAt: "2026-05-01T10:00:\(String(format: "%02d", mediaSequence + 1))Z",
+            adMarkers: [
+                AdMarker(
+                    type: "SCTE35",
+                    classification: .adStart,
+                    source: "hls_segment",
+                    pts: Double(mediaSequence),
+                    segment: "https://user:pass@example.test/segment-\(mediaSequence).ts?token=secret",
+                    rawBase64: "AAAAAQ==",
+                    timestamp: "2026-05-01T10:00:\(String(format: "%02d", mediaSequence))Z"
+                )
+            ]
+        )
+    }
+
     private static func segment(
         text: String,
         speakerLabel: String = "speaker-1",
@@ -713,6 +841,28 @@ final class StreamIngestPipelineTests: XCTestCase {
     }
 }
 
+private actor RecordingCollaboratorProbe {
+    private var transcribed: [Int] = []
+    private var diarized: [Int] = []
+    private var fingerprinted: [Int] = []
+
+    func recordTranscribed(_ chunk: DecodedAudioChunk) {
+        transcribed.append(chunk.hlsIdentity?.mediaSequence ?? chunk.sequence)
+    }
+
+    func recordDiarized(_ chunk: DecodedAudioChunk) {
+        diarized.append(chunk.hlsIdentity?.mediaSequence ?? chunk.sequence)
+    }
+
+    func recordFingerprinted(_ chunk: DecodedAudioChunk) {
+        fingerprinted.append(chunk.hlsIdentity?.mediaSequence ?? chunk.sequence)
+    }
+
+    func transcribedMediaSequences() -> [Int] { transcribed }
+    func diarizedMediaSequences() -> [Int] { diarized }
+    func fingerprintedMediaSequences() -> [Int] { fingerprinted }
+}
+
 private struct FakeDecoder: AudioDecoding {
     var chunks: [DecodedAudioChunk]
     var error: Error?
@@ -733,16 +883,28 @@ private struct FakeDecoder: AudioDecoding {
 private struct FakeTranscriber: MLTranscription {
     var segmentsBySequence: [Int: [TranscriptSegmentDraft]]
     var errorBySequence: [Int: Error]
+    var errorByMediaSequence: [Int: Error]
+    var probe: RecordingCollaboratorProbe?
 
     init(
         segmentsBySequence: [Int: [TranscriptSegmentDraft]] = [:],
-        errorBySequence: [Int: Error] = [:]
+        errorBySequence: [Int: Error] = [:],
+        errorByMediaSequence: [Int: Error] = [:],
+        probe: RecordingCollaboratorProbe? = nil
     ) {
         self.segmentsBySequence = segmentsBySequence
         self.errorBySequence = errorBySequence
+        self.errorByMediaSequence = errorByMediaSequence
+        self.probe = probe
     }
 
     func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
+        await probe?.recordTranscribed(chunk)
+        if let mediaSequence = chunk.hlsIdentity?.mediaSequence,
+            let error = errorByMediaSequence[mediaSequence]
+        {
+            throw error
+        }
         if let error = errorBySequence[chunk.sequence] {
             throw error
         }
@@ -753,22 +915,87 @@ private struct FakeTranscriber: MLTranscription {
 private struct FakeDiarizer: SpeakerDiarization {
     var turnsBySequence: [Int: [SpeakerTurnDraft]]
     var errorBySequence: [Int: Error]
+    var errorByMediaSequence: [Int: Error]
+    var probe: RecordingCollaboratorProbe?
 
     init(
         turnsBySequence: [Int: [SpeakerTurnDraft]] = [:],
-        errorBySequence: [Int: Error] = [:]
+        errorBySequence: [Int: Error] = [:],
+        errorByMediaSequence: [Int: Error] = [:],
+        probe: RecordingCollaboratorProbe? = nil
     ) {
         self.turnsBySequence = turnsBySequence
         self.errorBySequence = errorBySequence
+        self.errorByMediaSequence = errorByMediaSequence
+        self.probe = probe
     }
 
     func diarize(_ chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft])
         async throws -> [SpeakerTurnDraft]
     {
+        await probe?.recordDiarized(chunk)
+        if let mediaSequence = chunk.hlsIdentity?.mediaSequence,
+            let error = errorByMediaSequence[mediaSequence]
+        {
+            throw error
+        }
         if let error = errorBySequence[chunk.sequence] {
             throw error
         }
         return turnsBySequence[chunk.sequence] ?? []
+    }
+}
+
+private struct RecordingFingerprinter: AudioFingerprinting {
+    var errorByMediaSequence: [Int: Error]
+    var probe: RecordingCollaboratorProbe?
+
+    init(
+        errorByMediaSequence: [Int: Error] = [:],
+        probe: RecordingCollaboratorProbe? = nil
+    ) {
+        self.errorByMediaSequence = errorByMediaSequence
+        self.probe = probe
+    }
+
+    func fingerprint(
+        _ chunk: DecodedAudioChunk,
+        request: AudioFingerprintRequest
+    ) async throws -> AudioFingerprintResult {
+        await probe?.recordFingerprinted(chunk)
+        if let mediaSequence = chunk.hlsIdentity?.mediaSequence,
+            let error = errorByMediaSequence[mediaSequence]
+        {
+            throw error
+        }
+        let mediaSequence = chunk.hlsIdentity?.mediaSequence ?? chunk.sequence
+        let hash = "recording-\(mediaSequence)"
+        return AudioFingerprintResult(
+            fingerprints: [
+                AudioFingerprintDraft(
+                    algorithm: "recording",
+                    algorithmVersion: "1",
+                    fingerprint: "recording:\(mediaSequence)",
+                    fingerprintHash: hash,
+                    startSeconds: chunk.startSeconds,
+                    endSeconds: chunk.endSeconds,
+                    confidence: 1.0
+                )
+            ],
+            songPlays: [
+                SongPlayDraft(
+                    song: UnresolvedSongDraft(
+                        songKey: "recording:\(mediaSequence)",
+                        displayName: "Recording \(mediaSequence)",
+                        isUnknown: true
+                    ),
+                    startSeconds: chunk.startSeconds,
+                    endSeconds: chunk.endSeconds,
+                    confidence: 1.0,
+                    source: "recording"
+                )
+            ]
+        )
     }
 }
 

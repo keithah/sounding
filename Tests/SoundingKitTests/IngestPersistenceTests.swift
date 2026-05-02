@@ -340,6 +340,45 @@ final class IngestPersistenceTests: XCTestCase {
         XCTAssertFalse(contexts.contains("password="))
     }
 
+    func testHLSSegmentAbandonUnfinalizedClaimAllowsRetryWithoutDuplicateClassification() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(streamType: "hls", source: "https://example.test/live.m3u8", createdAt: "2026-05-01T10:00:00Z")
+        let runID = try writer.createRun(streamID: streamID, startedAt: "2026-05-01T10:00:01Z", status: .running)
+
+        let first = try writer.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: streamID,
+                runID: runID,
+                mediaSequence: 11,
+                segmentIdentity: "https://cdn.example.test/seg-11.ts?token=secret",
+                claimedAt: "2026-05-01T10:00:02Z"
+            )
+        )
+        XCTAssertEqual(first, .claimed(diagnostics: []))
+
+        try writer.abandonUnfinalizedHLSSegmentClaim(
+            streamID: streamID,
+            mediaSequence: 11,
+            runID: runID
+        )
+
+        let retry = try writer.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: streamID,
+                runID: runID,
+                mediaSequence: 11,
+                segmentIdentity: "https://cdn.example.test/seg-11.ts?token=other",
+                claimedAt: "2026-05-01T10:00:03Z"
+            )
+        )
+        XCTAssertEqual(retry, .claimed(diagnostics: []))
+        let rows = try temporary.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM hls_ingest_segments WHERE stream_id = ? AND media_sequence = 11", arguments: [streamID])
+        }
+        XCTAssertEqual(rows, 1)
+    }
+
     func testHLSSegmentFinalizeFailureDoesNotLeavePartialChunkLink() throws {
         let temporary = try TemporarySoundingDatabase()
         let writer = IngestPersistence(database: temporary.database)

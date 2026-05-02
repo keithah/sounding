@@ -98,6 +98,7 @@ public struct StreamIngestPipeline {
         var processedChunks = 0
         var nextSegmentSequence = 0
         var terminalRunFinished = false
+        var pendingHLSClaim: HLSProcessedClaim?
 
         func finishRunOnce(
             status: IngestRunStatus,
@@ -168,6 +169,30 @@ public struct StreamIngestPipeline {
 
             for chunk in bounded {
                 try Task.checkCancellation()
+                var processedHLSClaim: HLSProcessedClaim?
+                switch try persistence.claimHLSSegment(hlsClaim(for: chunk, streamID: streamID, runID: runID)) {
+                case .noClaim:
+                    processedHLSClaim = nil
+                case .claimed(let claimDiagnostics):
+                    processedHLSClaim = HLSProcessedClaim(mediaSequence: chunk.hlsIdentity?.mediaSequence)
+                    pendingHLSClaim = processedHLSClaim
+                    diagnostics.append(contentsOf: claimDiagnostics.map { hlsDiagnosticDraft(
+                        $0,
+                        streamID: streamID,
+                        source: redactedSource,
+                        streamType: streamType
+                    ) })
+                case .duplicate(_, _, let claimDiagnostic), .conflict(_, _, let claimDiagnostic):
+                    diagnostics.append(
+                        hlsDiagnosticDraft(
+                            claimDiagnostic,
+                            streamID: streamID,
+                            source: redactedSource,
+                            streamType: streamType
+                        ))
+                    continue
+                }
+
                 if chunk.audio.isEmpty || chunk.byteCount <= 0 {
                     let diagnostic = self.diagnostic(
                         streamID: streamID,
@@ -196,6 +221,14 @@ public struct StreamIngestPipeline {
                             createdAt: now()
                         )
                     )
+                    try finalizeHLSClaimIfNeeded(
+                        processedHLSClaim,
+                        persistence: persistence,
+                        streamID: streamID,
+                        runID: runID,
+                        chunkID: chunkID
+                    )
+                    pendingHLSClaim = nil
                     diagnostics.append(diagnostic)
                     processedChunks += 1
                     continue
@@ -362,6 +395,14 @@ public struct StreamIngestPipeline {
                         createdAt: now()
                     )
                 )
+                try finalizeHLSClaimIfNeeded(
+                    processedHLSClaim,
+                    persistence: persistence,
+                    streamID: streamID,
+                    runID: runID,
+                    chunkID: chunkID
+                )
+                pendingHLSClaim = nil
                 diagnostics.append(contentsOf: chunkDiagnostics)
                 processedChunks += 1
             }
@@ -374,6 +415,7 @@ public struct StreamIngestPipeline {
                 streamID: streamID, runID: runID, processedChunks: processedChunks,
                 diagnostics: diagnostics)
         } catch is CancellationError {
+            abandonHLSClaimIfNeeded(pendingHLSClaim, persistence: persistence, streamID: streamID, runID: runID)
             let diagnostic = self.diagnostic(
                 streamID: streamID,
                 phase: .decode,
@@ -395,6 +437,7 @@ public struct StreamIngestPipeline {
             )
             throw CancellationError()
         } catch {
+            abandonHLSClaimIfNeeded(pendingHLSClaim, persistence: persistence, streamID: streamID, runID: runID)
             if terminalRunFinished {
                 throw error
             }
@@ -536,6 +579,73 @@ public struct StreamIngestPipeline {
                     reason: "malformed-fingerprint-output", detail: "invalid song play interval")
             }
         }
+    }
+
+    private struct HLSProcessedClaim {
+        var mediaSequence: Int?
+    }
+
+    private func hlsClaim(
+        for chunk: DecodedAudioChunk,
+        streamID: Int64,
+        runID: Int64
+    ) -> HLSSegmentClaim? {
+        guard let identity = chunk.hlsIdentity else { return nil }
+        return HLSSegmentClaim(
+            streamID: streamID,
+            runID: runID,
+            mediaSequence: identity.mediaSequence,
+            segmentIdentity: identity.segmentIdentity,
+            claimedAt: now()
+        )
+    }
+
+    private func hlsDiagnosticDraft(
+        _ claimDiagnostic: HLSSegmentClaimDiagnostic,
+        streamID: Int64,
+        source: String,
+        streamType: StreamType
+    ) -> IngestDiagnosticDraft {
+        diagnostic(
+            streamID: streamID,
+            phase: .persist,
+            severity: claimDiagnostic.severity,
+            reason: claimDiagnostic.reason,
+            source: source,
+            streamType: streamType,
+            context: claimDiagnostic.context
+        )
+    }
+
+    private func finalizeHLSClaimIfNeeded(
+        _ claim: HLSProcessedClaim?,
+        persistence: IngestPersistence,
+        streamID: Int64,
+        runID: Int64,
+        chunkID: Int64
+    ) throws {
+        guard let mediaSequence = claim?.mediaSequence else { return }
+        try persistence.finalizeHLSSegmentClaim(
+            streamID: streamID,
+            mediaSequence: mediaSequence,
+            runID: runID,
+            chunkID: chunkID,
+            finalizedAt: now()
+        )
+    }
+
+    private func abandonHLSClaimIfNeeded(
+        _ claim: HLSProcessedClaim?,
+        persistence: IngestPersistence,
+        streamID: Int64,
+        runID: Int64
+    ) {
+        guard let mediaSequence = claim?.mediaSequence else { return }
+        try? persistence.abandonUnfinalizedHLSSegmentClaim(
+            streamID: streamID,
+            mediaSequence: mediaSequence,
+            runID: runID
+        )
     }
 
     private func diagnostic(

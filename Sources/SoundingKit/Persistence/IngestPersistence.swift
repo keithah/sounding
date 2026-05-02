@@ -273,6 +273,26 @@ public struct IngestPersistence {
         }
     }
 
+    public func abandonUnfinalizedHLSSegmentClaim(
+        streamID: Int64,
+        mediaSequence: Int,
+        runID: Int64
+    ) throws {
+        try database.write { db in
+            try db.execute(
+                sql: """
+                    DELETE FROM hls_ingest_segments
+                    WHERE stream_id = ?
+                      AND media_sequence = ?
+                      AND claimed_run_id = ?
+                      AND chunk_id IS NULL
+                      AND finalized_at IS NULL
+                    """,
+                arguments: [streamID, mediaSequence, runID]
+            )
+        }
+    }
+
     public func persistTimeline(_ timeline: IngestChunkTimeline) throws {
         try database.write { db in
             for segment in timeline.segments {
