@@ -431,7 +431,8 @@ public enum AppVerifyCheckEvaluator {
         diagnostics: [AppVerifyParsedDiagnosticEntry] = [],
         requiredDiagnosticEvents: [String],
         beforeMarker: String? = nil,
-        afterMarker: String? = nil
+        afterMarker: String? = nil,
+        artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         let diagnosticNames = diagnostics.map(\.event)
         let controlFacts = AppVerifyControlObservationFacts(
@@ -461,10 +462,11 @@ public enum AppVerifyCheckEvaluator {
                 name,
                 phase: phase,
                 reason: "Control observation for \(requestedAction) failed: \(reasons.joined(separator: "; ")).",
-                controlFacts: controlFacts
+                controlFacts: controlFacts,
+                artifacts: artifacts
             )
         }
-        return .pass(name, phase: phase, controlFacts: controlFacts)
+        return .pass(name, phase: phase, controlFacts: controlFacts, artifacts: artifacts)
     }
 
     private static func controlPhase(for name: AppVerifyCheckName) -> AppVerifyRuntimePhase {

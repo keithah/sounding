@@ -100,7 +100,7 @@ public struct AppVerifyFixtureRunner: Sendable {
                 timeline: timeline,
                 rollingBuffer: rollingBuffer,
                 diagnosticsLog: diagnosticsLog,
-                keepPlaybackRunningAfterIngestCompletes: false,
+                keepPlaybackRunningAfterIngestCompletes: true,
                 now: now
             )
         }
@@ -234,30 +234,224 @@ public struct AppVerifyFixtureRunner: Sendable {
         )
 
         let events = await runtime.events()
+        let eventRecorder = AppVerifyRuntimeEventRecorder()
+        let eventTask = Task {
+            for await event in events {
+                await eventRecorder.append(event)
+            }
+        }
+        defer { eventTask.cancel() }
+
+        var controlChecks: [AppVerifyCheckRecord] = []
         var timeoutPhase: AppVerifyRuntimePhase?
-        let terminal: AppVerifyCollectedRuntime
+        let targetVolume = 0.35
+
         do {
             try await runtime.start(streamID: stream.id)
-            terminal = try await collectTerminalEvent(
-                from: events,
-                timeoutSeconds: configuration.timeoutSeconds
+            try await waitForRuntimePhase(
+                .connecting,
+                in: eventRecorder,
+                streamID: stream.id,
+                minimumCount: 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "initial connecting"
             )
-        } catch let error as AppVerifyRunnerTimeoutError {
-            timeoutPhase = .runtimeStop
+            try await waitForRuntimePhase(
+                .running,
+                in: eventRecorder,
+                streamID: stream.id,
+                minimumCount: 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "initial running"
+            )
+            try await waitForDiagnosticEvent(
+                "playback.play.scheduled",
+                in: diagnostics,
+                minimumCount: 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "initial playback scheduling"
+            )
+
+            let firstControlMarker = "initial-running"
+            await runtime.setMuted(streamID: stream.id, isMuted: true)
+            let mutedSnapshot = try await waitForVolumeSnapshot(
+                streamID: stream.id,
+                in: volumeStore,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "mute applied"
+            ) { $0.isMuted && $0.effectiveVolume == 0 }
+            try await waitForDiagnosticEvent(
+                "playback.volume.applied",
+                in: diagnostics,
+                minimumCount: 2,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "mute playback volume diagnostic"
+            )
+            var diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+            controlChecks.append(controlCheck(
+                .playbackMuted,
+                requestedAction: "mute",
+                runtimePhase: .playbackControl,
+                timeline: await timeline.snapshot(),
+                volume: mutedSnapshot,
+                diagnostics: diagnosticsSnapshot,
+                requiredDiagnosticEvents: ["runtime.mute.requested", "playback.volume.applied", "runtime.event.published"],
+                beforeMarker: firstControlMarker,
+                afterMarker: "muted",
+                artifacts: diagnosticsArtifacts(diagnostics)
+            ))
+
+            await runtime.setVolume(streamID: stream.id, volume: targetVolume)
+            let volumeSnapshot = try await waitForVolumeSnapshot(
+                streamID: stream.id,
+                in: volumeStore,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "volume applied"
+            ) { abs($0.volume - targetVolume) < 0.001 && $0.isMuted }
+            try await waitForDiagnosticField(
+                event: "runtime.volume.requested",
+                field: "volume",
+                value: "0.350",
+                in: diagnostics,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "runtime volume diagnostic"
+            )
+            diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+            controlChecks.append(controlCheck(
+                .playbackVolumeChanged,
+                requestedAction: "volume",
+                runtimePhase: .playbackControl,
+                timeline: await timeline.snapshot(),
+                volume: volumeSnapshot,
+                diagnostics: diagnosticsSnapshot,
+                requiredDiagnosticEvents: ["runtime.volume.requested", "playback.volume.applied", "runtime.event.published"],
+                beforeMarker: "muted",
+                afterMarker: "volume-0.350",
+                artifacts: diagnosticsArtifacts(diagnostics)
+            ))
+
+            await runtime.setMuted(streamID: stream.id, isMuted: false)
+            let unmutedSnapshot = try await waitForVolumeSnapshot(
+                streamID: stream.id,
+                in: volumeStore,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "unmute applied"
+            ) { !$0.isMuted && abs(Double($0.effectiveVolume) - targetVolume) < 0.001 }
+            try await waitForDiagnosticField(
+                event: "runtime.mute.requested",
+                field: "isMuted",
+                value: "false",
+                in: diagnostics,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "runtime unmute diagnostic"
+            )
+            diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+            controlChecks.append(controlCheck(
+                .playbackUnmuted,
+                requestedAction: "unmute",
+                runtimePhase: .playbackControl,
+                timeline: await timeline.snapshot(),
+                volume: unmutedSnapshot,
+                diagnostics: diagnosticsSnapshot,
+                requiredDiagnosticEvents: ["runtime.mute.requested", "playback.volume.applied", "runtime.event.published"],
+                beforeMarker: "volume-0.350",
+                afterMarker: "unmuted",
+                artifacts: diagnosticsArtifacts(diagnostics)
+            ))
+
+            let stoppedBefore = await eventRecorder.count(streamID: stream.id, phase: .stopped)
+            await runtime.stop(streamID: stream.id)
+            try await waitForRuntimePhase(
+                .stopped,
+                in: eventRecorder,
+                streamID: stream.id,
+                minimumCount: stoppedBefore + 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "explicit stop"
+            )
+            try await waitForTimelineState(
+                .stopped,
+                in: timeline,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "player stop"
+            )
+            try await waitForDiagnosticEvent(
+                "playback.stop.applied",
+                in: diagnostics,
+                minimumCount: 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "playback stop diagnostic"
+            )
+            diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+            controlChecks.append(controlCheck(
+                .runtimeStopObserved,
+                requestedAction: "stop",
+                runtimePhase: .runtimeStop,
+                timeline: await timeline.snapshot(),
+                volume: await volumeStore.snapshot(streamID: stream.id),
+                diagnostics: diagnosticsSnapshot,
+                requiredDiagnosticEvents: ["runtime.stop.requested", "playback.stop.applied", "runtime.event.published"],
+                beforeMarker: "unmuted",
+                afterMarker: "stopped",
+                artifacts: diagnosticsArtifacts(diagnostics)
+            ))
+
+            let connectingBeforeRestart = await eventRecorder.count(streamID: stream.id, phase: .connecting)
+            let runningBeforeRestart = await eventRecorder.count(streamID: stream.id, phase: .running)
+            let scheduledBeforeRestart = diagnosticsSnapshot.eventNames.filter { $0 == "playback.play.scheduled" }.count
+            try await runtime.start(streamID: stream.id)
+            try await waitForRuntimePhase(
+                .connecting,
+                in: eventRecorder,
+                streamID: stream.id,
+                minimumCount: connectingBeforeRestart + 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "restart connecting"
+            )
+            try await waitForRuntimePhase(
+                .running,
+                in: eventRecorder,
+                streamID: stream.id,
+                minimumCount: runningBeforeRestart + 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "restart running"
+            )
+            try await waitForDiagnosticEvent(
+                "playback.play.scheduled",
+                in: diagnostics,
+                minimumCount: scheduledBeforeRestart + 1,
+                timeoutSeconds: configuration.timeoutSeconds,
+                phaseName: "restart playback scheduling"
+            )
+
             await runtime.stopAll()
             await player.stop(timeline: timeline)
-            let diagnosticsSnapshot = diagnosticsSnapshot(for: diagnostics)
-            runtimeFacts = AppVerifyRuntimeFacts(
-                phase: .runtimeStop,
-                diagnosticCount: diagnosticsSnapshot.eventNames.count + diagnosticsSnapshot.errorNames.count,
-                recentDiagnosticEvents: diagnosticsSnapshot.recentNames
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        } catch let error as AppVerifyRunnerTimeoutError {
+            timeoutPhase = phase(forTimeout: error)
+            await runtime.stopAll()
+            await player.stop(timeline: timeline)
+            let diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+            let eventsSnapshot = await eventRecorder.snapshot()
+            runtimeFacts = runtimeFactsFromCurrentState(
+                phase: timeoutPhase ?? .runtimeStop,
+                diagnosticsSnapshot: diagnosticsSnapshot,
+                timeline: await timeline.snapshot()
             )
-            checks.append(.pass(.runtimeStarted, phase: .runtimeStart, reason: "Runtime start was requested before timeout."))
-            checks.append(.fail(
-                .runtimeStopped,
-                phase: .runtimeStop,
-                reason: "Runtime timed out while waiting for terminal event: \(sanitize(error)).",
+            checks.append(contentsOf: baseRuntimeChecks(
+                events: eventsSnapshot,
+                diagnosticsSnapshot: diagnosticsSnapshot,
+                timeline: await timeline.snapshot(),
                 facts: runtimeFacts,
+                artifacts: diagnosticsArtifacts(diagnostics)
+            ))
+            checks.append(contentsOf: controlChecks)
+            checks.append(contentsOf: missingControlChecks(
+                excluding: controlChecks.map(\.name),
+                reason: "Control window timed out: \(sanitize(error)).",
+                diagnosticsSnapshot: diagnosticsSnapshot,
+                timeline: await timeline.snapshot(),
+                volume: await volumeStore.snapshot(streamID: stream.id),
                 artifacts: diagnosticsArtifacts(diagnostics)
             ))
             checks.append(diagnosticsCheck(snapshot: diagnosticsSnapshot, artifacts: diagnosticsArtifacts(diagnostics)))
@@ -267,22 +461,32 @@ public struct AppVerifyFixtureRunner: Sendable {
                 checks: checks,
                 runtimeFacts: runtimeFacts,
                 artifacts: artifacts + diagnosticsArtifacts(diagnostics),
-                metadata: ["timeoutPhase": timeoutPhase?.rawValue ?? "runtime_stop"]
+                metadata: ["timeoutPhase": timeoutPhase?.rawValue ?? "playback_control"]
             )
         } catch {
             await runtime.stopAll()
             await player.stop(timeline: timeline)
-            let diagnosticsSnapshot = diagnosticsSnapshot(for: diagnostics)
-            runtimeFacts = AppVerifyRuntimeFacts(
-                phase: .runtimeStart,
-                diagnosticCount: diagnosticsSnapshot.eventNames.count + diagnosticsSnapshot.errorNames.count,
-                recentDiagnosticEvents: diagnosticsSnapshot.recentNames
+            let diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+            let eventsSnapshot = await eventRecorder.snapshot()
+            runtimeFacts = runtimeFactsFromCurrentState(
+                phase: .playbackControl,
+                diagnosticsSnapshot: diagnosticsSnapshot,
+                timeline: await timeline.snapshot()
             )
-            checks.append(.fail(
-                .runtimeStarted,
-                phase: .runtimeStart,
-                reason: "Runtime start or event collection failed: \(sanitize(error)).",
+            checks.append(contentsOf: baseRuntimeChecks(
+                events: eventsSnapshot,
+                diagnosticsSnapshot: diagnosticsSnapshot,
+                timeline: await timeline.snapshot(),
                 facts: runtimeFacts,
+                artifacts: diagnosticsArtifacts(diagnostics)
+            ))
+            checks.append(contentsOf: controlChecks)
+            checks.append(contentsOf: missingControlChecks(
+                excluding: controlChecks.map(\.name),
+                reason: "Control window failed: \(sanitize(error)).",
+                diagnosticsSnapshot: diagnosticsSnapshot,
+                timeline: await timeline.snapshot(),
+                volume: await volumeStore.snapshot(streamID: stream.id),
                 artifacts: diagnosticsArtifacts(diagnostics)
             ))
             checks.append(diagnosticsCheck(snapshot: diagnosticsSnapshot, artifacts: diagnosticsArtifacts(diagnostics)))
@@ -295,37 +499,24 @@ public struct AppVerifyFixtureRunner: Sendable {
             )
         }
 
-        await runtime.stopAll()
-        await player.stop(timeline: timeline)
-
-        let diagnosticsSnapshot = diagnosticsSnapshot(for: diagnostics)
-        let result = terminal.terminalEvent.result
-        let eventPhases = terminal.events.map(\.phase.statusPhase.rawValue)
-        let playerTimeline = result?.playerTimeline
-        let decodedFrameCount = playerTimeline?.decodedFrameCount ?? 0
-        let scheduledBuffers = scheduledBufferCount(from: playerTimeline)
-        runtimeFacts = AppVerifyRuntimeFacts(
-            phase: terminal.terminalEvent.phase.statusPhase == .error ? .runtimeStop : .diagnostics,
-            processedChunks: result?.processedChunks ?? 0,
-            decodedChunks: decodedFrameCount,
-            scheduledBuffers: scheduledBuffers,
-            diagnosticCount: diagnosticsSnapshot.eventNames.count + diagnosticsSnapshot.errorNames.count,
-            recentDiagnosticEvents: diagnosticsSnapshot.recentNames,
-            timelineSnapshotFields: timelineFields(playerTimeline)
+        let diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+        let eventsSnapshot = await eventRecorder.snapshot()
+        let timelineSnapshot = await timeline.snapshot()
+        let eventPhases = eventsSnapshot.map(\.phase.statusPhase.rawValue)
+        runtimeFacts = runtimeFactsFromCurrentState(
+            phase: .diagnostics,
+            diagnosticsSnapshot: diagnosticsSnapshot,
+            timeline: timelineSnapshot
         )
 
-        checks.append(runtimeStartedCheck(events: terminal.events, facts: runtimeFacts))
-        checks.append(AppVerifyCheckEvaluator.decodeCompleted(
-            processedChunks: result?.processedChunks ?? 0,
-            decodedChunks: decodedFrameCount,
-            diagnosticEvents: diagnosticsSnapshot.recentNames
+        checks.append(contentsOf: baseRuntimeChecks(
+            events: eventsSnapshot,
+            diagnosticsSnapshot: diagnosticsSnapshot,
+            timeline: timelineSnapshot,
+            facts: runtimeFacts,
+            artifacts: diagnosticsArtifacts(diagnostics)
         ))
-        checks.append(playbackCheck(
-            scheduledBuffers: scheduledBuffers,
-            diagnostics: diagnosticsSnapshot,
-            facts: runtimeFacts
-        ))
-        checks.append(runtimeStoppedCheck(terminal: terminal.terminalEvent, facts: runtimeFacts))
+        checks.append(contentsOf: controlChecks)
         checks.append(diagnosticsCheck(snapshot: diagnosticsSnapshot, artifacts: diagnosticsArtifacts(diagnostics)))
 
         diagnostics.recordEvent(
@@ -390,6 +581,216 @@ public struct AppVerifyFixtureRunner: Sendable {
         ]
     }
 
+    private func baseRuntimeChecks(
+        events: [AppStreamRuntimeEvent],
+        diagnosticsSnapshot: AppVerifyDiagnosticsSnapshot,
+        timeline: AppPlayerTimelineSnapshot,
+        facts: AppVerifyRuntimeFacts,
+        artifacts: [AppVerifyRedactedArtifact]
+    ) -> [AppVerifyCheckRecord] {
+        let stoppedEvent = events.last { $0.phase.statusPhase == .stopped }
+            ?? AppStreamRuntimeEvent(streamID: timeline.streamID ?? -1, phase: .stopped, message: "No stopped event recorded.")
+        return [
+            runtimeStartedCheck(events: events, facts: facts),
+            AppVerifyCheckEvaluator.decodeCompleted(
+                processedChunks: processedChunks(from: diagnosticsSnapshot),
+                decodedChunks: timeline.decodedFrameCount,
+                diagnosticEvents: diagnosticsSnapshot.recentNames
+            ),
+            playbackCheck(
+                scheduledBuffers: scheduledBufferCount(from: timeline),
+                diagnostics: diagnosticsSnapshot,
+                facts: facts
+            ),
+            runtimeStoppedCheck(terminal: stoppedEvent, timeline: timeline, facts: facts),
+        ]
+    }
+
+    private func runtimeFactsFromCurrentState(
+        phase: AppVerifyRuntimePhase,
+        diagnosticsSnapshot: AppVerifyDiagnosticsSnapshot,
+        timeline: AppPlayerTimelineSnapshot
+    ) -> AppVerifyRuntimeFacts {
+        AppVerifyRuntimeFacts(
+            phase: phase,
+            processedChunks: processedChunks(from: diagnosticsSnapshot),
+            decodedChunks: timeline.decodedFrameCount,
+            scheduledBuffers: scheduledBufferCount(from: timeline),
+            diagnosticCount: diagnosticsSnapshot.eventNames.count + diagnosticsSnapshot.errorNames.count,
+            recentDiagnosticEvents: diagnosticsSnapshot.recentNames,
+            timelineSnapshotFields: timelineFields(timeline)
+        )
+    }
+
+    private func processedChunks(from snapshot: AppVerifyDiagnosticsSnapshot) -> Int {
+        snapshot.eventEntries
+            .last { $0.event == "runner.ingest.completed" }?
+            .fields["processedChunks"]
+            .flatMap(Int.init) ?? 0
+    }
+
+    private func controlCheck(
+        _ name: AppVerifyCheckName,
+        requestedAction: String,
+        runtimePhase: AppVerifyRuntimePhase,
+        timeline: AppPlayerTimelineSnapshot,
+        volume: AppPlaybackVolumeSnapshot,
+        diagnostics: AppVerifyDiagnosticsSnapshot,
+        requiredDiagnosticEvents: [String],
+        beforeMarker: String,
+        afterMarker: String,
+        artifacts: [AppVerifyRedactedArtifact]
+    ) -> AppVerifyCheckRecord {
+        AppVerifyCheckEvaluator.controlObserved(
+            name,
+            requestedAction: requestedAction,
+            observedRuntimePhase: runtimePhase,
+            timelineState: timelineStateName(timeline.state),
+            volume: volume.volume,
+            muted: volume.isMuted,
+            effectiveVolume: Double(volume.effectiveVolume),
+            diagnostics: diagnostics.recentEntries,
+            requiredDiagnosticEvents: requiredDiagnosticEvents,
+            beforeMarker: beforeMarker,
+            afterMarker: afterMarker,
+            artifacts: artifacts
+        )
+    }
+
+    private func missingControlChecks(
+        excluding completedNames: [AppVerifyCheckName],
+        reason: String,
+        diagnosticsSnapshot: AppVerifyDiagnosticsSnapshot,
+        timeline: AppPlayerTimelineSnapshot,
+        volume: AppPlaybackVolumeSnapshot,
+        artifacts: [AppVerifyRedactedArtifact]
+    ) -> [AppVerifyCheckRecord] {
+        let completed = Set(completedNames)
+        return AppVerifyCheckName.s02ControlRequired.filter { !completed.contains($0) }.map { name in
+            let action: String
+            switch name {
+            case .playbackMuted: action = "mute"
+            case .playbackUnmuted: action = "unmute"
+            case .playbackVolumeChanged: action = "volume"
+            case .runtimeStopObserved: action = "stop"
+            case .runtimeRestartObserved: action = "restart"
+            default: action = name.rawValue
+            }
+            return .fail(
+                name,
+                phase: controlPhase(for: name),
+                reason: reason,
+                controlFacts: AppVerifyControlObservationFacts(
+                    requestedAction: action,
+                    observedRuntimePhase: controlPhase(for: name),
+                    timelineState: timelineStateName(timeline.state),
+                    volume: volume.volume,
+                    muted: volume.isMuted,
+                    effectiveVolume: Double(volume.effectiveVolume),
+                    diagnosticEventNames: diagnosticsSnapshot.recentNames,
+                    diagnostics: diagnosticsSnapshot.recentEntries
+                ),
+                artifacts: artifacts
+            )
+        }
+    }
+
+    private func waitForRuntimePhase(
+        _ phase: AppStreamRuntimeStatusPhase,
+        in recorder: AppVerifyRuntimeEventRecorder,
+        streamID: Int64,
+        minimumCount: Int,
+        timeoutSeconds: Double,
+        phaseName: String
+    ) async throws {
+        try await waitUntil(timeoutSeconds: timeoutSeconds, phaseName: phaseName) {
+            await recorder.count(streamID: streamID, phase: phase) >= minimumCount
+        }
+    }
+
+    private func waitForDiagnosticEvent(
+        _ event: String,
+        in diagnostics: AppRuntimeDiagnosticsLog,
+        minimumCount: Int,
+        timeoutSeconds: Double,
+        phaseName: String
+    ) async throws {
+        try await waitUntil(timeoutSeconds: timeoutSeconds, phaseName: phaseName) {
+            diagnosticsSnapshot(for: diagnostics).eventNames.filter { $0 == event }.count >= minimumCount
+        }
+    }
+
+    private func waitForDiagnosticField(
+        event: String,
+        field: String,
+        value: String,
+        in diagnostics: AppRuntimeDiagnosticsLog,
+        timeoutSeconds: Double,
+        phaseName: String
+    ) async throws {
+        try await waitUntil(timeoutSeconds: timeoutSeconds, phaseName: phaseName) {
+            diagnosticsSnapshot(for: diagnostics).eventEntries.contains { entry in
+                entry.event == event && entry.fields[field] == value
+            }
+        }
+    }
+
+    private func waitForVolumeSnapshot(
+        streamID: Int64,
+        in store: AppPlaybackVolumeStore,
+        timeoutSeconds: Double,
+        phaseName: String,
+        predicate: @escaping @Sendable (AppPlaybackVolumeSnapshot) -> Bool
+    ) async throws -> AppPlaybackVolumeSnapshot {
+        var latest = await store.snapshot(streamID: streamID)
+        try await waitUntil(timeoutSeconds: timeoutSeconds, phaseName: phaseName) {
+            latest = await store.snapshot(streamID: streamID)
+            return predicate(latest)
+        }
+        return latest
+    }
+
+    private func waitForTimelineState(
+        _ state: AppPlayerState,
+        in timeline: AppPlayerTimelineClock,
+        timeoutSeconds: Double,
+        phaseName: String
+    ) async throws {
+        try await waitUntil(timeoutSeconds: timeoutSeconds, phaseName: phaseName) {
+            await timeline.snapshot().state == state
+        }
+    }
+
+    private func waitUntil(
+        timeoutSeconds: Double,
+        phaseName: String,
+        predicate: @escaping () async -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if await predicate() { return }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        throw AppVerifyRunnerTimeoutError(phase: phaseName)
+    }
+
+    private func phase(forTimeout error: AppVerifyRunnerTimeoutError) -> AppVerifyRuntimePhase {
+        if error.phase.contains("restart") { return .runtimeRestart }
+        if error.phase.contains("stop") { return .runtimeStop }
+        if error.phase.contains("playback") || error.phase.contains("volume") || error.phase.contains("mute") {
+            return .playbackControl
+        }
+        return .runtimeStart
+    }
+
+    private func controlPhase(for name: AppVerifyCheckName) -> AppVerifyRuntimePhase {
+        switch name {
+        case .runtimeStopObserved: return .runtimeStop
+        case .runtimeRestartObserved: return .runtimeRestart
+        default: return .playbackControl
+        }
+    }
+
     private func collectTerminalEvent(
         from stream: AsyncStream<AppStreamRuntimeEvent>,
         timeoutSeconds: Double
@@ -435,14 +836,18 @@ public struct AppVerifyFixtureRunner: Sendable {
         return .pass(.runtimeStarted, phase: .runtimeStart, facts: facts)
     }
 
-    private func runtimeStoppedCheck(terminal: AppStreamRuntimeEvent, facts: AppVerifyRuntimeFacts) -> AppVerifyCheckRecord {
+    private func runtimeStoppedCheck(
+        terminal: AppStreamRuntimeEvent,
+        timeline: AppPlayerTimelineSnapshot,
+        facts: AppVerifyRuntimeFacts
+    ) -> AppVerifyCheckRecord {
         switch terminal.phase {
         case .stopped:
-            guard terminal.result != nil else {
+            guard timeline.state == .stopped else {
                 return .fail(
                     .runtimeStopped,
                     phase: .runtimeStop,
-                    reason: "Runtime stopped without a terminal AppStreamRuntimeResult.",
+                    reason: "Runtime stopped but player timeline state was \(timelineStateName(timeline.state)).",
                     facts: facts
                 )
             }
@@ -578,17 +983,13 @@ public struct AppVerifyFixtureRunner: Sendable {
         timeline?.decodedFrameCount ?? 0
     }
 
+    private func scheduledBufferCount(from timeline: AppPlayerTimelineSnapshot) -> Int {
+        timeline.decodedFrameCount
+    }
+
     private func timelineFields(_ timeline: AppPlayerTimelineSnapshot?) -> [String: String] {
         guard let timeline else { return [:] }
-        let state: String
-        switch timeline.state {
-        case .idle: state = "idle"
-        case .buffering: state = "buffering"
-        case .playing: state = "playing"
-        case .paused: state = "paused"
-        case .stopped: state = "stopped"
-        case .failed(let message): state = "failed: \(message)"
-        }
+        let state = timelineStateName(timeline.state)
         return [
             "streamID": timeline.streamID.map(String.init) ?? "nil",
             "state": state,
@@ -602,8 +1003,35 @@ public struct AppVerifyFixtureRunner: Sendable {
         ]
     }
 
+    private func timelineStateName(_ state: AppPlayerState) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .buffering: return "buffering"
+        case .playing: return "playing"
+        case .paused: return "paused"
+        case .stopped: return "stopped"
+        case .failed(let message): return "failed: \(message)"
+        }
+    }
+
     private func sanitize(_ error: any Error) -> String {
         AppVerifyEvidenceSanitizer.redact(String(describing: error))
+    }
+}
+
+private actor AppVerifyRuntimeEventRecorder {
+    private var events: [AppStreamRuntimeEvent] = []
+
+    func append(_ event: AppStreamRuntimeEvent) {
+        events.append(event)
+    }
+
+    func count(streamID: Int64, phase: AppStreamRuntimeStatusPhase) -> Int {
+        events.filter { $0.streamID == streamID && $0.phase.statusPhase == phase }.count
+    }
+
+    func snapshot() -> [AppStreamRuntimeEvent] {
+        events
     }
 }
 
