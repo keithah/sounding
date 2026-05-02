@@ -192,6 +192,55 @@ final class AppVerifyLiveRunnerTests: XCTestCase {
         assertSanitized(try evidenceJSON(evidence))
     }
 
+    func testDefaultExecutorAdvertisesRealRuntimeFactories() {
+        let executor = AppVerifyAVFoundationLiveStreamExecutor()
+
+        XCTAssertEqual(executor.factoryConfiguration.database, "SoundingDatabase")
+        XCTAssertEqual(executor.factoryConfiguration.registry, "StreamRegistry")
+        XCTAssertEqual(executor.factoryConfiguration.runtime, "StreamIngestAppRuntimeRunner/AppStreamRuntimeService")
+        XCTAssertEqual(executor.factoryConfiguration.decoder, "AVFoundationAudioDecoder")
+        XCTAssertEqual(executor.factoryConfiguration.player, "AVFoundationAppPCMPlayerAdapter")
+        XCTAssertEqual(executor.factoryConfiguration.rollingBuffer, "RollingPCMBuffer")
+    }
+
+    func testDefaultExecutorRejectsUnsupportedResolvedTypesBeforeDatabaseOrRuntime() async throws {
+        let root = temporaryRoot("unsupported-default")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let streamDirectory = root.appendingPathComponent("stream", isDirectory: true)
+        try FileManager.default.createDirectory(at: streamDirectory, withIntermediateDirectories: true)
+        let executor = AppVerifyAVFoundationLiveStreamExecutor(
+            databaseFactory: { _ in
+                XCTFail("Unsupported live stream types must not open SoundingDatabase")
+                throw FakeError("database should not open")
+            },
+            runtimeFactory: { _, _, _, _, _, _, _ in
+                XCTFail("Unsupported live stream types must not reach AppStreamRuntimeService")
+                return FakeRuntimeController()
+            }
+        )
+        let unsupportedStreams = [
+            AppVerifyLiveStreamSpec(id: "auto", source: "https://example.test/radio", streamType: .auto),
+            AppVerifyLiveStreamSpec(id: "mpegts", source: "udp://239.0.0.1:1234", streamType: .mpegts),
+            AppVerifyLiveStreamSpec(id: "udp", source: "udp://239.0.0.1:1234", streamType: .udp),
+        ]
+
+        for stream in unsupportedStreams {
+            do {
+                _ = try await executor.execute(AppVerifyLiveStreamExecutionRequest(
+                    runID: "unsupported-run",
+                    runDirectory: root,
+                    streamDirectory: streamDirectory,
+                    stream: stream,
+                    diagnosticsLogURL: streamDirectory.appendingPathComponent("live-diagnostics.jsonl"),
+                    generatedAt: "2026-05-02T18:00:00Z"
+                ))
+                XCTFail("Expected unsupported stream \(stream.id) to throw before runtime start")
+            } catch {
+                XCTAssertTrue(String(describing: error).contains("unsupported resolved stream type"), String(describing: error))
+            }
+        }
+    }
+
     func testRunnerExecutesStreamsSequentiallyAndBoundsFactsForTenXInput() async throws {
         let root = temporaryRoot("sequential")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -370,6 +419,28 @@ private extension AppVerifyLiveStreamExecutionResult {
             fields: fields
         )
     }
+}
+
+private struct FakeRuntimeController: AppStreamRuntimeControlling {
+    func events() async -> AsyncStream<AppStreamRuntimeEvent> { AsyncStream { $0.finish() } }
+    func start(streamID: Int64) async throws {}
+    func pause() async {}
+    func pause(streamID: Int64) async {}
+    func resume() async {}
+    func resume(streamID: Int64) async {}
+    func stop() async {}
+    func stop(streamID: Int64) async {}
+    func stopAll() async {}
+    func suspendForSystemSleep(reason: String) async {}
+    func recoverFromSystemWake(reason: String) async {}
+    func setVolume(streamID: Int64, volume: Double) async {}
+    func setMuted(streamID: Int64, isMuted: Bool) async {}
+    func seek(to seconds: Double) async {}
+    func seekToLive() async {}
+    func scrubBackward(seconds: Double) async {}
+    func snapshot() async -> AppStreamRuntimeEvent? { nil }
+    func snapshot(streamID: Int64) async -> AppStreamRuntimeEvent? { nil }
+    func snapshots() async -> [AppStreamRuntimeEvent] { [] }
 }
 
 private struct FakeError: Error, CustomStringConvertible, Sendable {
