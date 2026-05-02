@@ -144,6 +144,236 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
         assertSanitized(line, forbiddenLiteral: "private-fragment")
     }
 
+
+    func testAppVerifyHelpAdvertisesLiveSubcommand() throws {
+        let result = try CLIRunner().runSounding(arguments: ["app-verify", "--help"])
+
+        XCTAssertEqual(result.exitCode, 0, result.diagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("fixture"), result.diagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("live"), result.diagnosticSummary)
+    }
+
+    func testLiveHelpAdvertisesConfigAndJSONOptions() throws {
+        let result = try CLIRunner().runSounding(arguments: ["app-verify", "live", "--help"])
+
+        XCTAssertEqual(result.exitCode, 0, result.diagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--config"), result.diagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--json"), result.diagnosticSummary)
+    }
+
+    func testLiveMissingConfigUsesArgumentParserFailure() throws {
+        let result = try CLIRunner().runSounding(arguments: ["app-verify", "live", "--json", "evidence.json"])
+
+        XCTAssertNotEqual(result.exitCode, 0, result.diagnosticSummary)
+        XCTAssertEqual(result.stdoutLineCount, 0, result.diagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("Missing expected argument"), result.diagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("--config"), result.diagnosticSummary)
+    }
+
+    func testLiveMissingJSONUsesArgumentParserFailure() throws {
+        let result = try CLIRunner().runSounding(arguments: ["app-verify", "live", "--config", "app-verify-live.example.json"])
+
+        XCTAssertNotEqual(result.exitCode, 0, result.diagnosticSummary)
+        XCTAssertEqual(result.stdoutLineCount, 0, result.diagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("Missing expected argument"), result.diagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("--json"), result.diagnosticSummary)
+    }
+
+    func testLiveMissingConfigPathFailsWithFixedRedactedMessage() async throws {
+        let secretConfigPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sounding-live-user:pass@example.test?token=synthetic-secret#frag.json")
+            .path
+        let evidenceURL = temporaryEvidenceURL()
+        defer { try? FileManager.default.removeItem(at: evidenceURL) }
+        let capture = OutputCapture()
+        let adapter = AppVerifyLiveCommandAdapter(
+            standardOutput: { capture.stdout($0) },
+            standardError: { capture.stderr($0) }
+        )
+
+        let exitCode = await adapter.run(configPath: secretConfigPath, jsonPath: evidenceURL.path)
+
+        XCTAssertEqual(exitCode, .failure)
+        XCTAssertEqual(capture.stdoutText, "")
+        XCTAssertTrue(capture.stderrText.contains("could not read redacted config path"), capture.stderrText)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: evidenceURL.path), capture.stderrText)
+        assertSanitized(capture.stderrText, forbiddenLiteral: secretConfigPath)
+        assertSanitized(capture.stderrText, forbiddenLiteral: "user:pass")
+        assertSanitized(capture.stderrText, forbiddenLiteral: "synthetic-secret")
+        assertSanitized(capture.stderrText, forbiddenLiteral: "#frag")
+    }
+
+    func testLiveMalformedConfigRedactsSecretLikeJSON() async throws {
+        let secretSource = "https://user:pass@example.test/live.m3u8?token=synthetic-secret#frag"
+        let evidenceURL = temporaryEvidenceURL()
+        defer { try? FileManager.default.removeItem(at: evidenceURL) }
+        let capture = OutputCapture()
+        let adapter = AppVerifyLiveCommandAdapter(
+            configReader: { _ in Data("{ \"streams\": [ { \"source\": \"\(secretSource)\" ".utf8) },
+            runnerFactory: { _ in FakeLiveRunner(evidence: Self.livePassingEvidence(secretSource: secretSource)) },
+            standardOutput: { capture.stdout($0) },
+            standardError: { capture.stderr($0) }
+        )
+
+        let exitCode = await adapter.run(configPath: "/tmp/private-config.json", jsonPath: evidenceURL.path)
+
+        XCTAssertEqual(exitCode, .failure)
+        XCTAssertEqual(capture.stdoutText, "")
+        XCTAssertTrue(capture.stderrText.contains("malformed JSON in redacted config path"), capture.stderrText)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: evidenceURL.path), capture.stderrText)
+        assertSanitized(capture.stderrText, forbiddenLiteral: secretSource)
+        assertSanitized(capture.stderrText, forbiddenLiteral: "user:pass")
+        assertSanitized(capture.stderrText, forbiddenLiteral: "synthetic-secret")
+        assertSanitized(capture.stderrText, forbiddenLiteral: "private-config.json")
+    }
+
+    func testLiveValidationFailureRedactsSourceAndConfigPath() async throws {
+        let secretSource = "https://user:pass@example.test/radio?token=synthetic-secret#frag"
+        let secretConfigPath = "/tmp/sounding-live-user:pass@example.test?token=synthetic-secret#frag.json"
+        let evidenceURL = temporaryEvidenceURL()
+        defer { try? FileManager.default.removeItem(at: evidenceURL) }
+        let capture = OutputCapture()
+        let adapter = AppVerifyLiveCommandAdapter(
+            configReader: { _ in Data(Self.liveConfigJSON(source: secretSource, streamType: "auto").utf8) },
+            runnerFactory: { _ in FakeLiveRunner(evidence: Self.livePassingEvidence(secretSource: secretSource)) },
+            standardOutput: { capture.stdout($0) },
+            standardError: { capture.stderr($0) }
+        )
+
+        let exitCode = await adapter.run(configPath: secretConfigPath, jsonPath: evidenceURL.path)
+
+        XCTAssertEqual(exitCode, .failure)
+        XCTAssertEqual(capture.stdoutText, "")
+        XCTAssertTrue(capture.stderrText.contains("App verification live configuration failed"), capture.stderrText)
+        XCTAssertTrue(capture.stderrText.contains("auto stream type could not be resolved"), capture.stderrText)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: evidenceURL.path), capture.stderrText)
+        assertSanitized(capture.stderrText, forbiddenLiteral: secretSource)
+        assertSanitized(capture.stderrText, forbiddenLiteral: secretConfigPath)
+        assertSanitized(capture.stderrText, forbiddenLiteral: "user:pass")
+        assertSanitized(capture.stderrText, forbiddenLiteral: "synthetic-secret")
+    }
+
+    func testLivePassingEvidenceWritesJSONAndExitsZero() async throws {
+        let secretSource = "https://user:pass@example.test/live.m3u8?token=synthetic-secret#frag"
+        let secretConfigPath = "/tmp/sounding-live-config-user:pass@example.test?token=synthetic-secret#frag.json"
+        let evidenceURL = temporaryEvidenceURL()
+        defer { try? FileManager.default.removeItem(at: evidenceURL) }
+        let capture = OutputCapture()
+        let adapter = AppVerifyLiveCommandAdapter(
+            configReader: { _ in Data(Self.liveConfigJSON(source: secretSource, streamType: "hls").utf8) },
+            runnerFactory: { configuration in
+                XCTAssertEqual(configuration.configPath, secretConfigPath)
+                return FakeLiveRunner(evidence: Self.livePassingEvidence(secretSource: secretSource))
+            },
+            standardOutput: { capture.stdout($0) },
+            standardError: { capture.stderr($0) }
+        )
+
+        let exitCode = await adapter.run(configPath: secretConfigPath, jsonPath: evidenceURL.path)
+
+        XCTAssertEqual(exitCode, .success)
+        XCTAssertEqual(capture.stderrText, "")
+        XCTAssertEqual(capture.stdoutLines.count, 1)
+        XCTAssertTrue(capture.stdoutText.contains("app verification passed"), capture.stdoutText)
+        XCTAssertTrue(capture.stdoutText.contains("status=pass"), capture.stdoutText)
+        assertSanitized(capture.stdoutText, forbiddenLiteral: secretSource)
+        assertSanitized(capture.stdoutText, forbiddenLiteral: secretConfigPath)
+        assertSanitized(capture.stdoutText, forbiddenLiteral: evidenceURL.path)
+
+        let evidenceText = try String(contentsOf: evidenceURL)
+        XCTAssertTrue(evidenceText.contains("live_stream_registered"), evidenceText)
+        XCTAssertTrue(evidenceText.contains("livePlayback" ) || evidenceText.contains("live_playback_scheduled"), evidenceText)
+        XCTAssertTrue(evidenceText.contains("[redacted"), evidenceText)
+        assertSanitized(evidenceText, forbiddenLiteral: secretSource)
+        assertSanitized(evidenceText, forbiddenLiteral: secretConfigPath)
+        assertSanitized(evidenceText, forbiddenLiteral: evidenceURL.path)
+        assertSanitized(evidenceText, forbiddenLiteral: "user:pass")
+        assertSanitized(evidenceText, forbiddenLiteral: "synthetic-secret")
+        let decoded = try JSONDecoder().decode(AppVerifyEvidence.self, from: Data(evidenceText.utf8))
+        XCTAssertEqual(decoded.summary.status, .pass)
+    }
+
+    func testLiveWarningEvidenceWritesJSONAndExitsZero() async throws {
+        let secretSource = "https://user:pass@example.test/live.m3u8?token=synthetic-secret#frag"
+        let evidenceURL = temporaryEvidenceURL()
+        defer { try? FileManager.default.removeItem(at: evidenceURL) }
+        let capture = OutputCapture()
+        let adapter = AppVerifyLiveCommandAdapter(
+            configReader: { _ in Data(Self.liveConfigJSON(source: secretSource, streamType: "hls").utf8) },
+            runnerFactory: { _ in FakeLiveRunner(evidence: Self.liveWarningEvidence(secretSource: secretSource)) },
+            standardOutput: { capture.stdout($0) },
+            standardError: { capture.stderr($0) }
+        )
+
+        let exitCode = await adapter.run(configPath: "/tmp/private-config.json", jsonPath: evidenceURL.path)
+
+        XCTAssertEqual(exitCode, .success)
+        XCTAssertEqual(capture.stderrText, "")
+        XCTAssertEqual(capture.stdoutLines.count, 1)
+        XCTAssertTrue(capture.stdoutText.contains("app verification warned"), capture.stdoutText)
+        XCTAssertTrue(capture.stdoutText.contains("status=warn"), capture.stdoutText)
+        XCTAssertTrue(capture.stdoutText.contains("warnings=1"), capture.stdoutText)
+        let decoded = try JSONDecoder().decode(AppVerifyEvidence.self, from: Data(contentsOf: evidenceURL))
+        XCTAssertEqual(decoded.summary.status, .warn)
+        assertSanitized(capture.stdoutText, forbiddenLiteral: secretSource)
+    }
+
+    func testLiveFailedEvidenceWritesJSONThenReturnsNonZeroWithFailedCheckNames() async throws {
+        let secretSource = "https://user:pass@example.test/live.m3u8?token=synthetic-secret#frag"
+        let evidenceURL = temporaryEvidenceURL()
+        defer { try? FileManager.default.removeItem(at: evidenceURL) }
+        let capture = OutputCapture()
+        let adapter = AppVerifyLiveCommandAdapter(
+            configReader: { _ in Data(Self.liveConfigJSON(source: secretSource, streamType: "hls").utf8) },
+            runnerFactory: { _ in FakeLiveRunner(evidence: Self.liveFailedEvidence(secretSource: secretSource)) },
+            standardOutput: { capture.stdout($0) },
+            standardError: { capture.stderr($0) }
+        )
+
+        let exitCode = await adapter.run(configPath: "/tmp/private-config.json", jsonPath: evidenceURL.path)
+
+        XCTAssertEqual(exitCode, .failure)
+        XCTAssertEqual(capture.stderrText, "")
+        XCTAssertEqual(capture.stdoutLines.count, 1)
+        XCTAssertTrue(capture.stdoutText.contains("app verification failed"), capture.stdoutText)
+        XCTAssertTrue(capture.stdoutText.contains("requiredFailures=1"), capture.stdoutText)
+        XCTAssertTrue(capture.stdoutText.contains("live_decode_opened:live_decode:required"), capture.stdoutText)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: evidenceURL.path), capture.stdoutText)
+        let decoded = try JSONDecoder().decode(AppVerifyEvidence.self, from: Data(contentsOf: evidenceURL))
+        XCTAssertEqual(decoded.summary.status, .fail)
+        assertSanitized(capture.stdoutText, forbiddenLiteral: secretSource)
+        assertSanitized(capture.stdoutText, forbiddenLiteral: evidenceURL.path)
+    }
+
+    func testLiveUnwritableJSONPathFailsWithoutPathLeakageOrPartialEvidence() async throws {
+        let secretSource = "https://user:pass@example.test/live.m3u8?token=synthetic-secret#frag"
+        let secretDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sounding-app-verify-live-user:pass@example.test?token=synthetic-secret#frag-")
+            .appendingPathExtension(UUID().uuidString)
+        let evidenceURL = secretDirectory.appendingPathComponent("evidence.json")
+        defer { try? FileManager.default.removeItem(at: secretDirectory) }
+        let capture = OutputCapture()
+        let adapter = AppVerifyLiveCommandAdapter(
+            configReader: { _ in Data(Self.liveConfigJSON(source: secretSource, streamType: "hls").utf8) },
+            runnerFactory: { _ in FakeLiveRunner(evidence: Self.livePassingEvidence(secretSource: secretSource)) },
+            standardOutput: { capture.stdout($0) },
+            standardError: { capture.stderr($0) }
+        )
+
+        let exitCode = await adapter.run(configPath: "/tmp/private-config.json", jsonPath: evidenceURL.path)
+
+        XCTAssertEqual(exitCode, .failure)
+        XCTAssertEqual(capture.stdoutText, "")
+        XCTAssertTrue(capture.stderrText.contains("App verification output failed"), capture.stderrText)
+        XCTAssertTrue(capture.stderrText.contains("redacted output path"), capture.stderrText)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: evidenceURL.path), capture.stderrText)
+        assertSanitized(capture.stderrText, forbiddenLiteral: evidenceURL.path)
+        assertSanitized(capture.stderrText, forbiddenLiteral: secretDirectory.path)
+        assertSanitized(capture.stderrText, forbiddenLiteral: "user:pass")
+        assertSanitized(capture.stderrText, forbiddenLiteral: "synthetic-secret")
+        assertSanitized(capture.stderrText, forbiddenLiteral: "evidence.json")
+    }
+
     /// Manual real-device proof for S03: run
     /// `swift run sounding app-verify fixture --json /tmp/sounding-app-verify-s03.json`
     /// on a macOS host with a usable AVFoundation output device; failed evidence should still be written
@@ -209,6 +439,137 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
                 AppVerifyRedactedArtifact(kind: "runtime-events", path: "/tmp/sounding-app-verify/runtime-events.jsonl"),
             ],
             metadata: ["source": secretSource]
+        )
+    }
+
+    private static func liveConfigJSON(source: String, streamType: String) -> String {
+        """
+        {
+          "streams": [
+            {
+              "id": "main-live",
+              "source": "\(source)",
+              "streamType": "\(streamType)",
+              "timeoutSeconds": 0.1,
+              "maxChunks": 1,
+              "required": true,
+              "expectations": {
+                "transcript": "warn",
+                "metadata": "warn"
+              }
+            }
+          ]
+        }
+        """
+    }
+
+    private static func livePassingEvidence(secretSource: String) -> AppVerifyEvidence {
+        AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "live-run-token=synthetic-secret",
+            checks: liveBaseChecks(secretSource: secretSource),
+            artifacts: [
+                AppVerifyRedactedArtifact(kind: "live-config", path: "/tmp/sounding-live-config-user:pass@example.test?token=synthetic-secret#frag.json"),
+                AppVerifyRedactedArtifact(kind: "stream-source", path: secretSource),
+            ],
+            metadata: ["configPath": "/tmp/sounding-live-config-user:pass@example.test?token=synthetic-secret#frag.json"]
+        )
+    }
+
+    private static func liveWarningEvidence(secretSource: String) -> AppVerifyEvidence {
+        var checks = liveBaseChecks(secretSource: secretSource)
+        checks.append(AppVerifyCheckEvaluator.liveTranscriptExpectation(
+            observedCount: 0,
+            expectation: .warn,
+            required: true,
+            streamID: "main-live",
+            source: secretSource,
+            facts: liveFacts(secretSource: secretSource, transcriptCount: 0, metadataCount: 1)
+        ))
+        return AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "live-warn-token=synthetic-secret",
+            checks: checks,
+            artifacts: [AppVerifyRedactedArtifact(kind: "stream-source", path: secretSource)]
+        )
+    }
+
+    private static func liveFailedEvidence(secretSource: String) -> AppVerifyEvidence {
+        var checks = liveBaseChecks(secretSource: secretSource)
+        checks.removeAll { $0.name == .liveDecodeOpened }
+        checks.append(.fail(
+            .liveDecodeOpened,
+            phase: .liveDecode,
+            reason: "Live decode failed for \(secretSource)",
+            liveFacts: liveFacts(secretSource: secretSource, processedChunks: 0, decodedChunks: 0),
+            artifacts: [AppVerifyRedactedArtifact(kind: "stream-source", path: secretSource)]
+        ))
+        return AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "live-fail-token=synthetic-secret",
+            checks: checks,
+            artifacts: [AppVerifyRedactedArtifact(kind: "stream-source", path: secretSource)]
+        )
+    }
+
+    private static func liveBaseChecks(secretSource: String) -> [AppVerifyCheckRecord] {
+        let facts = liveFacts(secretSource: secretSource)
+        return [
+            .pass(.liveConfigValidated, phase: .liveConfig),
+            .pass(.liveStreamRegistered, phase: .liveRegistration, liveFacts: facts),
+            .pass(.liveRuntimeStarted, phase: .liveRuntimeStart, liveFacts: facts),
+            .pass(.liveDecodeOpened, phase: .liveDecode, liveFacts: facts),
+            .pass(.livePlaybackScheduled, phase: .livePlayback, liveFacts: facts),
+            .pass(.liveRuntimeStopped, phase: .liveStop, liveFacts: facts),
+            .pass(.liveDiagnosticsWritten, phase: .liveDiagnostics, liveFacts: facts),
+            AppVerifyCheckEvaluator.liveTranscriptExpectation(
+                observedCount: 1,
+                expectation: .warn,
+                required: true,
+                streamID: "main-live",
+                source: secretSource,
+                facts: facts
+            ),
+            AppVerifyCheckEvaluator.liveMetadataExpectation(
+                observedCount: 1,
+                expectation: .warn,
+                required: true,
+                streamID: "main-live",
+                source: secretSource,
+                facts: facts
+            ),
+        ]
+    }
+
+    private static func liveFacts(
+        secretSource: String,
+        processedChunks: Int = 1,
+        decodedChunks: Int = 1,
+        transcriptCount: Int = 1,
+        metadataCount: Int = 1
+    ) -> AppVerifyLiveStreamFacts {
+        AppVerifyLiveStreamFacts(
+            streamID: "main-live",
+            streamType: .hls,
+            resolvedStreamType: .hls,
+            source: secretSource,
+            timeoutSeconds: 0.1,
+            maxChunks: 1,
+            required: true,
+            transcriptExpectation: .warn,
+            metadataExpectation: .warn,
+            registeredStreamID: 1,
+            processedChunks: processedChunks,
+            decodedChunks: decodedChunks,
+            scheduledBuffers: decodedChunks,
+            transcriptCount: transcriptCount,
+            metadataCount: metadataCount,
+            diagnosticCount: 2,
+            recentDiagnosticEvents: ["runtime.start.requested", "playback.play.scheduled"],
+            fields: [
+                "diagnosticsPath": "/tmp/sounding-live-diagnostics-user:pass@example.test?token=synthetic-secret#frag.jsonl",
+                "source": secretSource,
+            ]
         )
     }
 
@@ -377,4 +738,11 @@ private final class OutputCapture: @unchecked Sendable {
         defer { lock.unlock() }
         return stdoutMessages
     }
+}
+
+
+private struct FakeLiveRunner: AppVerifyLiveRunning {
+    var evidence: AppVerifyEvidence
+
+    func run() async -> AppVerifyEvidence { evidence }
 }
