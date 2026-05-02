@@ -6,6 +6,17 @@ import GRDB
 /// Opening a `SoundingDatabase` creates a GRDB pool and runs all registered
 /// migrations synchronously, so callers either receive a migrated database or a
 /// thrown open/migration error with GRDB context.
+public enum SoundingDatabaseCheckpointMode: String, Codable, Equatable, Sendable, CaseIterable, CustomStringConvertible {
+    case passive
+    case full
+    case restart
+    case truncate
+
+    public var description: String { rawValue }
+
+    fileprivate var pragmaValue: String { rawValue.uppercased() }
+}
+
 public final class SoundingDatabase: @unchecked Sendable {
     public let fileURL: URL
 
@@ -93,10 +104,10 @@ public final class SoundingDatabase: @unchecked Sendable {
         }
     }
 
-    public func checkpoint() -> SoundingDatabaseCheckpointResult {
+    public func checkpoint(mode: SoundingDatabaseCheckpointMode = .passive) -> SoundingDatabaseCheckpointResult {
         do {
             return try pool.barrierWriteWithoutTransaction { db in
-                guard let row = try Row.fetchOne(db, sql: "PRAGMA wal_checkpoint(PASSIVE)") else {
+                guard let row = try Row.fetchOne(db, sql: "PRAGMA wal_checkpoint(\(mode.pragmaValue))") else {
                     return SoundingDatabaseCheckpointResult(
                         status: .degraded,
                         busyFrameCount: 0,
