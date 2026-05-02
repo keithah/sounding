@@ -175,9 +175,12 @@ public actor RollingPCMBuffer {
             lastMessage = "Requested rewind position is outside the rolling buffer."
             return .unavailable(requestedSeconds: seconds, bufferedRange: bufferedRange())
         }
-        guard let index = entries.firstIndex(where: { entry in
-            seconds >= entry.frame.startSeconds && seconds <= entry.frame.endSeconds
-        }) ?? entries.indices.first(where: { entries[$0].frame.startSeconds >= seconds }) else {
+        let frameIndex = entries.indices.first { index in
+            let frame = entries[index].frame
+            let isLastFrame = index == entries.index(before: entries.endIndex)
+            return seconds >= frame.startSeconds && (seconds < frame.endSeconds || (isLastFrame && seconds <= frame.endSeconds))
+        } ?? entries.indices.first(where: { entries[$0].frame.startSeconds >= seconds })
+        guard let index = frameIndex else {
             lastMessage = "Requested rewind position is not retained in the rolling buffer."
             return .unavailable(requestedSeconds: seconds, bufferedRange: range)
         }

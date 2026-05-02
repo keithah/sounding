@@ -352,6 +352,14 @@ final class AppStreamRuntimeTests: XCTestCase {
         let gate = RuntimeGate()
         let ingester = LifecycleRecordingIngester(gate: gate)
         let dates = DeterministicDateProvider([
+            // Runtime status persistence also consumes the injected clock while these
+            // streams start and suspend. Keep those status timestamps at the sleep
+            // instant so the lifecycle clock still advances exactly five seconds
+            // when wake recovery begins under XCTest execution.
+            Date(timeIntervalSince1970: 1_767_225_600),
+            Date(timeIntervalSince1970: 1_767_225_600),
+            Date(timeIntervalSince1970: 1_767_225_600),
+            Date(timeIntervalSince1970: 1_767_225_600),
             Date(timeIntervalSince1970: 1_767_225_600),
             Date(timeIntervalSince1970: 1_767_225_600),
             Date(timeIntervalSince1970: 1_767_225_600),
