@@ -1,0 +1,40 @@
+{
+  "streams": [
+    {
+      "id": "example-hls-required",
+      "source": "https://example.com/live/manifest.m3u8",
+      "streamType": "auto",
+      "timeoutSeconds": 8,
+      "maxChunks": 4,
+      "required": true,
+      "expectations": {
+        "transcript": "warn",
+        "metadata": "warn"
+      }
+    },
+    {
+      "id": "example-icecast-required",
+      "source": "https://example.org/radio/stream",
+      "streamType": "icecast",
+      "timeoutSeconds": 8,
+      "maxChunks": 4,
+      "required": true,
+      "expectations": {
+        "transcript": "warn",
+        "metadata": "strict"
+      }
+    },
+    {
+      "id": "example-icy-optional",
+      "source": "https://example.net/audio",
+      "streamType": "icy",
+      "timeoutSeconds": 5,
+      "maxChunks": 2,
+      "required": false,
+      "expectations": {
+        "transcript": "disabled",
+        "metadata": "warn"
+      }
+    }
+  ]
+}

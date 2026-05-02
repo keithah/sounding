@@ -41,6 +41,14 @@ live-streams.private.json
 live-streams.*.private.json
 live-verification-evidence/
 live-verify-evidence/
+app-verify-live.local.json
+app-verify-live.*.local.json
+app-verify-live.private.json
+app-verify-live.*.private.json
+app-verify-live-evidence/
+app-verify-live-proof.local/
+*.app-verify-live-evidence.json
+*.app-verify-live-evidence.ndjson
 live-proof.local/
 *.live-evidence.json
 *.live-evidence.ndjson

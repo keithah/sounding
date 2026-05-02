@@ -31,6 +31,15 @@ public enum AppVerifyRuntimePhase: String, Codable, Equatable, Sendable, CaseIte
     case runtimeStop = "runtime_stop"
     case runtimeRestart = "runtime_restart"
     case diagnostics
+    case liveConfig = "live_config"
+    case liveRegistration = "live_registration"
+    case liveRuntimeStart = "live_runtime_start"
+    case liveDecode = "live_decode"
+    case livePlayback = "live_playback"
+    case liveStop = "live_stop"
+    case liveDiagnostics = "live_diagnostics"
+    case liveTranscript = "live_transcript"
+    case liveMetadata = "live_metadata"
     case transcriptPersistence = "transcript_persistence"
     case transcriptTimelineProjection = "transcript_timeline_projection"
     case transcriptSearchProjection = "transcript_search_projection"
@@ -58,6 +67,15 @@ public enum AppVerifyCheckName: String, Codable, Equatable, Sendable, CaseIterab
     case transcriptSearchProjection = "transcript_search_projection"
     case songMetadataProjection = "song_metadata_projection"
     case adMetadataProjection = "ad_metadata_projection"
+    case liveConfigValidated = "live_config_validated"
+    case liveStreamRegistered = "live_stream_registered"
+    case liveRuntimeStarted = "live_runtime_started"
+    case liveDecodeOpened = "live_decode_opened"
+    case livePlaybackScheduled = "live_playback_scheduled"
+    case liveRuntimeStopped = "live_runtime_stopped"
+    case liveDiagnosticsWritten = "live_diagnostics_written"
+    case liveTranscriptObserved = "live_transcript_observed"
+    case liveMetadataObserved = "live_metadata_observed"
 
     public static let s01Required: [AppVerifyCheckName] = [
         .fixtureSourceCreated,
@@ -225,6 +243,84 @@ public struct AppVerifyProjectionFacts: Codable, Equatable, Sendable {
     }
 }
 
+public struct AppVerifyLiveStreamFacts: Codable, Equatable, Sendable {
+    public var streamID: String
+    public var streamType: StreamType
+    public var resolvedStreamType: StreamType
+    public var redactedSource: String
+    public var timeoutSeconds: Double
+    public var maxChunks: Int
+    public var required: Bool
+    public var transcriptExpectation: AppVerifyLiveExpectation
+    public var metadataExpectation: AppVerifyLiveExpectation
+    public var registeredStreamID: Int64?
+    public var processedChunks: Int
+    public var decodedChunks: Int
+    public var scheduledBuffers: Int
+    public var transcriptCount: Int
+    public var metadataCount: Int
+    public var diagnosticCount: Int
+    public var recentDiagnosticEvents: [String]
+    public var fields: [String: String]
+
+    public init(
+        streamID: String,
+        streamType: StreamType,
+        resolvedStreamType: StreamType,
+        source: String,
+        timeoutSeconds: Double,
+        maxChunks: Int,
+        required: Bool,
+        transcriptExpectation: AppVerifyLiveExpectation = .warn,
+        metadataExpectation: AppVerifyLiveExpectation = .warn,
+        registeredStreamID: Int64? = nil,
+        processedChunks: Int = 0,
+        decodedChunks: Int = 0,
+        scheduledBuffers: Int = 0,
+        transcriptCount: Int = 0,
+        metadataCount: Int = 0,
+        diagnosticCount: Int = 0,
+        recentDiagnosticEvents: [String] = [],
+        fields: [String: String] = [:]
+    ) {
+        self.streamID = AppVerifyEvidenceSanitizer.redact(streamID)
+        self.streamType = streamType
+        self.resolvedStreamType = resolvedStreamType
+        self.redactedSource = AppVerifyEvidenceSanitizer.sourceDescription(source)
+        self.timeoutSeconds = timeoutSeconds.isFinite ? max(0, timeoutSeconds) : 0
+        self.maxChunks = max(0, maxChunks)
+        self.required = required
+        self.transcriptExpectation = transcriptExpectation
+        self.metadataExpectation = metadataExpectation
+        self.registeredStreamID = registeredStreamID
+        self.processedChunks = max(0, processedChunks)
+        self.decodedChunks = max(0, decodedChunks)
+        self.scheduledBuffers = max(0, scheduledBuffers)
+        self.transcriptCount = max(0, transcriptCount)
+        self.metadataCount = max(0, metadataCount)
+        self.diagnosticCount = max(0, diagnosticCount)
+        self.recentDiagnosticEvents = Array(recentDiagnosticEvents.prefix(32)).map(AppVerifyEvidenceSanitizer.redact)
+        self.fields = fields.prefix(16).reduce(into: [:]) { partial, pair in
+            partial[Self.redactedFieldKey(pair.key)] = Self.redactedFieldValue(pair.value, key: pair.key)
+        }
+    }
+
+    private static func redactedFieldKey(_ key: String) -> String {
+        let redacted = AppVerifyEvidenceSanitizer.redact(key)
+        if redacted.range(of: "path", options: [.caseInsensitive]) != nil {
+            return "[redacted-path-key]"
+        }
+        return redacted
+    }
+
+    private static func redactedFieldValue(_ value: String, key: String) -> String {
+        if key.range(of: "path", options: [.caseInsensitive]) != nil {
+            return AppVerifyEvidenceSanitizer.artifactPath(value)
+        }
+        return AppVerifyEvidenceSanitizer.redact(value)
+    }
+}
+
 public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
     public var name: AppVerifyCheckName
     public var status: AppVerifyEvidenceStatus
@@ -234,6 +330,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
     public var facts: AppVerifyRuntimeFacts?
     public var controlFacts: AppVerifyControlObservationFacts?
     public var projectionFacts: AppVerifyProjectionFacts?
+    public var liveFacts: AppVerifyLiveStreamFacts?
     public var artifacts: [AppVerifyRedactedArtifact]
 
     public init(
@@ -245,6 +342,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
         projectionFacts: AppVerifyProjectionFacts? = nil,
+        liveFacts: AppVerifyLiveStreamFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) {
         self.name = name
@@ -255,6 +353,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         self.facts = facts
         self.controlFacts = controlFacts
         self.projectionFacts = projectionFacts
+        self.liveFacts = liveFacts
         self.artifacts = Array(artifacts.prefix(16))
     }
 
@@ -266,6 +365,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
         projectionFacts: AppVerifyProjectionFacts? = nil,
+        liveFacts: AppVerifyLiveStreamFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -277,6 +377,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             facts: facts,
             controlFacts: controlFacts,
             projectionFacts: projectionFacts,
+            liveFacts: liveFacts,
             artifacts: artifacts
         )
     }
@@ -289,6 +390,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
         projectionFacts: AppVerifyProjectionFacts? = nil,
+        liveFacts: AppVerifyLiveStreamFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -300,6 +402,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             facts: facts,
             controlFacts: controlFacts,
             projectionFacts: projectionFacts,
+            liveFacts: liveFacts,
             artifacts: artifacts
         )
     }
@@ -312,6 +415,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
         projectionFacts: AppVerifyProjectionFacts? = nil,
+        liveFacts: AppVerifyLiveStreamFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -323,6 +427,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             facts: facts,
             controlFacts: controlFacts,
             projectionFacts: projectionFacts,
+            liveFacts: liveFacts,
             artifacts: artifacts
         )
     }
@@ -564,6 +669,84 @@ public enum AppVerifyCheckEvaluator {
             )
         }
         return .pass(name, phase: phase, projectionFacts: facts)
+    }
+
+    public static func liveTranscriptExpectation(
+        observedCount: Int,
+        expectation: AppVerifyLiveExpectation,
+        required: Bool,
+        streamID: String,
+        source: String,
+        facts: AppVerifyLiveStreamFacts? = nil
+    ) -> AppVerifyCheckRecord {
+        liveExpectation(
+            .liveTranscriptObserved,
+            phase: .liveTranscript,
+            observedCount: observedCount,
+            expectation: expectation,
+            required: required,
+            streamID: streamID,
+            source: source,
+            facts: facts
+        )
+    }
+
+    public static func liveMetadataExpectation(
+        observedCount: Int,
+        expectation: AppVerifyLiveExpectation,
+        required: Bool,
+        streamID: String,
+        source: String,
+        facts: AppVerifyLiveStreamFacts? = nil
+    ) -> AppVerifyCheckRecord {
+        liveExpectation(
+            .liveMetadataObserved,
+            phase: .liveMetadata,
+            observedCount: observedCount,
+            expectation: expectation,
+            required: required,
+            streamID: streamID,
+            source: source,
+            facts: facts
+        )
+    }
+
+    private static func liveExpectation(
+        _ name: AppVerifyCheckName,
+        phase: AppVerifyRuntimePhase,
+        observedCount: Int,
+        expectation: AppVerifyLiveExpectation,
+        required: Bool,
+        streamID: String,
+        source: String,
+        facts: AppVerifyLiveStreamFacts?
+    ) -> AppVerifyCheckRecord {
+        let redactedID = AppVerifyEvidenceSanitizer.redact(streamID)
+        let redactedSource = AppVerifyEvidenceSanitizer.sourceDescription(source)
+        let observed = max(0, observedCount)
+        guard expectation != .disabled else {
+            return .pass(
+                name,
+                phase: phase,
+                required: false,
+                reason: "Live \(phase.rawValue) expectation disabled for stream \(redactedID).",
+                liveFacts: facts
+            )
+        }
+        guard observed > 0 else {
+            let reason = "Live \(phase.rawValue) expectation for stream \(redactedID) observed zero records from \(redactedSource)."
+            if expectation == .strict {
+                return .fail(name, phase: phase, required: required, reason: reason, liveFacts: facts)
+            }
+            return .warn(name, phase: phase, required: false, reason: reason, liveFacts: facts)
+        }
+        return .pass(
+            name,
+            phase: phase,
+            required: required && expectation == .strict,
+            reason: "Live \(phase.rawValue) observed \(observed) record(s) for stream \(redactedID).",
+            liveFacts: facts
+        )
     }
 
     private static func controlPhase(for name: AppVerifyCheckName) -> AppVerifyRuntimePhase {
