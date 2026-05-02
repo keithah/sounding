@@ -11,7 +11,7 @@ struct SoundingCommand: AsyncParsableCommand {
         subcommands: [
             MonitorCommand.self, LiveVerifyCommand.self, IngestCommand.self, SearchCommand.self,
             CountCommand.self, ReportCommand.self, StreamsCommand.self, ExportCommand.self,
-            DatabaseCommand.self,
+            DatabaseCommand.self, SoakCommand.self,
         ]
     )
 
