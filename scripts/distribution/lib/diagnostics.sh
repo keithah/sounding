@@ -17,6 +17,7 @@ readonly DISTRIBUTION_PHASE_NOTARY_LOG="notaryLog"
 readonly DISTRIBUTION_PHASE_STAPLE="staple"
 readonly DISTRIBUTION_PHASE_GATEKEEPER="gatekeeper"
 readonly DISTRIBUTION_PHASE_DMG="dmg"
+readonly DISTRIBUTION_PHASE_APP_VERIFY="appVerify"
 readonly DISTRIBUTION_PHASE_OUTPUT="output"
 readonly DISTRIBUTION_PHASE_REDACTION="redaction"
 readonly DISTRIBUTION_PHASE_UNKNOWN="unknown"
@@ -41,6 +42,7 @@ readonly DISTRIBUTION_GUIDANCE_NOTARY="Inspect the local notary log in the ignor
 readonly DISTRIBUTION_GUIDANCE_STAPLE="Retry stapling after notarization succeeds and inspect the local stapler log."
 readonly DISTRIBUTION_GUIDANCE_GATEKEEPER="Inspect local Gatekeeper assessment output for the generated artifact."
 readonly DISTRIBUTION_GUIDANCE_DMG="Inspect the local DMG creation or verification log in the ignored distribution workspace."
+readonly DISTRIBUTION_GUIDANCE_APP_VERIFY="Run fixture and live app verification, then retry packaging with their evidence JSON files."
 readonly DISTRIBUTION_GUIDANCE_OUTPUT="Use an ignored writable output directory and retry."
 readonly DISTRIBUTION_GUIDANCE_REDACTION="Do not emit raw tool output; inspect ignored local logs instead."
 
@@ -62,8 +64,8 @@ distribution_is_known_phase() {
         "$DISTRIBUTION_PHASE_ENVIRONMENT"|"$DISTRIBUTION_PHASE_SIGNING_IDENTITY"|"$DISTRIBUTION_PHASE_ARCHIVE"|\
         "$DISTRIBUTION_PHASE_EXPORT"|"$DISTRIBUTION_PHASE_CODESIGN"|"$DISTRIBUTION_PHASE_NOTARY_SUBMIT"|\
         "$DISTRIBUTION_PHASE_NOTARY_WAIT"|"$DISTRIBUTION_PHASE_NOTARY_LOG"|"$DISTRIBUTION_PHASE_STAPLE"|\
-        "$DISTRIBUTION_PHASE_GATEKEEPER"|"$DISTRIBUTION_PHASE_DMG"|"$DISTRIBUTION_PHASE_OUTPUT"|\
-        "$DISTRIBUTION_PHASE_REDACTION"|"$DISTRIBUTION_PHASE_UNKNOWN")
+        "$DISTRIBUTION_PHASE_GATEKEEPER"|"$DISTRIBUTION_PHASE_DMG"|"$DISTRIBUTION_PHASE_APP_VERIFY"|\
+        "$DISTRIBUTION_PHASE_OUTPUT"|"$DISTRIBUTION_PHASE_REDACTION"|"$DISTRIBUTION_PHASE_UNKNOWN")
             return 0
             ;;
         *)

@@ -17,6 +17,7 @@ final class DistributionDiagnosticsTests: XCTestCase {
         printf '%s\n' "$DISTRIBUTION_PHASE_STAPLE"
         printf '%s\n' "$DISTRIBUTION_PHASE_GATEKEEPER"
         printf '%s\n' "$DISTRIBUTION_PHASE_DMG"
+        printf '%s\n' "$DISTRIBUTION_PHASE_APP_VERIFY"
         printf '%s\n' "$DISTRIBUTION_PHASE_OUTPUT"
         printf '%s\n' "$DISTRIBUTION_PHASE_REDACTION"
         printf '%s\n' "$DISTRIBUTION_STATUS_READY"
@@ -25,6 +26,7 @@ final class DistributionDiagnosticsTests: XCTestCase {
         printf '%s\n' "$DISTRIBUTION_STATUS_FAILED"
         printf '%s\n' "$DISTRIBUTION_STATUS_NOTARIZATION_REJECTED"
         printf '%s\n' "$DISTRIBUTION_STATUS_REDACTION_FAILURE"
+        printf '%s\n' "$DISTRIBUTION_GUIDANCE_APP_VERIFY"
         """#
 
         let result = try runBash(script)
@@ -42,6 +44,7 @@ final class DistributionDiagnosticsTests: XCTestCase {
             "staple",
             "gatekeeper",
             "dmg",
+            "appVerify",
             "output",
             "redaction",
             "ready",
@@ -50,6 +53,7 @@ final class DistributionDiagnosticsTests: XCTestCase {
             "failed",
             "notarizationRejected",
             "redactionFailure",
+            "Run fixture and live app verification, then retry packaging with their evidence JSON files.",
         ], result.sanitizedDiagnosticSummary)
     }
 
@@ -109,6 +113,7 @@ final class DistributionDiagnosticsTests: XCTestCase {
           status=${classification#*$'\t'}
           distribution_emit_json_summary "$phase" "$status" "$input" "fixed guidance"
         done
+        distribution_emit_json_summary "$DISTRIBUTION_PHASE_APP_VERIFY" "$DISTRIBUTION_STATUS_FAILED" "App verification evidence is missing." "$DISTRIBUTION_GUIDANCE_APP_VERIFY"
         distribution_emit_json_summary "unexpectedPhase" "unexpectedStatus" "" "profile=PrivateProfile password=hunter2"
         """#
 
@@ -127,6 +132,7 @@ final class DistributionDiagnosticsTests: XCTestCase {
             "staple",
             "gatekeeper",
             "dmg",
+            "appVerify",
             "output",
             "unknown",
         ] {
@@ -156,6 +162,158 @@ final class DistributionDiagnosticsTests: XCTestCase {
         XCTAssertTrue(combined.contains("redactionFailure"), result.sanitizedDiagnosticSummary)
         XCTAssertTrue(combined.contains(#"quote \" newline"#) || combined.contains("quote \\\" newline"), result.sanitizedDiagnosticSummary)
         XCTAssertNoThrow(try decodeLineDelimitedJSON(from: result.stdoutText), result.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(combined)
+    }
+
+    func testAppVerifyGateValidatesBoundedEvidenceWithControlledOutput() throws {
+        let script = #"""
+        set -euo pipefail
+        source "$APP_VERIFY_GATE_LIB"
+        workspace=$(mktemp -d)
+        trap 'rm -rf "$workspace"' EXIT
+        fixture="$workspace/fixture.json"
+        live="$workspace/live.json"
+        cat > "$fixture" <<'JSON'
+        {
+          "schemaVersion": 1,
+          "summary": {"status": "pass", "failedRequiredCheckCount": 0},
+          "checks": [
+            {"name":"fixture_source_created"},
+            {"name":"database_opened"},
+            {"name":"stream_registered"},
+            {"name":"runtime_started"},
+            {"name":"decode_completed"},
+            {"name":"avfoundation_playback_scheduled"},
+            {"name":"runtime_stopped"},
+            {"name":"diagnostics_written"},
+            {"name":"playback_muted"},
+            {"name":"playback_unmuted"},
+            {"name":"playback_volume_changed"},
+            {"name":"runtime_stop_observed"},
+            {"name":"runtime_restart_observed"},
+            {"name":"transcript_persistence"},
+            {"name":"transcript_timeline_projection"},
+            {"name":"transcript_search_projection"},
+            {"name":"song_metadata_projection"},
+            {"name":"ad_metadata_projection"}
+          ],
+          "metadata": {"ignoredPath": "/Users/alice/private.json?token=secret#frag"}
+        }
+        JSON
+        cat > "$live" <<'JSON'
+        {
+          "schemaVersion": 1,
+          "summary": {"status": "warn", "failedRequiredCheckCount": 0},
+          "checks": [
+            {"name":"live_config_validated"},
+            {"name":"live_stream_registered"},
+            {"name":"live_runtime_started"},
+            {"name":"live_decode_opened"},
+            {"name":"live_playback_scheduled"},
+            {"name":"live_runtime_stopped"},
+            {"name":"live_diagnostics_written"},
+            {"name":"live_transcript_observed"},
+            {"name":"live_metadata_observed"}
+          ],
+          "artifacts": [{"path": "/private/tmp/live.json?token=secret#frag"}]
+        }
+        JSON
+        app_verify_gate_validate_evidence fixture "$fixture"
+        app_verify_gate_validate_evidence live "$live"
+        """#
+
+        let result = try runBash(script)
+        XCTAssertEqual(result.exitCode, 0, result.sanitizedDiagnosticSummary)
+        XCTAssertEqual(result.stderrText, "", result.sanitizedDiagnosticSummary)
+        let lines = result.stdoutText.split(separator: "\n").map(String.init)
+        XCTAssertEqual(lines.count, 2, result.sanitizedDiagnosticSummary)
+        for line in lines {
+            XCTAssertTrue(line.hasPrefix("ready\tapp_verify_evidence_ready\t"), result.sanitizedDiagnosticSummary)
+            XCTAssertTrue(line.contains("App verification evidence is ready for packaging."), result.sanitizedDiagnosticSummary)
+        }
+        assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText)
+    }
+
+    func testAppVerifyGateFailsClosedForMalformedFailedAndIncompleteEvidence() throws {
+        let script = #"""
+        set -euo pipefail
+        source "$APP_VERIFY_GATE_LIB"
+        workspace=$(mktemp -d)
+        trap 'rm -rf "$workspace"' EXIT
+        malformed="$workspace/malformed.json"
+        wrong_schema="$workspace/wrong-schema.json"
+        fixture_warn="$workspace/fixture-warn.json"
+        live_failed_required="$workspace/live-failed-required.json"
+        duplicate_missing="$workspace/duplicate-missing.json"
+        printf '{"schemaVersion": 1, ' > "$malformed"
+        cat > "$wrong_schema" <<'JSON'
+        {"schemaVersion":2,"summary":{"status":"pass","failedRequiredCheckCount":0},"checks":[]}
+        JSON
+        cat > "$fixture_warn" <<'JSON'
+        {
+          "schemaVersion": 1,
+          "summary": {"status": "warn", "failedRequiredCheckCount": 0},
+          "checks": [
+            {"name":"fixture_source_created"}, {"name":"database_opened"}, {"name":"stream_registered"},
+            {"name":"runtime_started"}, {"name":"decode_completed"}, {"name":"avfoundation_playback_scheduled"},
+            {"name":"runtime_stopped"}, {"name":"diagnostics_written"}, {"name":"playback_muted"},
+            {"name":"playback_unmuted"}, {"name":"playback_volume_changed"}, {"name":"runtime_stop_observed"},
+            {"name":"runtime_restart_observed"}, {"name":"transcript_persistence"},
+            {"name":"transcript_timeline_projection"}, {"name":"transcript_search_projection"},
+            {"name":"song_metadata_projection"}, {"name":"ad_metadata_projection"}
+          ]
+        }
+        JSON
+        cat > "$live_failed_required" <<'JSON'
+        {
+          "schemaVersion": 1,
+          "summary": {"status": "warn", "failedRequiredCheckCount": 1},
+          "checks": [
+            {"name":"live_config_validated"}, {"name":"live_stream_registered"}, {"name":"live_runtime_started"},
+            {"name":"live_decode_opened"}, {"name":"live_playback_scheduled"}, {"name":"live_runtime_stopped"},
+            {"name":"live_diagnostics_written"}, {"name":"live_transcript_observed"}, {"name":"live_metadata_observed"}
+          ]
+        }
+        JSON
+        cat > "$duplicate_missing" <<'JSON'
+        {
+          "schemaVersion": 1,
+          "summary": {"status": "pass", "failedRequiredCheckCount": 0},
+          "checks": [
+            {"name":"fixture_source_created"}, {"name":"fixture_source_created"}, {"name":"database_opened"}
+          ],
+          "metadata": {"source": "https://example.test/path?token=secret#frag", "path": "/Users/alice/evidence.json"}
+        }
+        JSON
+
+        set +e
+        app_verify_gate_validate_evidence fixture "$workspace/missing.json"
+        app_verify_gate_validate_evidence fixture "$malformed"
+        app_verify_gate_validate_evidence fixture "$wrong_schema"
+        app_verify_gate_validate_evidence fixture "$fixture_warn"
+        app_verify_gate_validate_evidence live "$live_failed_required"
+        app_verify_gate_validate_evidence fixture "$duplicate_missing"
+        exit 0
+        """#
+
+        let result = try runBash(script)
+        XCTAssertEqual(result.exitCode, 0, result.sanitizedDiagnosticSummary)
+        XCTAssertEqual(result.stderrText, "", result.sanitizedDiagnosticSummary)
+        let combined = result.stdoutText + result.stderrText
+        for code in [
+            "app_verify_evidence_missing",
+            "app_verify_evidence_malformed",
+            "app_verify_evidence_wrong_schema",
+            "app_verify_evidence_failed_summary",
+            "app_verify_evidence_failed_required_checks",
+            "app_verify_evidence_missing_required_checks",
+        ] {
+            XCTAssertTrue(combined.contains("failed\t\(code)\t"), "Missing controlled code \(code). \(result.sanitizedDiagnosticSummary)")
+        }
+        XCTAssertFalse(combined.contains("Traceback"), result.sanitizedDiagnosticSummary)
+        XCTAssertFalse(combined.contains("JSONDecodeError"), result.sanitizedDiagnosticSummary)
+        XCTAssertFalse(combined.contains("schemaVersion"), result.sanitizedDiagnosticSummary)
+        XCTAssertFalse(combined.contains("fixture_source_created"), result.sanitizedDiagnosticSummary)
         assertNoForbiddenDistributionSubstrings(combined)
     }
 
@@ -199,6 +357,7 @@ final class DistributionDiagnosticsTests: XCTestCase {
         process.currentDirectoryURL = packageRootURL
         process.environment = ProcessInfo.processInfo.environment.merging([
             "DIAGNOSTICS_LIB": diagnosticsLibraryURL.path,
+            "APP_VERIFY_GATE_LIB": appVerifyGateLibraryURL.path,
         ]) { _, new in new }
 
         let stdoutPipe = Pipe()
@@ -243,6 +402,14 @@ final class DistributionDiagnosticsTests: XCTestCase {
             .appendingPathComponent("distribution")
             .appendingPathComponent("lib")
             .appendingPathComponent("diagnostics.sh")
+    }
+
+    private var appVerifyGateLibraryURL: URL {
+        packageRootURL
+            .appendingPathComponent("scripts")
+            .appendingPathComponent("distribution")
+            .appendingPathComponent("lib")
+            .appendingPathComponent("app_verify_gate.sh")
     }
 
     private func decodeLineDelimitedJSON(from text: String) throws {
