@@ -423,6 +423,19 @@ public struct AppVerifyFixtureRunner: Sendable {
                 timeoutSeconds: configuration.timeoutSeconds,
                 phaseName: "restart playback scheduling"
             )
+            diagnosticsSnapshot = self.diagnosticsSnapshot(for: diagnostics)
+            controlChecks.append(controlCheck(
+                .runtimeRestartObserved,
+                requestedAction: "restart",
+                runtimePhase: .runtimeRestart,
+                timeline: await timeline.snapshot(),
+                volume: await volumeStore.snapshot(streamID: stream.id),
+                diagnostics: diagnosticsSnapshot,
+                requiredDiagnosticEvents: ["runtime.start.requested", "playback.play.scheduled", "runtime.event.published"],
+                beforeMarker: "stopped",
+                afterMarker: "restarted",
+                artifacts: diagnosticsArtifacts(diagnostics)
+            ))
 
             await runtime.stopAll()
             await player.stop(timeline: timeline)

@@ -61,6 +61,8 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
         XCTAssertTrue(evidenceText.contains("\"fixture_source_created\""), evidenceText)
         let decoded = try JSONDecoder().decode(AppVerifyEvidence.self, from: Data(evidenceText.utf8))
         XCTAssertEqual(decoded.summary.status, .pass)
+        XCTAssertEqual(Set(decoded.checks.map(\.name)), Set(AppVerifyCheckName.fixtureRequired))
+        XCTAssertEqual(decoded.summary.requiredCheckCount, AppVerifyCheckName.fixtureRequired.count)
     }
 
     func testFailedEvidenceWritesJSONThenReturnsNonZeroWithFailedCheckNames() async throws {
@@ -81,12 +83,15 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
         XCTAssertEqual(capture.stdoutLines.count, 1)
         XCTAssertTrue(capture.stdoutText.contains("app verification failed"), capture.stdoutText)
         XCTAssertTrue(capture.stdoutText.contains("requiredFailures=1"), capture.stdoutText)
-        XCTAssertTrue(capture.stdoutText.contains("database_opened:database:required"), capture.stdoutText)
+        XCTAssertTrue(capture.stdoutText.contains("playback_muted:playback_control:required"), capture.stdoutText)
+        XCTAssertFalse(capture.stdoutText.contains("runtime-events.jsonl"), capture.stdoutText)
+        XCTAssertFalse(capture.stdoutText.contains("live.wav"), capture.stdoutText)
         assertSanitized(capture.stdoutText, forbiddenLiteral: secretSource)
         assertSanitized(capture.stdoutText, forbiddenLiteral: evidenceURL.path)
 
         let evidenceText = try String(contentsOf: evidenceURL)
-        XCTAssertTrue(evidenceText.contains("database_opened"), evidenceText)
+        XCTAssertTrue(evidenceText.contains("playback_muted"), evidenceText)
+        XCTAssertTrue(evidenceText.contains("runtime.mute.requested"), evidenceText)
         XCTAssertTrue(evidenceText.contains("[redacted"), evidenceText)
         assertSanitized(evidenceText, forbiddenLiteral: "user:pass")
         assertSanitized(evidenceText, forbiddenLiteral: "synthetic-secret")
@@ -128,64 +133,161 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
         let adapter = AppVerifyFixtureCommandAdapter()
         let line = adapter.summaryLine(for: Self.failedEvidence(secretSource: secretSource))
 
-        XCTAssertTrue(line.contains("fixture_source_created:fixture:required"), line)
+        XCTAssertTrue(line.contains("playback_muted:playback_control:required"), line)
+        XCTAssertFalse(line.contains("runtime-events.jsonl"), line)
+        XCTAssertFalse(line.contains("live.wav"), line)
         assertSanitized(line, forbiddenLiteral: secretSource)
         assertSanitized(line, forbiddenLiteral: "user:pass")
         assertSanitized(line, forbiddenLiteral: "synthetic-secret")
         assertSanitized(line, forbiddenLiteral: "private-fragment")
     }
 
-    /// Manual real-device proof for S01: run
-    /// `swift run sounding app-verify fixture --json /tmp/sounding-app-verify-fixture.json`
+    /// Manual real-device proof for S02: run
+    /// `swift run sounding app-verify fixture --json /tmp/sounding-app-verify-s02.json`
     /// on a macOS host with a usable AVFoundation output device; failed evidence should still be written
-    /// and should identify the failing runtime/playback/diagnostics phase without leaking raw sources.
+    /// and should identify the failing runtime/playback/control/diagnostics phase without leaking raw sources.
 
     private static func passingEvidence() -> AppVerifyEvidence {
         AppVerifyEvidence(
             generatedAt: "2026-05-02T18:00:00Z",
             runID: "test-run",
-            checks: [
-                .pass(.fixtureSourceCreated, phase: .fixture),
-                .pass(.databaseOpened, phase: .database),
-                .pass(.streamRegistered, phase: .registration),
-                .pass(.runtimeStarted, phase: .runtimeStart),
-                AppVerifyCheckEvaluator.decodeCompleted(processedChunks: 1, decodedChunks: 1),
-                AppVerifyCheckEvaluator.playbackScheduled(
-                    scheduledBuffers: 1,
-                    diagnosticEvents: ["playback.prepare.succeeded", "playback.play.scheduled"]
-                ),
-                .pass(.runtimeStopped, phase: .runtimeStop),
-                .pass(.diagnosticsWritten, phase: .diagnostics),
-            ],
+            checks: passingChecks(),
             runtimeFacts: AppVerifyRuntimeFacts(
                 phase: .diagnostics,
                 processedChunks: 1,
                 decodedChunks: 1,
                 scheduledBuffers: 1,
-                diagnosticCount: 2,
-                recentDiagnosticEvents: ["playback.prepare.succeeded", "playback.play.scheduled"],
-                timelineSnapshotFields: ["decodedFrameCount": "1"]
+                diagnosticCount: 8,
+                recentDiagnosticEvents: [
+                    "playback.prepare.succeeded",
+                    "playback.play.scheduled",
+                    "runtime.mute.requested",
+                    "runtime.volume.requested",
+                    "playback.volume.applied",
+                    "runtime.stop.requested",
+                    "runtime.start.requested",
+                ],
+                timelineSnapshotFields: ["decodedFrameCount": "1", "scheduledBufferCount": "1"]
             )
         )
     }
 
     private static func failedEvidence(secretSource: String) -> AppVerifyEvidence {
-        AppVerifyEvidence(
+        var checks = passingChecks()
+        checks.removeAll { $0.name == .playbackMuted }
+        checks.append(
+            AppVerifyCheckEvaluator.controlObserved(
+                .playbackMuted,
+                requestedAction: "mute \(secretSource)",
+                observedRuntimePhase: .playbackControl,
+                timelineState: "playing",
+                volume: 0.75,
+                muted: false,
+                effectiveVolume: 0.75,
+                diagnostics: [
+                    AppVerifyParsedDiagnosticEntry(
+                        event: "runtime.mute.requested",
+                        phase: "runtime.volume",
+                        streamID: 1,
+                        message: "mute requested for \(secretSource)",
+                        fields: ["source": secretSource]
+                    ),
+                ],
+                requiredDiagnosticEvents: ["runtime.mute.requested", "playback.volume.applied"],
+                beforeMarker: secretSource,
+                afterMarker: secretSource
+            )
+        )
+        return AppVerifyEvidence(
             generatedAt: "2026-05-02T18:00:00Z",
             runID: "token=synthetic-secret",
-            checks: [
-                .pass(.fixtureSourceCreated, phase: .fixture),
-                .fail(
-                    .databaseOpened,
-                    phase: .database,
-                    reason: "could not open temporary database for \(secretSource)"
-                ),
-            ],
+            checks: checks,
             artifacts: [
                 AppVerifyRedactedArtifact(kind: "stream-source", path: secretSource),
+                AppVerifyRedactedArtifact(kind: "runtime-events", path: "/tmp/sounding-app-verify/runtime-events.jsonl"),
             ],
             metadata: ["source": secretSource]
         )
+    }
+
+    private static func passingChecks() -> [AppVerifyCheckRecord] {
+        [
+            .pass(.fixtureSourceCreated, phase: .fixture),
+            .pass(.databaseOpened, phase: .database),
+            .pass(.streamRegistered, phase: .registration),
+            .pass(.runtimeStarted, phase: .runtimeStart),
+            AppVerifyCheckEvaluator.decodeCompleted(processedChunks: 1, decodedChunks: 1),
+            AppVerifyCheckEvaluator.playbackScheduled(
+                scheduledBuffers: 1,
+                diagnosticEvents: ["playback.prepare.succeeded", "playback.play.scheduled"]
+            ),
+            .pass(.runtimeStopped, phase: .runtimeStop),
+            .pass(.diagnosticsWritten, phase: .diagnostics),
+            AppVerifyCheckEvaluator.controlObserved(
+                .playbackMuted,
+                requestedAction: "mute",
+                observedRuntimePhase: .playbackControl,
+                timelineState: "playing",
+                volume: 0.75,
+                muted: true,
+                effectiveVolume: 0,
+                diagnostics: [
+                    AppVerifyParsedDiagnosticEntry(event: "runtime.mute.requested", phase: "runtime.volume", streamID: 1),
+                    AppVerifyParsedDiagnosticEntry(event: "playback.volume.applied", phase: "playback.volume", streamID: 1),
+                ],
+                requiredDiagnosticEvents: ["runtime.mute.requested", "playback.volume.applied"]
+            ),
+            AppVerifyCheckEvaluator.controlObserved(
+                .playbackUnmuted,
+                requestedAction: "unmute",
+                observedRuntimePhase: .playbackControl,
+                timelineState: "playing",
+                volume: 0.75,
+                muted: false,
+                effectiveVolume: 0.75,
+                diagnostics: [
+                    AppVerifyParsedDiagnosticEntry(event: "runtime.mute.requested", phase: "runtime.volume", streamID: 1),
+                    AppVerifyParsedDiagnosticEntry(event: "playback.volume.applied", phase: "playback.volume", streamID: 1),
+                ],
+                requiredDiagnosticEvents: ["runtime.mute.requested", "playback.volume.applied"]
+            ),
+            AppVerifyCheckEvaluator.controlObserved(
+                .playbackVolumeChanged,
+                requestedAction: "volume",
+                observedRuntimePhase: .playbackControl,
+                timelineState: "playing",
+                volume: 0.25,
+                muted: false,
+                effectiveVolume: 0.25,
+                diagnostics: [
+                    AppVerifyParsedDiagnosticEntry(event: "runtime.volume.requested", phase: "runtime.volume", streamID: 1),
+                    AppVerifyParsedDiagnosticEntry(event: "playback.volume.applied", phase: "playback.volume", streamID: 1),
+                ],
+                requiredDiagnosticEvents: ["runtime.volume.requested", "playback.volume.applied"]
+            ),
+            AppVerifyCheckEvaluator.controlObserved(
+                .runtimeStopObserved,
+                requestedAction: "stop",
+                observedRuntimePhase: .runtimeStop,
+                timelineState: "stopped",
+                diagnostics: [
+                    AppVerifyParsedDiagnosticEntry(event: "runtime.stop.requested", phase: "runtime.stop", streamID: 1),
+                    AppVerifyParsedDiagnosticEntry(event: "playback.stop.applied", phase: "playback.stop", streamID: 1),
+                ],
+                requiredDiagnosticEvents: ["runtime.stop.requested", "playback.stop.applied"]
+            ),
+            AppVerifyCheckEvaluator.controlObserved(
+                .runtimeRestartObserved,
+                requestedAction: "restart",
+                observedRuntimePhase: .runtimeRestart,
+                timelineState: "playing",
+                diagnostics: [
+                    AppVerifyParsedDiagnosticEntry(event: "runtime.start.requested", phase: "runtime.start", streamID: 1),
+                    AppVerifyParsedDiagnosticEntry(event: "playback.play.scheduled", phase: "playback.play", streamID: 1),
+                ],
+                requiredDiagnosticEvents: ["runtime.start.requested", "playback.play.scheduled"]
+            ),
+        ]
     }
 
     private func temporaryEvidenceURL() -> URL {

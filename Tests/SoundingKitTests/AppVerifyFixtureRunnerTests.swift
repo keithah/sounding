@@ -14,11 +14,16 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         let evidence = await runner.run()
 
         XCTAssertEqual(evidence.summary.status, .pass, evidence.summary.message)
-        XCTAssertEqual(Set(evidence.checks.map(\.name)), Set(AppVerifyCheckName.s01Required))
+        XCTAssertEqual(Set(evidence.checks.map(\.name)), Set(AppVerifyCheckName.fixtureRequired))
         assertCheck(evidence, .runtimeStarted, .pass)
         assertCheck(evidence, .decodeCompleted, .pass)
         assertCheck(evidence, .avfoundationPlaybackScheduled, .pass)
         assertCheck(evidence, .runtimeStopped, .pass)
+        assertCheck(evidence, .playbackMuted, .pass)
+        assertCheck(evidence, .playbackUnmuted, .pass)
+        assertCheck(evidence, .playbackVolumeChanged, .pass)
+        assertCheck(evidence, .runtimeStopObserved, .pass)
+        assertCheck(evidence, .runtimeRestartObserved, .pass)
         assertCheck(evidence, .diagnosticsWritten, .pass)
         XCTAssertGreaterThan(evidence.runtimeFacts?.processedChunks ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.decodedChunks ?? 0, 0)
@@ -100,6 +105,23 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         XCTAssertTrue(diagnostics.reason?.contains("malformed JSONL") == true, diagnostics.reason ?? "")
     }
 
+
+    func testMissingVolumeAppliedDiagnosticFailsControlProof() async throws {
+        let root = temporaryRoot("missing-volume")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let player = DiagnosticsRecordingPlayer(recordVolumeEvent: false)
+        let runner = makeRunner(root: root, timeoutSeconds: 0.2, player: player)
+
+        let evidence = await runner.run()
+
+        XCTAssertEqual(evidence.summary.status, .fail)
+        assertCheck(evidence, .playbackMuted, .fail)
+        let muted = try XCTUnwrap(evidence.checks.first { $0.name == .playbackMuted })
+        XCTAssertTrue(muted.reason?.contains("timed out") == true || muted.reason?.contains("Control window") == true, muted.reason ?? "")
+        XCTAssertGreaterThan(player.stopCount(), 0)
+    }
+
     func testEvidenceRedactsSecretLikeRunPathsAndSources() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppVerify-token=super-secret-user-pass", isDirectory: true)
@@ -131,8 +153,8 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
                 makeRunID: { "test-run" }
             ),
             decoderFactory: { decoder },
-            playerFactory: { _, diagnosticsLog in
-                player.attach(diagnosticsLog: diagnosticsLog)
+            playerFactory: { volumeStore, diagnosticsLog in
+                player.attach(volumeStore: volumeStore, diagnosticsLog: diagnosticsLog)
                 return player
             },
             ingesterFactory: ingesterFactory ?? { database, decoder, transcriber, diarizer, fingerprinter, fingerprintEnricher, player, timeline, rollingBuffer, diagnosticsLog, now in
@@ -173,23 +195,53 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
 
 private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @unchecked Sendable {
     private let recordScheduledEvent: Bool
+    private let recordVolumeEvent: Bool
     private let writeMalformedDiagnostics: Bool
     private let queue = DispatchQueue(label: "AppVerifyFixtureRunnerTests.DiagnosticsRecordingPlayer")
     private var diagnosticsLog: AppRuntimeDiagnosticsLog?
+    private var currentStreamID: Int64?
+    private var volumeObserverTask: Task<Void, Never>?
     private var stops = 0
 
-    init(recordScheduledEvent: Bool = true, writeMalformedDiagnostics: Bool = false) {
+    init(recordScheduledEvent: Bool = true, recordVolumeEvent: Bool = true, writeMalformedDiagnostics: Bool = false) {
         self.recordScheduledEvent = recordScheduledEvent
+        self.recordVolumeEvent = recordVolumeEvent
         self.writeMalformedDiagnostics = writeMalformedDiagnostics
     }
 
-    func attach(diagnosticsLog: AppRuntimeDiagnosticsLog) {
+    deinit {
+        volumeObserverTask?.cancel()
+    }
+
+    func attach(volumeStore: AppPlaybackVolumeStore, diagnosticsLog: AppRuntimeDiagnosticsLog) {
         queue.sync {
             self.diagnosticsLog = diagnosticsLog
+        }
+        guard recordVolumeEvent else { return }
+        volumeObserverTask?.cancel()
+        volumeObserverTask = Task { [weak self, volumeStore] in
+            let changes = await volumeStore.changes()
+            for await snapshot in changes {
+                guard let self else { return }
+                if self.currentStreamIDValue() == snapshot.streamID {
+                    diagnosticsLog.recordEvent(
+                        "playback.volume.applied",
+                        streamID: snapshot.streamID,
+                        phase: "playback.volume",
+                        fields: [
+                            "volume": String(format: "%.3f", snapshot.volume),
+                            "isMuted": String(snapshot.isMuted),
+                            "effectiveVolume": String(format: "%.3f", snapshot.effectiveVolume),
+                            "source": "test-observer",
+                        ]
+                    )
+                }
+            }
         }
     }
 
     func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock) async throws {
+        setCurrentStreamID(streamID)
         currentDiagnosticsLog()?.recordEvent(
             "playback.prepare.succeeded",
             streamID: streamID,
@@ -225,9 +277,17 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
     func resume(timeline: AppPlayerTimelineClock) async {}
 
     func stop(timeline: AppPlayerTimelineClock) async {
+        let streamID = currentStreamIDValue()
         queue.sync {
             stops += 1
+            currentStreamID = nil
         }
+        currentDiagnosticsLog()?.recordEvent(
+            "playback.stop.applied",
+            streamID: streamID,
+            phase: "playback.stop",
+            fields: ["source": "test-player"]
+        )
         await timeline.updatePlayerState(.stopped, message: "Test playback stopped.")
     }
 
@@ -237,6 +297,14 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
 
     private func currentDiagnosticsLog() -> AppRuntimeDiagnosticsLog? {
         queue.sync { diagnosticsLog }
+    }
+
+    private func setCurrentStreamID(_ streamID: Int64?) {
+        queue.sync { currentStreamID = streamID }
+    }
+
+    private func currentStreamIDValue() -> Int64? {
+        queue.sync { currentStreamID }
     }
 }
 
