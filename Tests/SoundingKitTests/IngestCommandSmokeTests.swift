@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import SoundingKit
 import XCTest
 
 final class IngestCommandSmokeTests: XCTestCase {
@@ -557,8 +558,8 @@ final class IngestCommandSmokeTests: XCTestCase {
             let database = try DatabaseQueue(path: dbURL.path)
             try database.write { db in
                 try db.execute(
-                    sql: "UPDATE streams SET source = ?, stream_type = 'hls' WHERE name = ?",
-                    arguments: [source, name]
+                    sql: "UPDATE streams SET source = ?, source_url = ?, stream_type = 'hls' WHERE name = ?",
+                    arguments: [IngestRedaction.sourceDescription(source), source, name]
                 )
             }
         }

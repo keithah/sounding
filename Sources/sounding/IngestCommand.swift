@@ -53,7 +53,7 @@ struct IngestCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        let managedStream: StreamRecord?
+        let managedStream: ManagedIngestStream?
         do {
             managedStream = try resolveManagedStream(database: database)
         } catch let error as IngestCommandError {
@@ -84,8 +84,8 @@ struct IngestCommand: AsyncParsableCommand {
                     fingerprintEnricher: fingerprintEnricher
                 ).run(
                     streamID: managedStream.id,
-                    source: managedStream.sourceDescription,
-                    streamType: try streamType(for: managedStream),
+                    source: managedStream.source,
+                    streamType: managedStream.streamType,
                     durationSeconds: duration,
                     maxChunks: maxChunks
                 )
@@ -218,7 +218,7 @@ struct IngestCommand: AsyncParsableCommand {
         }
     }
 
-    private func resolveManagedStream(database: SoundingDatabase) throws -> StreamRecord? {
+    private func resolveManagedStream(database: SoundingDatabase) throws -> ManagedIngestStream? {
         guard let reference = normalizedStreamReference else { return nil }
         let registry = StreamRegistry(database: database)
         let record: StreamRecord?
@@ -233,8 +233,16 @@ struct IngestCommand: AsyncParsableCommand {
         guard record.status == .active else {
             throw IngestCommandError.streamNotActive(status: record.status.rawValue)
         }
-        _ = try streamType(for: record)
-        return record
+        let type = try streamType(for: record)
+        guard let reconnect = try registry.reconnectSource(id: record.id, includeRemoved: true) else {
+            throw IngestCommandError.streamNotFound
+        }
+        return ManagedIngestStream(
+            id: reconnect.streamID,
+            source: reconnect.source,
+            sourceDescription: reconnect.sourceDescription,
+            streamType: type
+        )
     }
 
     private func streamType(for record: StreamRecord) throws -> StreamType {
@@ -366,6 +374,13 @@ struct IngestCommand: AsyncParsableCommand {
     private func standardErrorWrite(_ message: String) {
         FileHandle.standardError.write(Data((message + "\n").utf8))
     }
+}
+
+private struct ManagedIngestStream {
+    var id: Int64
+    var source: String
+    var sourceDescription: String
+    var streamType: StreamType
 }
 
 private enum IngestCommandError: Error, CustomStringConvertible {

@@ -396,6 +396,14 @@ enum SoundingDatabaseMigrator {
             )
         }
 
+        migrator.registerMigration("addHLSIngestDiagnosticsLookupIndex") { db in
+            try db.create(
+                index: "ingest_diagnostics_on_hls_decision_lookup",
+                on: "ingest_diagnostics",
+                columns: ["stream_id", "source_class", "stream_type", "reason", "id"]
+            )
+        }
+
         try migrator.migrate(writer)
     }
 }

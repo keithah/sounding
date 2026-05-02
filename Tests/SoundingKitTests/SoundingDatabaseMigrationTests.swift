@@ -267,7 +267,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'index'
-                  AND tbl_name IN ('streams', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides', 'stream_runtime_status', 'hls_ingest_segments')
+                  AND tbl_name IN ('streams', 'ingest_diagnostics', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides', 'stream_runtime_status', 'hls_ingest_segments')
                 ORDER BY name
                 """))
         }
@@ -275,6 +275,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
         XCTAssertTrue(indexes.isSuperset(of: [
             "streams_on_stream_type",
             "streams_on_source",
+            "ingest_diagnostics_on_hls_decision_lookup",
             "streams_on_status",
             "streams_on_name",
             "streams_on_active_name",

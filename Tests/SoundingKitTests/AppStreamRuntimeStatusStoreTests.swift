@@ -94,6 +94,78 @@ final class AppStreamRuntimeStatusStoreTests: XCTestCase {
         XCTAssertFalse(String(describing: snapshot).contains("user:pass"))
     }
 
+
+    func testInspectionsExposeLatestRedactedHLSDecisionAndIgnoreMalformedContext() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let alpha = try registry.add(
+            name: "Alpha",
+            streamType: "hls",
+            source: "https://user:pass@example.test/private/live.m3u8?token=synthetic-secret#frag",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        _ = try registry.add(
+            name: "Beta",
+            streamType: "hls",
+            source: "https://example.test/beta.m3u8?token=synthetic-secret",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let store = AppStreamRuntimeStatusStore(database: temporary.database)
+
+        try temporary.database.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO ingest_diagnostics (
+                    stream_id, phase, severity, reason, source, source_class, stream_type, context_json, created_at
+                ) VALUES (?, 'persist', 'warning', 'hls-media-sequence-gap', NULL, 'hls_segment', 'hls', ?, ?)
+                """,
+                arguments: [
+                    alpha.id,
+                    "not-json https://user:pass@example.test/raw.m3u8?token=synthetic-secret#frag /Users/alice/private",
+                    "2026-05-01T10:00:01Z"
+                ]
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO ingest_diagnostics (
+                    stream_id, run_id, chunk_id, phase, severity, reason, source, source_class, stream_type, context_json, created_at
+                ) VALUES (?, ?, ?, 'persist', 'info', 'hls-segment-duplicate', NULL, 'hls_segment', 'hls', ?, ?)
+                """,
+                arguments: [
+                    alpha.id,
+                    42,
+                    99,
+                    """
+                    {"decision":"duplicate-skip","mediaSequence":12,"segmentIdentity":"https://example.test/private/seg12.ts","segmentIdentityHash":"abc123","existingRunID":7,"existingChunkID":8,"currentRunID":42}
+                    """,
+                    "2026-05-01T10:00:02Z"
+                ]
+            )
+        }
+
+        let inspections = try store.inspections()
+        XCTAssertEqual(inspections.map(\.name), ["Alpha", "Beta"])
+        let alphaDecision = try XCTUnwrap(inspections.first?.latestHLSDecision)
+        XCTAssertEqual(alphaDecision.reason, "hls-segment-duplicate")
+        XCTAssertEqual(alphaDecision.severity, "info")
+        XCTAssertEqual(alphaDecision.decision, "duplicate-skip")
+        XCTAssertEqual(alphaDecision.mediaSequence, 12)
+        XCTAssertEqual(alphaDecision.segmentIdentity, "https://example.test/private/seg12.ts")
+        XCTAssertEqual(alphaDecision.segmentIdentityHash, "abc123")
+        XCTAssertEqual(alphaDecision.currentRunID, 42)
+        XCTAssertEqual(alphaDecision.existingRunID, 7)
+        XCTAssertEqual(alphaDecision.existingChunkID, 8)
+        XCTAssertEqual(alphaDecision.createdAt, "2026-05-01T10:00:02Z")
+        XCTAssertNil(inspections.last?.latestHLSDecision)
+
+        let described = String(describing: inspections)
+        XCTAssertFalse(described.contains("user:pass"))
+        XCTAssertFalse(described.contains("synthetic-secret"))
+        XCTAssertFalse(described.contains("token="))
+        XCTAssertFalse(described.contains("#frag"))
+        XCTAssertFalse(described.contains("/Users/alice"))
+    }
+
     func testMissingStreamJoinReturnsNoStatusRow() throws {
         let temporary = try TemporarySoundingDatabase()
         let persistence = IngestPersistence(database: temporary.database)

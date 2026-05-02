@@ -28,6 +28,25 @@ enum StreamsOutput {
         var nextRetryAt: String?
         var updatedAt: String?
         var recentFailure: RecentFailure?
+        var latestHLSDecision: HLSDecision?
+    }
+
+    struct HLSDecision: Codable, Equatable {
+        var reason: String
+        var severity: String
+        var decision: String?
+        var mediaSequence: Int?
+        var expectedMediaSequence: Int?
+        var observedMediaSequence: Int?
+        var previousMediaSequence: Int?
+        var segmentIdentity: String?
+        var segmentIdentityHash: String?
+        var existingSegmentIdentity: String?
+        var existingSegmentIdentityHash: String?
+        var currentRunID: Int64?
+        var existingRunID: Int64?
+        var existingChunkID: Int64?
+        var createdAt: String
     }
 
     struct RecentFailure: Codable, Equatable {
@@ -87,7 +106,7 @@ enum StreamsOutput {
         }
 
         return records.map { record in
-            "id=\(record.streamID) name=\(record.name) type=\(record.streamType) stream_status=\(record.streamStatus) source=\(redactedSourceDescription(record.sourceDescription)) phase=\(record.phase) has_runtime_status=\(record.hasRuntimeStatus) attempt=\(record.attempt) max_attempts=\(record.maxAttempts) next_retry_seconds=\(optionalInt(record.nextRetrySeconds)) next_retry_at=\(optionalTimestamp(record.nextRetryAt)) updated_at=\(optionalTimestamp(record.updatedAt)) recent_failure=\(optionalFailure(record.recentFailure))"
+            "id=\(record.streamID) name=\(record.name) type=\(record.streamType) stream_status=\(record.streamStatus) source=\(redactedSourceDescription(record.sourceDescription)) phase=\(record.phase) has_runtime_status=\(record.hasRuntimeStatus) attempt=\(record.attempt) max_attempts=\(record.maxAttempts) next_retry_seconds=\(optionalInt(record.nextRetrySeconds)) next_retry_at=\(optionalTimestamp(record.nextRetryAt)) updated_at=\(optionalTimestamp(record.updatedAt)) recent_failure=\(optionalFailure(record.recentFailure)) latest_hls_decision=\(optionalHLSDecision(record.latestHLSDecision))"
         }.joined(separator: "\n") + "\n"
     }
 
@@ -134,7 +153,28 @@ enum StreamsOutput {
             updatedAt: record.updatedAt,
             recentFailure: record.recentFailure.map {
                 RecentFailure(message: redactedSourceDescription($0.message), occurredAt: $0.occurredAt)
-            }
+            },
+            latestHLSDecision: record.latestHLSDecision.map(sanitizedHLSDecision)
+        )
+    }
+
+    private static func sanitizedHLSDecision(_ decision: AppStreamRuntimeHLSDecision) -> HLSDecision {
+        HLSDecision(
+            reason: redactedSourceDescription(decision.reason),
+            severity: redactedSourceDescription(decision.severity),
+            decision: decision.decision.map(redactedSourceDescription),
+            mediaSequence: decision.mediaSequence,
+            expectedMediaSequence: decision.expectedMediaSequence,
+            observedMediaSequence: decision.observedMediaSequence,
+            previousMediaSequence: decision.previousMediaSequence,
+            segmentIdentity: decision.segmentIdentity.map(redactedSourceDescription),
+            segmentIdentityHash: decision.segmentIdentityHash.map(redactedSourceDescription),
+            existingSegmentIdentity: decision.existingSegmentIdentity.map(redactedSourceDescription),
+            existingSegmentIdentityHash: decision.existingSegmentIdentityHash.map(redactedSourceDescription),
+            currentRunID: decision.currentRunID,
+            existingRunID: decision.existingRunID,
+            existingChunkID: decision.existingChunkID,
+            createdAt: redactedSourceDescription(decision.createdAt)
         )
     }
 
@@ -149,6 +189,25 @@ enum StreamsOutput {
     private static func optionalFailure(_ failure: AppStreamRuntimeRecentFailure?) -> String {
         guard let failure else { return "none" }
         return "\(redactedSourceDescription(failure.message)) at \(failure.occurredAt)"
+    }
+
+    private static func optionalHLSDecision(_ decision: AppStreamRuntimeHLSDecision?) -> String {
+        guard let decision else { return "none" }
+        var fields = [
+            "reason=\(redactedSourceDescription(decision.reason))",
+            "severity=\(redactedSourceDescription(decision.severity))",
+            "created_at=\(redactedSourceDescription(decision.createdAt))",
+        ]
+        if let value = decision.decision { fields.append("decision=\(redactedSourceDescription(value))") }
+        if let value = decision.mediaSequence { fields.append("media_sequence=\(value)") }
+        if let value = decision.expectedMediaSequence { fields.append("expected_media_sequence=\(value)") }
+        if let value = decision.observedMediaSequence { fields.append("observed_media_sequence=\(value)") }
+        if let value = decision.previousMediaSequence { fields.append("previous_media_sequence=\(value)") }
+        if let value = decision.segmentIdentity { fields.append("segment_identity=\(redactedSourceDescription(value))") }
+        if let value = decision.existingRunID { fields.append("existing_run=\(value)") }
+        if let value = decision.existingChunkID { fields.append("existing_chunk=\(value)") }
+        if let value = decision.currentRunID { fields.append("current_run=\(value)") }
+        return fields.joined(separator: ",")
     }
 
     private static func redactedSourceDescription(_ source: String) -> String {

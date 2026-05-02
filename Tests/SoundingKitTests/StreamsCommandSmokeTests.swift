@@ -290,6 +290,74 @@ final class StreamsCommandSmokeTests: XCTestCase {
         assertStreamOutputSanitized(stderr, dbURL: dbURL)
     }
 
+    func testRuntimeStatusHumanAndJSONExposeLatestHLSDecisionRedacted() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "hls-status-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        XCTAssertEqual(try addStream(dbURL: dbURL, name: "Alpha").exitCode, 0)
+        XCTAssertEqual(try addStream(dbURL: dbURL, name: "Beta").exitCode, 0)
+
+        try DatabaseQueue(path: dbURL.path).write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO ingest_diagnostics (
+                    stream_id, run_id, chunk_id, phase, severity, reason, source, source_class, stream_type, context_json, created_at
+                ) VALUES (?, ?, ?, 'persist', 'warning', 'hls-media-sequence-gap', NULL, 'hls_segment', 'hls', ?, ?)
+                """,
+                arguments: [
+                    1,
+                    11,
+                    nil,
+                    """
+                    {"decision":"sequence-gap","mediaSequence":12,"expectedMediaSequence":10,"observedMediaSequence":12,"previousMediaSequence":9,"segmentIdentity":"https://example.test/private/seg12.ts","segmentIdentityHash":"hash-12","currentRunID":11}
+                    """,
+                    "2026-05-01T10:00:01Z"
+                ]
+            )
+            try db.execute(
+                sql: """
+                INSERT INTO ingest_diagnostics (
+                    stream_id, run_id, chunk_id, phase, severity, reason, source, source_class, stream_type, context_json, created_at
+                ) VALUES (?, ?, ?, 'persist', 'info', 'hls-segment-duplicate', NULL, 'hls_segment', 'hls', ?, ?)
+                """,
+                arguments: [
+                    1,
+                    12,
+                    34,
+                    """
+                    {"decision":"duplicate-skip","mediaSequence":13,"segmentIdentity":"https://example.test/private/seg13.ts?token=synthetic-secret#frag","segmentIdentityHash":"hash-13","existingRunID":11,"existingChunkID":33,"currentRunID":12}
+                    """,
+                    "2026-05-01T10:00:02Z"
+                ]
+            )
+        }
+
+        let human = try runSounding(arguments: ["streams", "status", "--db", dbURL.path])
+        XCTAssertEqual(human.exitCode, 0, human.diagnosticSummary)
+        let humanText = String(data: human.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(humanText.contains("latest_hls_decision=reason=hls-segment-duplicate"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("decision=duplicate-skip"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("media_sequence=13"), human.diagnosticSummary)
+        assertStreamOutputSanitized(humanText, dbURL: dbURL)
+
+        let json = try runSounding(arguments: [
+            "streams", "status", "--db", dbURL.path, "--json",
+        ])
+        XCTAssertEqual(json.exitCode, 0, json.diagnosticSummary)
+        let payload = try decodeJSON(
+            RuntimeStatusPayload.self, from: json.stdout, context: json.diagnosticSummary)
+        let alpha = try XCTUnwrap(payload.streams.first(where: { $0.name == "Alpha" }))
+        XCTAssertEqual(alpha.latestHLSDecision?.reason, "hls-segment-duplicate")
+        XCTAssertEqual(alpha.latestHLSDecision?.severity, "info")
+        XCTAssertEqual(alpha.latestHLSDecision?.decision, "duplicate-skip")
+        XCTAssertEqual(alpha.latestHLSDecision?.mediaSequence, 13)
+        XCTAssertEqual(alpha.latestHLSDecision?.existingRunID, 11)
+        XCTAssertEqual(alpha.latestHLSDecision?.existingChunkID, 33)
+        XCTAssertEqual(alpha.latestHLSDecision?.currentRunID, 12)
+        XCTAssertEqual(alpha.latestHLSDecision?.createdAt, "2026-05-01T10:00:02Z")
+        XCTAssertNil(payload.streams.first(where: { $0.name == "Beta" })?.latestHLSDecision)
+        assertStreamOutputSanitized(String(data: json.stdout, encoding: .utf8) ?? "", dbURL: dbURL)
+    }
+
     func testPauseResumeRemoveIdempotenceAndIncludeRemovedBehavior() throws {
         let dbURL = temporaryDatabaseURL(secretComponent: "idempotent-token=synthetic-secret")
         defer { removeDatabaseFiles(dbURL) }
@@ -451,6 +519,23 @@ final class StreamsCommandSmokeTests: XCTestCase {
         var nextRetryAt: String?
         var updatedAt: String?
         var recentFailure: RecentFailure?
+        var latestHLSDecision: HLSDecision?
+    }
+
+    private struct HLSDecision: Decodable {
+        var reason: String
+        var severity: String
+        var decision: String?
+        var mediaSequence: Int?
+        var expectedMediaSequence: Int?
+        var observedMediaSequence: Int?
+        var previousMediaSequence: Int?
+        var segmentIdentity: String?
+        var segmentIdentityHash: String?
+        var existingRunID: Int64?
+        var existingChunkID: Int64?
+        var currentRunID: Int64?
+        var createdAt: String
     }
 
     private struct RecentFailure: Decodable {

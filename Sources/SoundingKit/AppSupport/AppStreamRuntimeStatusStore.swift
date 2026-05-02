@@ -25,6 +25,58 @@ public enum AppStreamRuntimeStatusStoreError: Error, Equatable, Sendable, Custom
 ///
 /// `hasRuntimeStatus == false` represents an absent status row. Callers should render that as an
 /// idle/unknown runtime state instead of failing inspection for the whole database.
+public struct AppStreamRuntimeHLSDecision: Equatable, Sendable {
+    public var reason: String
+    public var severity: String
+    public var decision: String?
+    public var mediaSequence: Int?
+    public var expectedMediaSequence: Int?
+    public var observedMediaSequence: Int?
+    public var previousMediaSequence: Int?
+    public var segmentIdentity: String?
+    public var segmentIdentityHash: String?
+    public var existingSegmentIdentity: String?
+    public var existingSegmentIdentityHash: String?
+    public var currentRunID: Int64?
+    public var existingRunID: Int64?
+    public var existingChunkID: Int64?
+    public var createdAt: String
+
+    public init(
+        reason: String,
+        severity: String,
+        decision: String?,
+        mediaSequence: Int?,
+        expectedMediaSequence: Int?,
+        observedMediaSequence: Int?,
+        previousMediaSequence: Int?,
+        segmentIdentity: String?,
+        segmentIdentityHash: String?,
+        existingSegmentIdentity: String?,
+        existingSegmentIdentityHash: String?,
+        currentRunID: Int64?,
+        existingRunID: Int64?,
+        existingChunkID: Int64?,
+        createdAt: String
+    ) {
+        self.reason = IngestRedaction.redact(reason)
+        self.severity = IngestRedaction.redact(severity)
+        self.decision = decision.map(IngestRedaction.redact)
+        self.mediaSequence = mediaSequence
+        self.expectedMediaSequence = expectedMediaSequence
+        self.observedMediaSequence = observedMediaSequence
+        self.previousMediaSequence = previousMediaSequence
+        self.segmentIdentity = segmentIdentity.map(IngestRedaction.sourceDescription)
+        self.segmentIdentityHash = segmentIdentityHash.map(IngestRedaction.redact)
+        self.existingSegmentIdentity = existingSegmentIdentity.map(IngestRedaction.sourceDescription)
+        self.existingSegmentIdentityHash = existingSegmentIdentityHash.map(IngestRedaction.redact)
+        self.currentRunID = currentRunID
+        self.existingRunID = existingRunID
+        self.existingChunkID = existingChunkID
+        self.createdAt = IngestRedaction.redact(createdAt)
+    }
+}
+
 public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
     public var streamID: Int64
     public var name: String
@@ -39,6 +91,7 @@ public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
     public var nextRetryAt: String?
     public var updatedAt: String?
     public var recentFailure: AppStreamRuntimeRecentFailure?
+    public var latestHLSDecision: AppStreamRuntimeHLSDecision?
 
     public init(
         streamID: Int64,
@@ -53,7 +106,8 @@ public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
         nextRetrySeconds: Int?,
         nextRetryAt: String?,
         updatedAt: String?,
-        recentFailure: AppStreamRuntimeRecentFailure?
+        recentFailure: AppStreamRuntimeRecentFailure?,
+        latestHLSDecision: AppStreamRuntimeHLSDecision? = nil
     ) {
         self.streamID = streamID
         self.name = IngestRedaction.redact(name)
@@ -68,6 +122,7 @@ public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
         self.nextRetryAt = nextRetryAt.map(IngestRedaction.redact)
         self.updatedAt = updatedAt.map(IngestRedaction.redact)
         self.recentFailure = recentFailure
+        self.latestHLSDecision = latestHLSDecision
     }
 }
 
@@ -211,10 +266,37 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                            stream_runtime_status.next_retry_at,
                            stream_runtime_status.recent_failure_message,
                            stream_runtime_status.recent_failure_at,
-                           stream_runtime_status.updated_at AS runtime_updated_at
+                           stream_runtime_status.updated_at AS runtime_updated_at,
+                           latest_hls_decision.reason AS hls_reason,
+                           latest_hls_decision.severity AS hls_severity,
+                           latest_hls_decision.context_json AS hls_context_json,
+                           latest_hls_decision.created_at AS hls_created_at
                     FROM streams
                     LEFT JOIN stream_runtime_status
                       ON stream_runtime_status.stream_id = streams.id
+                    LEFT JOIN (
+                        SELECT ingest_diagnostics.stream_id,
+                               ingest_diagnostics.reason,
+                               ingest_diagnostics.severity,
+                               ingest_diagnostics.context_json,
+                               ingest_diagnostics.created_at
+                        FROM ingest_diagnostics
+                        JOIN (
+                            SELECT stream_id, MAX(id) AS latest_id
+                            FROM ingest_diagnostics
+                            WHERE stream_id IS NOT NULL
+                              AND source_class = 'hls_segment'
+                              AND stream_type = 'hls'
+                              AND reason IN (
+                                  'hls-segment-duplicate',
+                                  'hls-media-sequence-gap',
+                                  'hls-segment-identity-conflict'
+                              )
+                            GROUP BY stream_id
+                        ) AS latest_by_stream
+                          ON latest_by_stream.latest_id = ingest_diagnostics.id
+                    ) AS latest_hls_decision
+                      ON latest_hls_decision.stream_id = streams.id
                     WHERE streams.name IS NOT NULL
                       \(removedClause)
                     ORDER BY streams.name COLLATE NOCASE, streams.id
@@ -349,8 +431,55 @@ public struct AppStreamRuntimeStatusStore: Sendable {
             nextRetrySeconds: row["next_retry_seconds"],
             nextRetryAt: row["next_retry_at"],
             updatedAt: runtimeUpdatedAt,
-            recentFailure: malformedFailure ?? persistedFailure
+            recentFailure: malformedFailure ?? persistedFailure,
+            latestHLSDecision: decodeHLSDecision(row: row)
         )
+    }
+
+    private static func decodeHLSDecision(row: Row) -> AppStreamRuntimeHLSDecision? {
+        guard let reason: String = row["hls_reason"],
+              let severity: String = row["hls_severity"],
+              let createdAt: String = row["hls_created_at"]
+        else { return nil }
+        guard let contextJSON: String = row["hls_context_json"],
+              let data = contextJSON.data(using: .utf8),
+              let context = try? JSONDecoder().decode([String: JSONValue].self, from: data)
+        else { return nil }
+        let redactedContext = IngestRedaction.context(context) ?? [:]
+
+        return AppStreamRuntimeHLSDecision(
+            reason: reason,
+            severity: severity,
+            decision: stringValue("decision", in: redactedContext),
+            mediaSequence: intValue("mediaSequence", in: redactedContext),
+            expectedMediaSequence: intValue("expectedMediaSequence", in: redactedContext),
+            observedMediaSequence: intValue("observedMediaSequence", in: redactedContext),
+            previousMediaSequence: intValue("previousMediaSequence", in: redactedContext),
+            segmentIdentity: stringValue("segmentIdentity", in: redactedContext),
+            segmentIdentityHash: stringValue("segmentIdentityHash", in: redactedContext),
+            existingSegmentIdentity: stringValue("existingSegmentIdentity", in: redactedContext),
+            existingSegmentIdentityHash: stringValue("existingSegmentIdentityHash", in: redactedContext),
+            currentRunID: int64Value("currentRunID", in: redactedContext),
+            existingRunID: int64Value("existingRunID", in: redactedContext),
+            existingChunkID: int64Value("existingChunkID", in: redactedContext),
+            createdAt: createdAt
+        )
+    }
+
+    private static func stringValue(_ key: String, in context: [String: JSONValue]) -> String? {
+        guard case .string(let value)? = context[key] else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func intValue(_ key: String, in context: [String: JSONValue]) -> Int? {
+        guard case .number(let value)? = context[key], value.isFinite else { return nil }
+        return Int(value)
+    }
+
+    private static func int64Value(_ key: String, in context: [String: JSONValue]) -> Int64? {
+        guard case .number(let value)? = context[key], value.isFinite else { return nil }
+        return Int64(value)
     }
 
     private static func redactedDatabaseMessage(_ error: Error) -> String {
