@@ -307,17 +307,22 @@ public struct AppVerifyLiveStreamFacts: Codable, Equatable, Sendable {
 
     private static func redactedFieldKey(_ key: String) -> String {
         let redacted = AppVerifyEvidenceSanitizer.redact(key)
-        if redacted.range(of: "path", options: [.caseInsensitive]) != nil {
+        if isPathLikeKey(redacted) {
             return "[redacted-path-key]"
         }
         return redacted
     }
 
     private static func redactedFieldValue(_ value: String, key: String) -> String {
-        if key.range(of: "path", options: [.caseInsensitive]) != nil {
+        if isPathLikeKey(key) {
             return AppVerifyEvidenceSanitizer.artifactPath(value)
         }
         return AppVerifyEvidenceSanitizer.redact(value)
+    }
+
+    private static func isPathLikeKey(_ key: String) -> Bool {
+        key.range(of: "path", options: [.caseInsensitive]) != nil
+            || key.range(of: "directory", options: [.caseInsensitive]) != nil
     }
 }
 
