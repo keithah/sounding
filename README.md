@@ -214,6 +214,21 @@ Operator-local live sleep/wake checklist:
 
 Do not paste generated database paths, raw `source_url` values, signed query strings, credentials, URL fragments, evidence paths, or secret-like filenames into tracked diagnostics. The status command should only print redacted stream descriptions and redacted failure text; if private source details appear, treat that as a redaction bug.
 
+## Soak evidence proof
+
+M005/S05 adds a short synthetic soak proof and a local-only 72-hour evidence workflow. Use the short proof for routine validation because it exercises runtime status, reconnect evidence, queue/resource samples, lifecycle recovery, database checkpoint health, threshold verdicts, and redaction audit behavior without private streams:
+
+```sh
+swift run --package-path sounding sounding soak proof \
+  --db /tmp/sounding-soak-proof.sqlite \
+  --evidence-out /tmp/sounding-soak-proof.json \
+  --duration-seconds 0.3 \
+  --sample-interval-seconds 0.1 \
+  --json
+```
+
+For operator-local unattended proof with three or more authorized streams, follow [`docs/soak-evidence.md`](docs/soak-evidence.md). The runbook defines the ignored `soak-proof.local/YYYYMMDD-HHMM/` artifact layout, start/during/end capture cadence, sleep/wake capture, DB/WAL/checkpoint interpretation, queue/resource/reconnect/HLS count interpretation, pass/fail criteria, and the redaction checklist. The schema example in [`docs/soak-evidence.example.json`](docs/soak-evidence.example.json) is safe synthetic content only; do not replace it with generated local evidence.
+
 ## Database health and recovery
 
 M005 adds a database inspection surface for the same SQLite database used by Sounding.app and the CLI. Use it when the app reports persistence trouble, before and after copying a database for local investigation, after an unclean shutdown, or when WAL growth suggests checkpoint work is not completing.

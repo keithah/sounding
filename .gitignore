@@ -44,4 +44,11 @@ live-verify-evidence/
 live-proof.local/
 *.live-evidence.json
 *.live-evidence.ndjson
+
+# Local-only soak proof workspaces and generated evidence.
+soak-proof.local/
+soak-evidence/
+*.soak-evidence.json
+*.soak-evidence.ndjson
+!docs/soak-evidence.example.json
 !live-streams.example.json

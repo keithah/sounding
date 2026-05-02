@@ -1,0 +1,184 @@
+{
+  "databaseSnapshots" : [
+    {
+      "availability" : "available",
+      "checkpointBusyFrames" : 0,
+      "checkpointLogFrames" : 4,
+      "checkpointedFrames" : 4,
+      "databaseBytes" : 65536,
+      "foreignKeyCheckStatus" : "ok",
+      "journalMode" : "wal",
+      "pageCount" : 16,
+      "quickCheckStatus" : "ok",
+      "shmBytes" : 32768,
+      "status" : "healthy",
+      "walBytes" : 0
+    }
+  ],
+  "failures" : [
+
+  ],
+  "generatedAt" : "2026-05-01T12:05:00.000Z",
+  "hlsDecisionCounts" : {
+    "duplicateSegmentCount" : 0,
+    "mediaSequenceGapCount" : 0,
+    "segmentIdentityConflictCount" : 0,
+    "unavailableCount" : 0
+  },
+  "limits" : {
+    "maxDatabaseSnapshots" : 64,
+    "maxFailures" : 64,
+    "maxQueueSnapshots" : 256,
+    "maxResourceSamples" : 256,
+    "maxRuntimeEvents" : 256,
+    "maxStreams" : 16
+  },
+  "queueSnapshots" : [
+    {
+      "completed" : 2,
+      "currentDepth" : 0,
+      "isBusy" : false,
+      "maxDepth" : 1,
+      "started" : 2,
+      "submitted" : 2
+    }
+  ],
+  "redactionAudit" : {
+    "checkedStringCount" : 35,
+    "forbiddenSubstringCount" : 0,
+    "forbiddenSubstrings" : [
+
+    ],
+    "passed" : true
+  },
+  "resourceSamples" : [
+    {
+      "at" : "2026-05-01T12:04:30.000Z",
+      "availability" : "available",
+      "cpuPercent" : 3.2,
+      "memoryBytes" : 52428800,
+      "note" : "synthetic local sample",
+      "openFileDescriptorCount" : 18
+    }
+  ],
+  "runtimeEvents" : [
+    {
+      "at" : "2026-05-01T12:04:15.000Z",
+      "attempt" : 1,
+      "phase" : "reconnecting",
+      "reason" : "synthetic retry scheduled",
+      "streamID" : 1
+    },
+    {
+      "at" : "2026-05-01T12:04:16.000Z",
+      "attempt" : 1,
+      "phase" : "running",
+      "reason" : "synthetic retry recovered",
+      "recoveryLatencySeconds" : 0.4,
+      "streamID" : 1
+    }
+  ],
+  "schemaVersion" : 1,
+  "streams" : [
+    {
+      "attempt" : 1,
+      "hasRuntimeStatus" : true,
+      "hlsDecisionReason" : "no duplicate media segments observed",
+      "lifecycleReason" : "synthetic wake recovery complete",
+      "maxAttempts" : 1,
+      "name" : "Example Authorized Stream A",
+      "phase" : "running",
+      "recoveryLatencySeconds" : 0.4,
+      "sourceDescription" : "redacted authorized stream source",
+      "streamID" : 1,
+      "streamType" : "hls",
+      "updatedAt" : "2026-05-01T12:04:16.000Z"
+    },
+    {
+      "attempt" : 0,
+      "hasRuntimeStatus" : true,
+      "maxAttempts" : 1,
+      "name" : "Example Authorized Stream B",
+      "phase" : "running",
+      "sourceDescription" : "redacted authorized stream source",
+      "streamID" : 2,
+      "streamType" : "icy",
+      "updatedAt" : "2026-05-01T12:04:16.000Z"
+    }
+  ],
+  "summary" : {
+    "databaseSnapshotCount" : 1,
+    "failureCount" : 0,
+    "message" : "Short soak proof completed.",
+    "omittedRuntimeEventCount" : 0,
+    "omittedSampleCount" : 0,
+    "queueSnapshotCount" : 1,
+    "resourceSampleCount" : 1,
+    "runtimeEventCount" : 2,
+    "streamCount" : 2,
+    "verdict" : "pass"
+  },
+  "thresholds" : [
+    {
+      "limit" : 1,
+      "message" : "bounded reconnect evidence recorded",
+      "name" : "runtimeReconnectAttempts",
+      "observed" : 1,
+      "status" : "pass",
+      "unit" : "count"
+    },
+    {
+      "limit" : 0,
+      "message" : "terminal runtime errors within threshold",
+      "name" : "runtimeTerminalErrors",
+      "observed" : 0,
+      "status" : "pass",
+      "unit" : "count"
+    },
+    {
+      "limit" : 0,
+      "message" : "inference queue drained",
+      "name" : "queueFinalDepth",
+      "observed" : 0,
+      "status" : "pass",
+      "unit" : "count"
+    },
+    {
+      "limit" : 4,
+      "message" : "queue depth stayed within threshold",
+      "name" : "queueMaxDepth",
+      "observed" : 1,
+      "status" : "pass",
+      "unit" : "count"
+    },
+    {
+      "limit" : 0,
+      "message" : "database health and checkpoint samples healthy",
+      "name" : "databaseHealthAndCheckpoint",
+      "observed" : 0,
+      "status" : "pass",
+      "unit" : "count"
+    },
+    {
+      "limit" : 0,
+      "message" : "resource samples available",
+      "name" : "resourceAvailability",
+      "observed" : 0,
+      "status" : "pass",
+      "unit" : "count"
+    },
+    {
+      "limit" : 5,
+      "message" : "lifecycle recovery latency within threshold",
+      "name" : "lifecycleRecoveryLatency",
+      "observed" : 0.4,
+      "status" : "pass",
+      "unit" : "seconds"
+    }
+  ],
+  "timeRange" : {
+    "durationSeconds" : 60,
+    "endedAt" : "2026-05-01T12:05:00.000Z",
+    "startedAt" : "2026-05-01T12:04:00.000Z"
+  }
+}

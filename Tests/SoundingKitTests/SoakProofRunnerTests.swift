@@ -325,6 +325,23 @@ final class SoakProofRunnerTests: XCTestCase {
         }
     }
 
+    func testDocumentedSoakEvidenceExampleDecodesAndContainsOnlySafeSyntheticContent() throws {
+        let exampleURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("docs/soak-evidence.example.json")
+        let data = try Data(contentsOf: exampleURL)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let evidence = try JSONDecoder().decode(SoakEvidence.self, from: data)
+
+        XCTAssertEqual(evidence.schemaVersion, SoakEvidence.currentSchemaVersion)
+        XCTAssertEqual(evidence.summary.verdict, .pass)
+        XCTAssertEqual(evidence.redactionAudit.passed, true)
+        XCTAssertTrue(evidence.thresholds.contains { $0.name == "databaseHealthAndCheckpoint" })
+        XCTAssertTrue(evidence.thresholds.contains { $0.name == "lifecycleRecoveryLatency" })
+        XCTAssertTrue(evidence.runtimeEvents.contains { $0.phase == "reconnecting" })
+        XCTAssertTrue(evidence.databaseSnapshots.contains { $0.checkpointLogFrames != nil })
+        assertNoForbiddenTrackedExampleSubstrings(text)
+    }
+
     private static func sampleEvidence() -> SoakEvidence {
         SoakEvidence(
             generatedAt: "2026-05-01T10:00:02Z",
@@ -399,5 +416,42 @@ private func assertNoForbiddenSoakSubstrings(
         "soak-evidence"
     ] {
         XCTAssertFalse(lowercased.contains(forbidden), "Payload leaked forbidden substring \(forbidden): \(payload)", file: file, line: line)
+    }
+}
+
+private func assertNoForbiddenTrackedExampleSubstrings(
+    _ payload: String,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    let lowercased = payload.lowercased()
+    for forbidden in [
+        "://",
+        "?",
+        "#",
+        "token=",
+        "access_token",
+        "api_key",
+        "synthetic-secret",
+        "user:pass",
+        "password",
+        "passwd",
+        "pwd=",
+        ".sqlite",
+        ".db",
+        ".wal",
+        ".shm",
+        "-wal",
+        "-shm",
+        "/tmp/",
+        "/private/tmp/",
+        "/users/",
+        "/var/",
+        "soak-proof.local",
+        "soak-evidence",
+        "signing",
+        "notary"
+    ] {
+        XCTAssertFalse(lowercased.contains(forbidden), "Tracked soak evidence example leaked forbidden substring \(forbidden): \(payload)", file: file, line: line)
     }
 }
