@@ -117,6 +117,112 @@ final class AppVerifyEvidenceTests: XCTestCase {
         XCTAssertEqual(summary.failedRequiredCheckCount, 2)
     }
 
+    func testS01RequiredIsStableAndFixtureRequiredIncludesS02Controls() {
+        XCTAssertEqual(AppVerifyCheckName.s01Required, [
+            .fixtureSourceCreated,
+            .databaseOpened,
+            .streamRegistered,
+            .runtimeStarted,
+            .decodeCompleted,
+            .avfoundationPlaybackScheduled,
+            .runtimeStopped,
+            .diagnosticsWritten,
+        ])
+        XCTAssertEqual(AppVerifyCheckName.s02ControlRequired, [
+            .playbackMuted,
+            .playbackUnmuted,
+            .playbackVolumeChanged,
+            .runtimeStopObserved,
+            .runtimeRestartObserved,
+        ])
+        XCTAssertEqual(AppVerifyCheckName.fixtureRequired, AppVerifyCheckName.s01Required + AppVerifyCheckName.s02ControlRequired)
+        XCTAssertEqual(Set(AppVerifyCheckName.fixtureRequired).count, AppVerifyCheckName.fixtureRequired.count)
+    }
+
+    func testControlObservationFactsRoundTripAndSanitizeDiagnostics() throws {
+        let diagnostics = [
+            AppVerifyParsedDiagnosticEntry(
+                event: "runtime.mute.requested",
+                phase: "runtime.volume",
+                streamID: 42,
+                message: "muted /tmp/sounding-token=synthetic-secret/file.wav",
+                fields: [
+                    "isMuted": "true",
+                    "path": "/Users/alice/private.wav?token=synthetic-secret",
+                    "api_key": "synthetic-secret",
+                ]
+            ),
+            AppVerifyParsedDiagnosticEntry(
+                event: "playback.volume.applied",
+                phase: "playback.volume",
+                streamID: 42,
+                fields: ["effectiveVolume": "0.000"]
+            ),
+        ]
+        let check = AppVerifyCheckEvaluator.controlObserved(
+            .playbackMuted,
+            requestedAction: "mute?token=synthetic-secret",
+            observedRuntimePhase: .playbackControl,
+            timelineState: "playing",
+            volume: 0.75,
+            muted: true,
+            effectiveVolume: 0,
+            diagnostics: diagnostics,
+            requiredDiagnosticEvents: ["runtime.mute.requested", "playback.volume.applied"],
+            beforeMarker: "/tmp/before-token=synthetic-secret",
+            afterMarker: "/tmp/after-token=synthetic-secret"
+        )
+        let evidence = AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "fixture-run-1",
+            checks: [check]
+        )
+
+        let data = try evidence.jsonData()
+        let json = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertTrue(json.contains(#""playback_muted""#), json)
+        XCTAssertTrue(json.contains(#""controlFacts""#), json)
+        XCTAssertTrue(json.contains(#""runtime.mute.requested""#), json)
+        XCTAssertTrue(json.contains(#""playback.volume.applied""#), json)
+        XCTAssertFalse(json.contains("synthetic-secret"), json)
+        XCTAssertFalse(json.contains("token="), json)
+        XCTAssertFalse(json.contains("/Users/alice"), json)
+        XCTAssertFalse(json.contains("/tmp/sounding"), json)
+
+        let decoded = try JSONDecoder().decode(AppVerifyEvidence.self, from: data)
+        XCTAssertEqual(decoded.checks.first?.status, .pass)
+        XCTAssertEqual(decoded.checks.first?.controlFacts?.requestedAction, "mute?[redacted-secret]")
+        XCTAssertEqual(decoded.checks.first?.controlFacts?.diagnostics.count, 2)
+        XCTAssertEqual(decoded.summary.status, .pass)
+    }
+
+    func testMissingControlObservationFailsRequiredCheckWithBoundedSanitizedFacts() throws {
+        let check = AppVerifyCheckEvaluator.controlObserved(
+            .runtimeRestartObserved,
+            requestedAction: "restart /tmp/sounding-token=synthetic-secret",
+            observedRuntimePhase: .runtimeRestart,
+            diagnostics: [],
+            requiredDiagnosticEvents: ["runtime.start.requested", "runtime.event.published"]
+        )
+        XCTAssertEqual(check.status, .fail)
+        XCTAssertTrue(check.required)
+        XCTAssertEqual(check.phase, .runtimeRestart)
+        XCTAssertTrue(check.reason?.contains("missing diagnostic events") == true, check.reason ?? "")
+        XCTAssertTrue(check.reason?.contains("missing observed control state") == true, check.reason ?? "")
+        XCTAssertFalse(check.reason?.contains("synthetic-secret") ?? true, check.reason ?? "")
+
+        let evidence = AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "fixture-run-1",
+            checks: [check]
+        )
+        let json = try XCTUnwrap(String(data: try evidence.jsonData(), encoding: .utf8))
+        XCTAssertTrue(json.contains(#""runtime_restart_observed""#), json)
+        XCTAssertFalse(json.contains("synthetic-secret"), json)
+        XCTAssertEqual(evidence.summary.status, .fail)
+        XCTAssertEqual(evidence.summary.failedRequiredCheckCount, 1)
+    }
+
     func testFixtureWAVCreationProducesRuntimeGeneratedPCMFixture() async throws {
         let runDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppVerifyEvidenceTests-\(UUID().uuidString)", isDirectory: true)

@@ -541,30 +541,37 @@ public struct AppVerifyFixtureRunner: Sendable {
         return AppVerifyDiagnosticsSnapshot(
             eventFileExists: FileManager.default.fileExists(atPath: diagnostics.eventLogURL.path),
             errorFileExists: FileManager.default.fileExists(atPath: diagnostics.failureLogURL.path),
-            eventNames: events.names,
-            errorNames: errors.names,
+            eventEntries: events.entries,
+            errorEntries: errors.entries,
             malformedLineCount: events.malformedLineCount + errors.malformedLineCount
         )
     }
 
-    private func parseDiagnostics(at url: URL) -> (names: [String], malformedLineCount: Int) {
+    private func parseDiagnostics(at url: URL) -> (entries: [AppVerifyParsedDiagnosticEntry], malformedLineCount: Int) {
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return ([], 0) }
         let text = String(decoding: data, as: UTF8.self)
-        var names: [String] = []
+        var entries: [AppVerifyParsedDiagnosticEntry] = []
         var malformed = 0
+        let decoder = JSONDecoder()
         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let lineData = String(line).data(using: .utf8) else {
                 malformed += 1
                 continue
             }
             do {
-                let entry = try JSONDecoder().decode(AppVerifyDiagnosticEntry.self, from: lineData)
-                names.append(AppVerifyEvidenceSanitizer.redact(entry.event))
+                let entry = try decoder.decode(AppVerifyRawDiagnosticEntry.self, from: lineData)
+                entries.append(AppVerifyParsedDiagnosticEntry(
+                    event: entry.event,
+                    phase: entry.phase,
+                    streamID: entry.streamID,
+                    message: entry.message,
+                    fields: entry.fields ?? [:]
+                ))
             } catch {
                 malformed += 1
             }
         }
-        return (Array(names.suffix(64)), malformed)
+        return (Array(entries.suffix(64)), malformed)
     }
 
     private func scheduledBufferCount(from timeline: AppPlayerTimelineSnapshot?) -> Int {
@@ -613,17 +620,33 @@ private struct AppVerifyRunnerTimeoutError: Error, CustomStringConvertible, Send
 private struct AppVerifyDiagnosticsSnapshot: Sendable {
     var eventFileExists: Bool
     var errorFileExists: Bool
-    var eventNames: [String]
-    var errorNames: [String]
+    var eventEntries: [AppVerifyParsedDiagnosticEntry]
+    var errorEntries: [AppVerifyParsedDiagnosticEntry]
     var malformedLineCount: Int
+
+    var eventNames: [String] {
+        eventEntries.map(\.event)
+    }
+
+    var errorNames: [String] {
+        errorEntries.map(\.event)
+    }
 
     var recentNames: [String] {
         Array((eventNames + errorNames).suffix(32))
     }
+
+    var recentEntries: [AppVerifyParsedDiagnosticEntry] {
+        Array((eventEntries + errorEntries).suffix(32))
+    }
 }
 
-private struct AppVerifyDiagnosticEntry: Decodable {
+private struct AppVerifyRawDiagnosticEntry: Decodable {
     var event: String
+    var phase: String?
+    var streamID: Int64?
+    var message: String?
+    var fields: [String: String]?
 }
 
 private struct AppVerifyDeterministicTranscriber: MLTranscription {

@@ -27,7 +27,9 @@ public enum AppVerifyRuntimePhase: String, Codable, Equatable, Sendable, CaseIte
     case runtimeStart = "runtime_start"
     case decode
     case playback
+    case playbackControl = "playback_control"
     case runtimeStop = "runtime_stop"
+    case runtimeRestart = "runtime_restart"
     case diagnostics
     case output
 }
@@ -41,6 +43,11 @@ public enum AppVerifyCheckName: String, Codable, Equatable, Sendable, CaseIterab
     case avfoundationPlaybackScheduled = "avfoundation_playback_scheduled"
     case runtimeStopped = "runtime_stopped"
     case diagnosticsWritten = "diagnostics_written"
+    case playbackMuted = "playback_muted"
+    case playbackUnmuted = "playback_unmuted"
+    case playbackVolumeChanged = "playback_volume_changed"
+    case runtimeStopObserved = "runtime_stop_observed"
+    case runtimeRestartObserved = "runtime_restart_observed"
 
     public static let s01Required: [AppVerifyCheckName] = [
         .fixtureSourceCreated,
@@ -52,6 +59,16 @@ public enum AppVerifyCheckName: String, Codable, Equatable, Sendable, CaseIterab
         .runtimeStopped,
         .diagnosticsWritten,
     ]
+
+    public static let s02ControlRequired: [AppVerifyCheckName] = [
+        .playbackMuted,
+        .playbackUnmuted,
+        .playbackVolumeChanged,
+        .runtimeStopObserved,
+        .runtimeRestartObserved,
+    ]
+
+    public static let fixtureRequired: [AppVerifyCheckName] = s01Required + s02ControlRequired
 }
 
 public struct AppVerifyRedactedArtifact: Codable, Equatable, Sendable {
@@ -96,6 +113,72 @@ public struct AppVerifyRuntimeFacts: Codable, Equatable, Sendable {
     }
 }
 
+public struct AppVerifyParsedDiagnosticEntry: Codable, Equatable, Sendable {
+    public var event: String
+    public var phase: String?
+    public var streamID: Int64?
+    public var message: String?
+    public var fields: [String: String]
+
+    public init(
+        event: String,
+        phase: String? = nil,
+        streamID: Int64? = nil,
+        message: String? = nil,
+        fields: [String: String] = [:]
+    ) {
+        self.event = AppVerifyEvidenceSanitizer.redact(event)
+        self.phase = phase.map(AppVerifyEvidenceSanitizer.redact)
+        self.streamID = streamID
+        self.message = message.map(AppVerifyEvidenceSanitizer.redact)
+        self.fields = fields.prefix(16).reduce(into: [:]) { partial, pair in
+            partial[AppVerifyEvidenceSanitizer.redact(pair.key)] = AppVerifyEvidenceSanitizer.redact(pair.value)
+        }
+    }
+}
+
+public struct AppVerifyControlObservationFacts: Codable, Equatable, Sendable {
+    public var requestedAction: String
+    public var observedRuntimePhase: AppVerifyRuntimePhase
+    public var timelineState: String?
+    public var volume: Double?
+    public var muted: Bool?
+    public var effectiveVolume: Double?
+    public var diagnosticEventNames: [String]
+    public var diagnostics: [AppVerifyParsedDiagnosticEntry]
+    public var beforeMarker: String?
+    public var afterMarker: String?
+
+    public init(
+        requestedAction: String,
+        observedRuntimePhase: AppVerifyRuntimePhase,
+        timelineState: String? = nil,
+        volume: Double? = nil,
+        muted: Bool? = nil,
+        effectiveVolume: Double? = nil,
+        diagnosticEventNames: [String] = [],
+        diagnostics: [AppVerifyParsedDiagnosticEntry] = [],
+        beforeMarker: String? = nil,
+        afterMarker: String? = nil
+    ) {
+        self.requestedAction = AppVerifyEvidenceSanitizer.redact(requestedAction)
+        self.observedRuntimePhase = observedRuntimePhase
+        self.timelineState = timelineState.map(AppVerifyEvidenceSanitizer.redact)
+        self.volume = volume.map(Self.finiteUnitInterval)
+        self.muted = muted
+        self.effectiveVolume = effectiveVolume.map(Self.finiteUnitInterval)
+        self.diagnosticEventNames = Array(diagnosticEventNames.prefix(16)).map(AppVerifyEvidenceSanitizer.redact)
+        self.diagnostics = Array(diagnostics.prefix(16))
+        self.beforeMarker = beforeMarker.map(AppVerifyEvidenceSanitizer.redact)
+        self.afterMarker = afterMarker.map(AppVerifyEvidenceSanitizer.redact)
+    }
+
+    private static func finiteUnitInterval(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+}
+
 public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
     public var name: AppVerifyCheckName
     public var status: AppVerifyEvidenceStatus
@@ -103,6 +186,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
     public var phase: AppVerifyRuntimePhase
     public var reason: String?
     public var facts: AppVerifyRuntimeFacts?
+    public var controlFacts: AppVerifyControlObservationFacts?
     public var artifacts: [AppVerifyRedactedArtifact]
 
     public init(
@@ -112,6 +196,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         phase: AppVerifyRuntimePhase,
         reason: String? = nil,
         facts: AppVerifyRuntimeFacts? = nil,
+        controlFacts: AppVerifyControlObservationFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) {
         self.name = name
@@ -120,6 +205,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         self.phase = phase
         self.reason = reason.map(AppVerifyEvidenceSanitizer.redact)
         self.facts = facts
+        self.controlFacts = controlFacts
         self.artifacts = Array(artifacts.prefix(16))
     }
 
@@ -129,6 +215,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         required: Bool = true,
         reason: String? = nil,
         facts: AppVerifyRuntimeFacts? = nil,
+        controlFacts: AppVerifyControlObservationFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -138,6 +225,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             phase: phase,
             reason: reason,
             facts: facts,
+            controlFacts: controlFacts,
             artifacts: artifacts
         )
     }
@@ -148,6 +236,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         required: Bool = true,
         reason: String,
         facts: AppVerifyRuntimeFacts? = nil,
+        controlFacts: AppVerifyControlObservationFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -157,6 +246,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             phase: phase,
             reason: reason,
             facts: facts,
+            controlFacts: controlFacts,
             artifacts: artifacts
         )
     }
@@ -167,6 +257,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         required: Bool = false,
         reason: String,
         facts: AppVerifyRuntimeFacts? = nil,
+        controlFacts: AppVerifyControlObservationFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -176,6 +267,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             phase: phase,
             reason: reason,
             facts: facts,
+            controlFacts: controlFacts,
             artifacts: artifacts
         )
     }
@@ -326,6 +418,64 @@ public enum AppVerifyCheckEvaluator {
             )
         }
         return .pass(.avfoundationPlaybackScheduled, phase: .playback, facts: facts)
+    }
+
+    public static func controlObserved(
+        _ name: AppVerifyCheckName,
+        requestedAction: String,
+        observedRuntimePhase: AppVerifyRuntimePhase,
+        timelineState: String? = nil,
+        volume: Double? = nil,
+        muted: Bool? = nil,
+        effectiveVolume: Double? = nil,
+        diagnostics: [AppVerifyParsedDiagnosticEntry] = [],
+        requiredDiagnosticEvents: [String],
+        beforeMarker: String? = nil,
+        afterMarker: String? = nil
+    ) -> AppVerifyCheckRecord {
+        let diagnosticNames = diagnostics.map(\.event)
+        let controlFacts = AppVerifyControlObservationFacts(
+            requestedAction: requestedAction,
+            observedRuntimePhase: observedRuntimePhase,
+            timelineState: timelineState,
+            volume: volume,
+            muted: muted,
+            effectiveVolume: effectiveVolume,
+            diagnosticEventNames: diagnosticNames,
+            diagnostics: diagnostics,
+            beforeMarker: beforeMarker,
+            afterMarker: afterMarker
+        )
+        let missing = requiredDiagnosticEvents.filter { !diagnosticNames.contains($0) }
+        let missingState = timelineState == nil && volume == nil && muted == nil && effectiveVolume == nil
+        let phase = controlPhase(for: name)
+        guard missing.isEmpty, !missingState else {
+            var reasons: [String] = []
+            if !missing.isEmpty {
+                reasons.append("missing diagnostic events: \(missing.joined(separator: ","))")
+            }
+            if missingState {
+                reasons.append("missing observed control state")
+            }
+            return .fail(
+                name,
+                phase: phase,
+                reason: "Control observation for \(requestedAction) failed: \(reasons.joined(separator: "; ")).",
+                controlFacts: controlFacts
+            )
+        }
+        return .pass(name, phase: phase, controlFacts: controlFacts)
+    }
+
+    private static func controlPhase(for name: AppVerifyCheckName) -> AppVerifyRuntimePhase {
+        switch name {
+        case .runtimeStopObserved:
+            return .runtimeStop
+        case .runtimeRestartObserved:
+            return .runtimeRestart
+        default:
+            return .playbackControl
+        }
     }
 }
 
