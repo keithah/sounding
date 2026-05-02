@@ -23,15 +23,16 @@ struct AppDiagnosticsCommand: ParsableCommand {
         let failureURL = directory.appendingPathComponent("runtime-errors.jsonl")
         let events = readEntries(from: eventURL)
         let failures = readEntries(from: failureURL)
+        let boundedTail = boundedTailLimit(tail)
 
-        print("app-diagnostics logDirectory=\(directory.path)")
+        print("app-diagnostics logDirectory=[redacted-path]")
         print("app-diagnostics events=\(events.count) failures=\(failures.count)")
         printEventCounts(events)
         printPhaseCounts(events)
         print("app-diagnostics recent-events")
-        printRecent(events, limit: tail)
+        printRecent(events, limit: boundedTail)
         print("app-diagnostics recent-failures")
-        printRecent(failures, limit: tail)
+        printRecent(failures, limit: boundedTail)
     }
 
     private func resolvedLogDirectory() -> URL {
@@ -45,8 +46,10 @@ struct AppDiagnosticsCommand: ParsableCommand {
         guard let data = try? Data(contentsOf: url), !data.isEmpty else { return [] }
         let text = String(decoding: data, as: UTF8.self)
         return text.split(separator: "\n").compactMap { line in
-            guard let lineData = String(line).data(using: .utf8) else { return nil }
-            return try? JSONDecoder().decode(RuntimeLogEntry.self, from: lineData)
+            guard let lineData = String(line).data(using: .utf8),
+                  let entry = try? JSONDecoder().decode(RuntimeLogEntry.self, from: lineData)
+            else { return nil }
+            return entry.sanitized()
         }
     }
 
@@ -70,9 +73,12 @@ struct AppDiagnosticsCommand: ParsableCommand {
             .sorted { lhs, rhs in lhs.1 == rhs.1 ? lhs.0 < rhs.0 : lhs.1 > rhs.1 }
     }
 
+    private func boundedTailLimit(_ value: Int) -> Int {
+        min(max(value, 0), 500)
+    }
+
     private func printRecent(_ entries: [RuntimeLogEntry], limit: Int) {
-        let boundedLimit = min(max(limit, 0), 500)
-        for entry in entries.suffix(boundedLimit) {
+        for entry in entries.suffix(limit) {
             if raw {
                 if let data = try? JSONEncoder.sorted.encode(entry),
                    let json = String(data: data, encoding: .utf8)
@@ -105,6 +111,60 @@ private struct RuntimeLogEntry: Codable {
     var errorType: String?
     var message: String?
     var fields: [String: String]
+
+    func sanitized() -> RuntimeLogEntry {
+        RuntimeLogEntry(
+            timestamp: Self.sanitize(timestamp),
+            level: Self.sanitize(level),
+            event: Self.sanitize(event),
+            streamID: streamID,
+            streamName: streamName.map(Self.sanitize),
+            source: source.map(Self.sanitizeSource),
+            phase: phase.map(Self.sanitize),
+            errorType: errorType.map(Self.sanitize),
+            message: message.map(Self.sanitize),
+            fields: Self.sanitizeFields(fields)
+        )
+    }
+
+    private static func sanitizeFields(_ fields: [String: String]) -> [String: String] {
+        fields.sorted { $0.key < $1.key }.prefix(32).reduce(into: [:]) { partial, pair in
+            partial[sanitizeFieldKey(pair.key)] = sanitize(pair.value)
+        }
+    }
+
+    private static func sanitizeFieldKey(_ key: String) -> String {
+        let redacted = sanitize(key)
+        if redacted.range(
+            of: #"(?i)\b(token|access[_-]?token|api[_-]?key|secret|password|passwd|pwd|credential|authorization)\b"#,
+            options: .regularExpression
+        ) != nil {
+            return "[redacted-secret-key]"
+        }
+        return redacted
+    }
+
+    private static func sanitizeSource(_ value: String) -> String {
+        bounded(IngestRedaction.sourceDescription(value))
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        bounded(scrubSecretKeyNames(IngestRedaction.redact(value)))
+    }
+
+    private static func scrubSecretKeyNames(_ value: String) -> String {
+        value.replacingOccurrences(
+            of: #"(?i)\b(?:token|access_token|api[_-]?key|secret|password|passwd|pwd|key)=\[redacted\]"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
+    }
+
+    private static func bounded(_ value: String) -> String {
+        let limit = 512
+        guard value.count > limit else { return value }
+        return String(value.prefix(limit)) + "…"
+    }
 }
 
 private extension JSONEncoder {
