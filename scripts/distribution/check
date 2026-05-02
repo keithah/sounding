@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# Credential-safe Developer ID distribution readiness checks.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." >/dev/null 2>&1 && pwd)"
+# shellcheck source=scripts/distribution/lib/diagnostics.sh
+source "$SCRIPT_DIR/lib/diagnostics.sh"
+
+JSON_OUTPUT=0
+ARCH="arm64"
+IDENTITY_SELECTOR=""
+NOTARY_PROFILE=""
+FULL_XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-}"
+if [[ -z "$FULL_XCODE_DEVELOPER_DIR" || "$FULL_XCODE_DEVELOPER_DIR" != *"Xcode.app/Contents/Developer"* ]]; then
+    if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
+        FULL_XCODE_DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+    fi
+fi
+
+CHECK_PHASES=()
+CHECK_STATUSES=()
+CHECK_MESSAGES=()
+CHECK_GUIDANCES=()
+
+usage() {
+    cat <<'USAGE'
+Usage: scripts/distribution/check [--json] [--arch arm64] [--developer-id-identity <selector>] [--notary-profile <profile>]
+
+Runs local, no-credential distribution readiness checks for Sounding.
+
+Options:
+  --json                              Emit one deterministic JSON document.
+  --arch arm64                        Validate the known-good macOS arm64 distribution path.
+  --developer-id-identity <selector>  Check whether a locally installed Developer ID Application certificate matches the selector.
+  --notary-profile <profile>          Check whether an operator-local notarytool keychain profile is available.
+  --help                              Show this help text.
+
+Credential-gated checks are skipped unless a selector/profile is supplied. Do not put Apple IDs,
+passwords, API keys, notary profiles, signing identities, or local artifact paths in tracked files.
+Packaging and notarization dry-runs are handled by later distribution package commands.
+USAGE
+}
+
+add_check() {
+    CHECK_PHASES+=("$(distribution_safe_phase "${1-}")")
+    CHECK_STATUSES+=("$(distribution_safe_status "${2-}")")
+    local message guidance
+    message=$(distribution_redact_text "${3-}") || message="$DISTRIBUTION_STATUS_REDACTION_FAILURE"
+    guidance=$(distribution_redact_text "${4-}") || guidance="$DISTRIBUTION_GUIDANCE_REDACTION"
+    CHECK_MESSAGES+=("$message")
+    CHECK_GUIDANCES+=("$guidance")
+}
+
+has_high_risk_argument() {
+    local value="${1-}"
+    [[ "$value" =~ Developer[[:space:]]ID[[:space:]](Application|Installer): ]] && return 0
+    [[ "$value" =~ [A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,} ]] && return 0
+    [[ "$value" =~ /Users/|/private/tmp/|/tmp/|\.xcarchive|\.dmg|notary-logs\.local|shipping\.local ]] && return 0
+    [[ "$value" =~ [Tt][Oo][Kk][Ee][Nn]=|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]=|[Ss][Ee][Cc][Rr][Ee][Tt]=|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]= ]] && return 0
+    return 1
+}
+
+safe_arg_required() {
+    local option="$1"
+    local value="${2-}"
+    if [[ -z "$value" ]]; then
+        printf 'Invalid distribution check option: %s requires a non-empty value.\n' "$option" >&2
+        exit 64
+    fi
+    if has_high_risk_argument "$value"; then
+        printf 'Invalid distribution check option: %s value looks sensitive; use a non-secret selector or local keychain profile name.\n' "$option" >&2
+        exit 64
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json)
+            JSON_OUTPUT=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --arch)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution check option: --arch requires a value.\n' >&2; exit 64; }
+            ARCH="$2"
+            if [[ "$ARCH" != "arm64" ]]; then
+                printf 'Invalid distribution check option: unsupported architecture. The distribution readiness path currently supports arm64 only.\n' >&2
+                exit 64
+            fi
+            shift 2
+            ;;
+        --developer-id-identity)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution check option: --developer-id-identity requires a value.\n' >&2; exit 64; }
+            safe_arg_required "$1" "$2"
+            IDENTITY_SELECTOR="$2"
+            shift 2
+            ;;
+        --notary-profile)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution check option: --notary-profile requires a value.\n' >&2; exit 64; }
+            safe_arg_required "$1" "$2"
+            NOTARY_PROFILE="$2"
+            shift 2
+            ;;
+        --*)
+            printf 'Invalid distribution check option: unknown option. Run scripts/distribution/check --help for supported flags.\n' >&2
+            exit 64
+            ;;
+        *)
+            printf 'Invalid distribution check option: positional arguments are not supported. Run scripts/distribution/check --help for supported flags.\n' >&2
+            exit 64
+            ;;
+    esac
+done
+
+run_bounded() {
+    local timeout_seconds="$1"
+    shift
+    /usr/bin/python3 - "$timeout_seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+    sys.stdout.buffer.write(result.stdout)
+    sys.stdout.buffer.write(result.stderr)
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired as exc:
+    if exc.stdout:
+        sys.stdout.buffer.write(exc.stdout)
+    if exc.stderr:
+        sys.stdout.buffer.write(exc.stderr)
+    sys.exit(124)
+except Exception:
+    sys.exit(127)
+PY
+}
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+check_required_tools() {
+    local missing=0
+    local tool
+    for tool in /usr/bin/xcodebuild /usr/bin/xcrun /usr/bin/codesign /usr/bin/hdiutil /usr/bin/ditto /usr/bin/security /usr/bin/python3; do
+        if [[ ! -x "$tool" ]]; then
+            missing=1
+        fi
+    done
+    if [[ "$missing" -ne 0 || -z "$FULL_XCODE_DEVELOPER_DIR" || ! -d "$FULL_XCODE_DEVELOPER_DIR" ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Required distribution tool is unavailable." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    fi
+
+    local output status
+    set +e
+    output=$(run_bounded 8 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun -f notarytool 2>&1)
+    status=$?
+    set -e
+    if [[ "$status" -eq 124 ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Tool lookup timed out." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    elif [[ "$status" -ne 0 || -z "${output//$'\n'/}" ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Required notary tool is unavailable." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    fi
+
+    set +e
+    output=$(run_bounded 8 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun -f stapler 2>&1)
+    status=$?
+    set -e
+    if [[ "$status" -eq 124 ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Tool lookup timed out." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    elif [[ "$status" -ne 0 || -z "${output//$'\n'/}" ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Required stapler tool is unavailable." "$DISTRIBUTION_GUIDANCE_STAPLE"
+        return 1
+    fi
+
+    add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_READY" "Required distribution tools are available." "Continue with project and credential readiness checks."
+}
+
+check_xcode_project() {
+    local output status
+    set +e
+    output=$(run_bounded 20 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcodebuild -project "$REPO_ROOT/Sounding.xcodeproj" -list 2>&1)
+    status=$?
+    set -e
+
+    if [[ "$status" -eq 124 ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Xcode project inspection timed out." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Xcode project inspection failed." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    fi
+    if ! grep -Eq '^[[:space:]]*Sounding[[:space:]]*$' <<<"$output"; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Xcode project scheme listing is not usable." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    fi
+
+    add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_READY" "Xcode project and Sounding scheme are visible." "Use the Sounding scheme for distribution packaging."
+}
+
+check_architecture() {
+    local machine
+    machine="$(/usr/bin/uname -m 2>/dev/null || true)"
+    if [[ "$ARCH" != "arm64" ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Unsupported distribution architecture requested." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    fi
+    if [[ "$machine" != "arm64" ]]; then
+        add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_SKIPPED" "Current host is not the known-good arm64 distribution host." "Run final Developer ID packaging on an Apple silicon host."
+        return 0
+    fi
+    add_check "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_READY" "Current host supports the arm64 distribution path." "Continue with credential-gated checks."
+}
+
+check_identity() {
+    if [[ -z "$IDENTITY_SELECTOR" ]]; then
+        add_check "$DISTRIBUTION_PHASE_SIGNING_IDENTITY" "$DISTRIBUTION_STATUS_SKIPPED" "Developer ID identity check skipped because no selector was supplied." "$DISTRIBUTION_GUIDANCE_SIGNING_IDENTITY"
+        return 0
+    fi
+
+    local output status
+    set +e
+    output=$(run_bounded 10 /usr/bin/security find-identity -v -p codesigning 2>&1)
+    status=$?
+    set -e
+    if [[ "$status" -eq 124 ]]; then
+        add_check "$DISTRIBUTION_PHASE_SIGNING_IDENTITY" "$DISTRIBUTION_STATUS_FAILED" "Developer ID identity lookup timed out." "$DISTRIBUTION_GUIDANCE_SIGNING_IDENTITY"
+        return 0
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        add_check "$DISTRIBUTION_PHASE_SIGNING_IDENTITY" "$DISTRIBUTION_STATUS_MISSING_CREDENTIAL" "Developer ID identity lookup did not find a usable local certificate." "$DISTRIBUTION_GUIDANCE_SIGNING_IDENTITY"
+        return 0
+    fi
+    if grep -Fq -- "$IDENTITY_SELECTOR" <<<"$output" && grep -Fq -- "Developer ID Application" <<<"$output"; then
+        add_check "$DISTRIBUTION_PHASE_SIGNING_IDENTITY" "$DISTRIBUTION_STATUS_READY" "Developer ID Application identity selector matched a local certificate." "Use the local Developer ID identity for signing."
+    else
+        add_check "$DISTRIBUTION_PHASE_SIGNING_IDENTITY" "$DISTRIBUTION_STATUS_MISSING_CREDENTIAL" "Developer ID Application identity selector did not match a usable local certificate." "$DISTRIBUTION_GUIDANCE_SIGNING_IDENTITY"
+    fi
+}
+
+check_notary_profile() {
+    if [[ -z "$NOTARY_PROFILE" ]]; then
+        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_SKIPPED" "Notary credential check skipped because no credential label was supplied." "Configure operator-local notarization credentials before real notarization."
+        return 0
+    fi
+
+    local output status
+    set +e
+    output=$(run_bounded 10 /usr/bin/security find-generic-password -s com.apple.gke.notary.tool -a "$NOTARY_PROFILE" 2>&1)
+    status=$?
+    set -e
+    if [[ "$status" -eq 124 ]]; then
+        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "Notary credential lookup timed out." "Configure operator-local notarization credentials before real notarization."
+        return 0
+    fi
+    if [[ "$status" -eq 0 ]]; then
+        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "Notary keychain credential is available for local notarization checks." "Use local notarization credentials for credential-gated notarization."
+    else
+        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_MISSING_CREDENTIAL" "Notary keychain credential is not available locally." "Configure operator-local notarization credentials before real notarization."
+    fi
+}
+
+emit_json() {
+    local overall="$DISTRIBUTION_STATUS_READY"
+    local status
+    for status in "${CHECK_STATUSES[@]}"; do
+        case "$status" in
+            "$DISTRIBUTION_STATUS_FAILED"|"$DISTRIBUTION_STATUS_REDACTION_FAILURE")
+                overall="$DISTRIBUTION_STATUS_FAILED"
+                ;;
+            "$DISTRIBUTION_STATUS_MISSING_CREDENTIAL")
+                if [[ "$overall" == "$DISTRIBUTION_STATUS_READY" ]]; then
+                    overall="$DISTRIBUTION_STATUS_MISSING_CREDENTIAL"
+                fi
+                ;;
+        esac
+    done
+
+    printf '{"checks":['
+    local index
+    for index in "${!CHECK_PHASES[@]}"; do
+        [[ "$index" -gt 0 ]] && printf ','
+        printf '{"guidance":"%s","message":"%s","phase":"%s","status":"%s"}' \
+            "$(distribution_json_escape "${CHECK_GUIDANCES[$index]}")" \
+            "$(distribution_json_escape "${CHECK_MESSAGES[$index]}")" \
+            "$(distribution_json_escape "${CHECK_PHASES[$index]}")" \
+            "$(distribution_json_escape "${CHECK_STATUSES[$index]}")"
+    done
+    printf '],"overallStatus":"%s","schemaVersion":1}\n' "$(distribution_json_escape "$overall")"
+}
+
+emit_human() {
+    local index
+    for index in "${!CHECK_PHASES[@]}"; do
+        distribution_emit_human_summary \
+            "${CHECK_PHASES[$index]}" \
+            "${CHECK_STATUSES[$index]}" \
+            "${CHECK_MESSAGES[$index]}" \
+            "${CHECK_GUIDANCES[$index]}"
+    done
+}
+
+main() {
+    check_required_tools || true
+    check_xcode_project || true
+    check_architecture || true
+    check_identity
+    check_notary_profile
+
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+        emit_json
+    else
+        emit_human
+    fi
+}
+
+main
