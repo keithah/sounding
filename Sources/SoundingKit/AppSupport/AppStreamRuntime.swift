@@ -167,17 +167,20 @@ public struct AppStreamRuntimeLifecycleEvidence: Equatable, Sendable {
     public var reason: String
     public var suspendedAt: String?
     public var recoveryStartedAt: String?
+    public var recoveredAt: String?
     public var recoveryLatencySeconds: Double?
 
     public init(
         reason: String,
         suspendedAt: String? = nil,
         recoveryStartedAt: String? = nil,
+        recoveredAt: String? = nil,
         recoveryLatencySeconds: Double? = nil
     ) {
         self.reason = IngestRedaction.redact(reason)
         self.suspendedAt = suspendedAt.map(IngestRedaction.redact)
         self.recoveryStartedAt = recoveryStartedAt.map(IngestRedaction.redact)
+        self.recoveredAt = recoveredAt.map(IngestRedaction.redact)
         self.recoveryLatencySeconds = recoveryLatencySeconds.map { max(0, $0) }
     }
 }
@@ -201,6 +204,7 @@ public struct AppStreamRuntimeStatusUpdate: Equatable, Sendable {
     public var nextRetryAt: String?
     public var updatedAt: String
     public var recentFailure: AppStreamRuntimeRecentFailure?
+    public var lifecycleEvidence: AppStreamRuntimeLifecycleEvidence?
 
     public init(
         streamID: Int64,
@@ -210,7 +214,8 @@ public struct AppStreamRuntimeStatusUpdate: Equatable, Sendable {
         nextRetrySeconds: Int? = nil,
         nextRetryAt: String? = nil,
         updatedAt: String,
-        recentFailure: AppStreamRuntimeRecentFailure? = nil
+        recentFailure: AppStreamRuntimeRecentFailure? = nil,
+        lifecycleEvidence: AppStreamRuntimeLifecycleEvidence? = nil
     ) {
         self.streamID = streamID
         self.phase = phase
@@ -220,6 +225,7 @@ public struct AppStreamRuntimeStatusUpdate: Equatable, Sendable {
         self.nextRetryAt = nextRetryAt.map(IngestRedaction.redact)
         self.updatedAt = updatedAt
         self.recentFailure = recentFailure
+        self.lifecycleEvidence = lifecycleEvidence
     }
 }
 
@@ -235,6 +241,7 @@ public struct AppStreamRuntimeStatusSnapshot: Equatable, Sendable {
     public var nextRetryAt: String?
     public var updatedAt: String
     public var recentFailure: AppStreamRuntimeRecentFailure?
+    public var lifecycleEvidence: AppStreamRuntimeLifecycleEvidence?
 
     public init(
         streamID: Int64,
@@ -247,7 +254,8 @@ public struct AppStreamRuntimeStatusSnapshot: Equatable, Sendable {
         nextRetrySeconds: Int?,
         nextRetryAt: String?,
         updatedAt: String,
-        recentFailure: AppStreamRuntimeRecentFailure?
+        recentFailure: AppStreamRuntimeRecentFailure?,
+        lifecycleEvidence: AppStreamRuntimeLifecycleEvidence? = nil
     ) {
         self.streamID = streamID
         self.name = IngestRedaction.redact(name)
@@ -260,6 +268,7 @@ public struct AppStreamRuntimeStatusSnapshot: Equatable, Sendable {
         self.nextRetryAt = nextRetryAt.map(IngestRedaction.redact)
         self.updatedAt = updatedAt
         self.recentFailure = recentFailure
+        self.lifecycleEvidence = lifecycleEvidence
     }
 }
 
@@ -456,7 +465,11 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         try beginRun(streamID: streamID, connectionMessagePrefix: "Connecting")
     }
 
-    private func beginRun(streamID: Int64, connectionMessagePrefix: String) throws {
+    private func beginRun(
+        streamID: Int64,
+        connectionMessagePrefix: String,
+        recoveryEvidence: AppStreamRuntimeLifecycleEvidence? = nil
+    ) throws {
         guard let reconnect = try registry.reconnectSource(id: streamID) else {
             let error = AppStreamRuntimeError.streamNotFound(streamID)
             publish(
@@ -500,7 +513,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             AppStreamRuntimeEvent(
                 streamID: streamID,
                 phase: .connecting,
-                message: "\(connectionMessagePrefix) \(reconnect.name) via \(reconnect.sourceDescription)."
+                message: "\(connectionMessagePrefix) \(reconnect.name) via \(reconnect.sourceDescription).",
+                lifecycleEvidence: recoveryEvidence
             ),
             attempt: 0
         )
@@ -511,13 +525,15 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         let task = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
+                let runningLifecycleEvidence = await self?.recoveredLifecycleEvidence(from: recoveryEvidence)
                 await self?.publishIfCurrent(
                     streamID: streamID,
                     token: token,
                     AppStreamRuntimeEvent(
                         streamID: streamID,
                         phase: .running,
-                        message: "Running \(request.name) from \(request.sourceDescription)."
+                        message: "Running \(request.name) from \(request.sourceDescription).",
+                        lifecycleEvidence: runningLifecycleEvidence
                     ),
                     attempt: attempt
                 )
@@ -558,7 +574,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                             AppStreamRuntimeEvent(
                                 streamID: streamID,
                                 phase: .reconnecting(nextRetrySeconds: seconds),
-                                message: "Runtime failed for \(request.name): \(redacted). Reconnecting in \(seconds) second(s)."
+                                message: "Runtime failed for \(request.name): \(redacted). Reconnecting in \(seconds) second(s).",
+                                lifecycleEvidence: recoveryEvidence
                             ),
                             attempt: attempt,
                             nextRetrySeconds: seconds,
@@ -573,7 +590,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                                 event: AppStreamRuntimeEvent(
                                     streamID: streamID,
                                     phase: .stopped,
-                                    message: "Stopped \(request.name)."
+                                    message: "Stopped \(request.name).",
+                                    lifecycleEvidence: recoveryEvidence
                                 ),
                                 attempt: attempt
                             )
@@ -585,7 +603,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                             AppStreamRuntimeEvent(
                                 streamID: streamID,
                                 phase: .connecting,
-                                message: "Reconnecting \(request.name)."
+                                message: "Reconnecting \(request.name).",
+                                lifecycleEvidence: recoveryEvidence
                             ),
                             attempt: attempt
                         )
@@ -596,7 +615,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                             event: AppStreamRuntimeEvent(
                                 streamID: streamID,
                                 phase: .error(message: redacted),
-                                message: "Runtime failed for \(request.name): \(redacted)."
+                                message: "Runtime failed for \(request.name): \(redacted).",
+                                lifecycleEvidence: recoveryEvidence
                             ),
                             attempt: attempt,
                             failureMessage: redacted
@@ -723,7 +743,11 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                 attempt: latestAttempt(streamID: streamID)
             )
             do {
-                try beginRun(streamID: streamID, connectionMessagePrefix: "Recovering")
+                try beginRun(
+                    streamID: streamID,
+                    connectionMessagePrefix: "Recovering",
+                    recoveryEvidence: evidence
+                )
             } catch {
                 let redacted = IngestRedaction.redact(String(describing: error))
                 publish(
@@ -787,6 +811,20 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
 
     public func snapshots() -> [AppStreamRuntimeEvent] {
         latestEvents.values.sorted { $0.streamID < $1.streamID }
+    }
+
+    private func recoveredLifecycleEvidence(
+        from evidence: AppStreamRuntimeLifecycleEvidence?
+    ) -> AppStreamRuntimeLifecycleEvidence? {
+        evidence.map {
+            AppStreamRuntimeLifecycleEvidence(
+                reason: $0.reason,
+                suspendedAt: $0.suspendedAt,
+                recoveryStartedAt: $0.recoveryStartedAt,
+                recoveredAt: timestamp(),
+                recoveryLatencySeconds: $0.recoveryLatencySeconds
+            )
+        }
     }
 
     private func publish(
@@ -883,7 +921,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                     nextRetrySeconds: nextRetrySeconds,
                     nextRetryAt: nextRetryAt,
                     updatedAt: updatedAt,
-                    recentFailure: failure
+                    recentFailure: failure,
+                    lifecycleEvidence: event.lifecycleEvidence
                 )
             )
         } catch {

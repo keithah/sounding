@@ -269,4 +269,130 @@ final class AppStreamRuntimeStatusStoreTests: XCTestCase {
             XCTAssertFalse(String(describing: error).contains("/Users/alice"))
         }
     }
+    func testLifecycleEvidenceRoundTripsRedactedAndInspects() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Lifecycle",
+            streamType: "hls",
+            source: "https://user:pass@example.test/private/live.m3u8?token=secret#frag",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let store = AppStreamRuntimeStatusStore(database: temporary.database)
+
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .recovering,
+                attempt: 1,
+                maxAttempts: 3,
+                updatedAt: "2026-05-01T10:00:06Z",
+                lifecycleEvidence: AppStreamRuntimeLifecycleEvidence(
+                    reason: "wake from https://user:pass@example.test/private/live.m3u8?token=secret#frag at /Users/alice/private/evidence.wav api_key=secret",
+                    suspendedAt: "2026-05-01T10:00:00Z",
+                    recoveryStartedAt: "2026-05-01T10:00:05Z",
+                    recoveredAt: "2026-05-01T10:00:06Z",
+                    recoveryLatencySeconds: 1.25
+                )
+            )
+        )
+
+        let snapshot = try XCTUnwrap(try store.status(streamID: stream.id))
+        XCTAssertEqual(snapshot.lifecycleEvidence?.suspendedAt, "2026-05-01T10:00:00Z")
+        XCTAssertEqual(snapshot.lifecycleEvidence?.recoveryStartedAt, "2026-05-01T10:00:05Z")
+        XCTAssertEqual(snapshot.lifecycleEvidence?.recoveredAt, "2026-05-01T10:00:06Z")
+        XCTAssertEqual(snapshot.lifecycleEvidence?.recoveryLatencySeconds, 1.25)
+
+        let inspection = try XCTUnwrap(try store.inspections().first)
+        XCTAssertEqual(inspection.lifecycleEvidence, snapshot.lifecycleEvidence)
+
+        let described = String(describing: [snapshot, inspection])
+        XCTAssertFalse(described.contains("user:pass"))
+        XCTAssertFalse(described.contains("token=secret"))
+        XCTAssertFalse(described.contains("#frag"))
+        XCTAssertFalse(described.contains("/Users/alice"))
+        XCTAssertFalse(described.contains("api_key=secret"))
+        XCTAssertTrue(described.contains("api_key=[redacted]"))
+        XCTAssertTrue(described.contains("[redacted-path]"))
+    }
+
+    func testNilLifecycleEvidenceStaysNilAndReplacementClearsPriorEvidence() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Nil Lifecycle",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let store = AppStreamRuntimeStatusStore(database: temporary.database)
+
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .suspended,
+                updatedAt: "2026-05-01T10:00:01Z",
+                lifecycleEvidence: AppStreamRuntimeLifecycleEvidence(
+                    reason: "system sleep",
+                    suspendedAt: "2026-05-01T10:00:01Z"
+                )
+            )
+        )
+        XCTAssertNotNil(try store.status(streamID: stream.id)?.lifecycleEvidence)
+
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .running,
+                updatedAt: "2026-05-01T10:00:02Z"
+            )
+        )
+
+        let snapshot = try XCTUnwrap(try store.status(streamID: stream.id))
+        XCTAssertEqual(snapshot.phase, .running)
+        XCTAssertNil(snapshot.lifecycleEvidence)
+        XCTAssertNil(try XCTUnwrap(try store.inspections().first).lifecycleEvidence)
+    }
+
+    func testMalformedPhaseKeepsLifecycleEvidenceRedacted() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Malformed Lifecycle",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let store = AppStreamRuntimeStatusStore(database: temporary.database)
+
+        try temporary.database.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO stream_runtime_status (
+                    stream_id, phase, attempt, max_attempts, updated_at,
+                    lifecycle_reason, suspended_at, recovery_started_at, recovered_at, recovery_latency_ms
+                ) VALUES (?, ?, 0, 3, ?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    stream.id,
+                    "unexpected https://user:pass@example.test/live.m3u8?token=secret#frag",
+                    "2026-05-01T10:00:01Z",
+                    "wake token=secret /Users/alice/private",
+                    "2026-05-01T10:00:00Z",
+                    "2026-05-01T10:00:01Z",
+                    "2026-05-01T10:00:02Z",
+                    1_000
+                ]
+            )
+        }
+
+        let snapshot = try XCTUnwrap(try store.status(streamID: stream.id))
+        XCTAssertEqual(snapshot.phase, .error)
+        XCTAssertEqual(snapshot.lifecycleEvidence?.recoveryLatencySeconds, 1)
+        let described = String(describing: snapshot)
+        XCTAssertFalse(described.contains("token=secret"))
+        XCTAssertFalse(described.contains("/Users/alice"))
+        XCTAssertTrue(described.contains("[redacted-path]"))
+    }
+
 }

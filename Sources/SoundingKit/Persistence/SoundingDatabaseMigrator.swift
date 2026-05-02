@@ -353,6 +353,17 @@ enum SoundingDatabaseMigrator {
             )
         }
 
+        migrator.registerMigration("addStreamRuntimeLifecycleStatus") { db in
+            try db.alter(table: "stream_runtime_status") { table in
+                table.add(column: "lifecycle_reason", .text)
+                table.add(column: "suspended_at", .text)
+                table.add(column: "recovery_started_at", .text)
+                table.add(column: "recovered_at", .text)
+                table.add(column: "recovery_latency_ms", .integer)
+                    .check(sql: "recovery_latency_ms IS NULL OR recovery_latency_ms >= 0")
+            }
+        }
+
         migrator.registerMigration("addHLSSegmentState") { db in
             try db.create(table: "hls_ingest_segments") { table in
                 table.autoIncrementedPrimaryKey("id")

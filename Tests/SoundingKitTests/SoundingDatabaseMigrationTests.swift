@@ -243,7 +243,12 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "next_retry_at",
             "recent_failure_message",
             "recent_failure_at",
-            "updated_at"
+            "updated_at",
+            "lifecycle_reason",
+            "suspended_at",
+            "recovery_started_at",
+            "recovered_at",
+            "recovery_latency_ms"
         ])
         XCTAssertEqual(columnsByTable["hls_ingest_segments"], [
             "id",
@@ -429,6 +434,30 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM hls_ingest_segments")
         }
         XCTAssertEqual(remaining, 0)
+    }
+
+    func testStreamRuntimeLifecycleMigrationRejectsNegativeLatency() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Latency",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+
+        XCTAssertThrowsError(
+            try temporary.database.write { db in
+                try db.execute(
+                    sql: """
+                    INSERT INTO stream_runtime_status (
+                        stream_id, phase, attempt, max_attempts, updated_at, recovery_latency_ms
+                    ) VALUES (?, ?, 0, 3, ?, -1)
+                    """,
+                    arguments: [stream.id, AppStreamRuntimeStatusPhase.recovering.rawValue, "2026-05-01T10:00:01Z"]
+                )
+            }
+        )
     }
 
     private func columnNames(in table: String, _ db: Database) throws -> [String] {

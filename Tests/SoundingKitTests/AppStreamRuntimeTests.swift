@@ -351,23 +351,32 @@ final class AppStreamRuntimeTests: XCTestCase {
         let statusStore = AppStreamRuntimeStatusStore(database: temporary.database)
         let gate = RuntimeGate()
         let ingester = LifecycleRecordingIngester(gate: gate)
-        var dates = [Date(timeIntervalSince1970: 1_767_225_600), Date(timeIntervalSince1970: 1_767_225_605)]
-        let runtime = AppStreamRuntimeService(registry: registry, ingester: ingester, retryPolicy: .noRetry, statusStore: statusStore, now: { dates.isEmpty ? Date(timeIntervalSince1970: 1_767_225_605) : dates.removeFirst() })
+        let dates = DeterministicDateProvider([
+            Date(timeIntervalSince1970: 1_767_225_600),
+            Date(timeIntervalSince1970: 1_767_225_600),
+            Date(timeIntervalSince1970: 1_767_225_600),
+            Date(timeIntervalSince1970: 1_767_225_605),
+        ])
+        let runtime = AppStreamRuntimeService(registry: registry, ingester: ingester, retryPolicy: .noRetry, statusStore: statusStore, now: { dates.next() })
         let events = await runtime.events()
         var iterator = events.makeAsyncIterator()
 
         try await runtime.start(streamID: first.id)
-        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .connecting)
-        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .running)
+        let firstConnecting = try await nextEvent(from: &iterator)
+        let firstRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(firstConnecting.phase, .connecting)
+        XCTAssertEqual(firstRunning.phase, .running)
         try await runtime.start(streamID: second.id)
-        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .connecting)
-        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .running)
+        let secondConnecting = try await nextEvent(from: &iterator)
+        let secondRunning = try await nextEvent(from: &iterator)
+        XCTAssertEqual(secondConnecting.phase, .connecting)
+        XCTAssertEqual(secondRunning.phase, .running)
 
         await runtime.suspendForSystemSleep(reason: "sleep for https://user:pass@example.test/private?token=secret at /Users/example/private")
         let firstSuspended = try await nextEvent(from: &iterator)
         let secondSuspended = try await nextEvent(from: &iterator)
-        XCTAssertEqual(firstSuspended.phase, .suspended)
-        XCTAssertEqual(secondSuspended.phase, .suspended)
+        XCTAssertEqual(firstSuspended.phase, AppStreamRuntimePhase.suspended)
+        XCTAssertEqual(secondSuspended.phase, AppStreamRuntimePhase.suspended)
         XCTAssertFalse(firstSuspended.message.contains("user:pass"), firstSuspended.message)
         XCTAssertFalse(firstSuspended.message.contains("token=secret"), firstSuspended.message)
         XCTAssertFalse(firstSuspended.message.contains("/Users/example"), firstSuspended.message)
@@ -376,8 +385,10 @@ final class AppStreamRuntimeTests: XCTestCase {
 
         await gate.release()
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual((await runtime.snapshot(streamID: first.id))?.phase, .suspended)
-        XCTAssertEqual((await runtime.snapshot(streamID: second.id))?.phase, .suspended)
+        let firstSnapshotAfterCancel = await runtime.snapshot(streamID: first.id)
+        let secondSnapshotAfterCancel = await runtime.snapshot(streamID: second.id)
+        XCTAssertEqual(firstSnapshotAfterCancel?.phase, AppStreamRuntimePhase.suspended)
+        XCTAssertEqual(secondSnapshotAfterCancel?.phase, AppStreamRuntimePhase.suspended)
 
         await runtime.recoverFromSystemWake(reason: "wake token=secret from /Users/example/private")
         let firstRecovering = try await nextEvent(matching: { $0.streamID == first.id && $0.phase == .recovering }, from: &iterator)
@@ -391,7 +402,8 @@ final class AppStreamRuntimeTests: XCTestCase {
         _ = try await nextEvent(matching: { $0.streamID == second.id && $0.phase == .running }, from: &iterator)
         XCTAssertEqual(try statusStore.status(streamID: first.id)?.phase, .running)
         XCTAssertEqual(try statusStore.status(streamID: second.id)?.phase, .running)
-        XCTAssertEqual(await ingester.requestStreamIDs(), [first.id, second.id, first.id, second.id])
+        let requestStreamIDs = await ingester.requestStreamIDs()
+        XCTAssertEqual(requestStreamIDs, [first.id, second.id, first.id, second.id])
     }
 
     func testWakeRecoveryFailureIsRedactedAndDoesNotBlockSibling() async throws {
@@ -419,7 +431,8 @@ final class AppStreamRuntimeTests: XCTestCase {
         let failure = try await nextEvent(matching: { $0.streamID == removed.id && $0.phase.statusPhase == .error }, from: &iterator)
         XCTAssertFalse(failure.message.contains("token=secret"), failure.message)
         _ = try await nextEvent(matching: { $0.streamID == sibling.id && $0.phase == .running }, from: &iterator)
-        XCTAssertEqual((await runtime.snapshot(streamID: sibling.id))?.phase, .running)
+        let siblingSnapshot = await runtime.snapshot(streamID: sibling.id)
+        XCTAssertEqual(siblingSnapshot?.phase, AppStreamRuntimePhase.running)
 
         await gate.release()
     }
@@ -434,7 +447,8 @@ final class AppStreamRuntimeTests: XCTestCase {
 
         await runtime.suspendForSystemSleep(reason: "sleep with no active streams")
         await runtime.recoverFromSystemWake(reason: "wake with no capture")
-        XCTAssertNil(await runtime.snapshot())
+        let emptySnapshot = await runtime.snapshot()
+        XCTAssertNil(emptySnapshot)
 
         let events = await runtime.events()
         var iterator = events.makeAsyncIterator()
@@ -445,10 +459,11 @@ final class AppStreamRuntimeTests: XCTestCase {
         _ = try await nextEvent(from: &iterator)
         await runtime.recoverFromSystemWake(reason: "wake")
         _ = try await nextEvent(matching: { $0.phase == .running }, from: &iterator)
-        let afterFirstWake = await ingester.requestStreamIDs().count
+        let afterFirstWake = (await ingester.requestStreamIDs()).count
         await runtime.recoverFromSystemWake(reason: "repeated wake")
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(await ingester.requestStreamIDs().count, afterFirstWake)
+        let afterRepeatedWake = await ingester.requestStreamIDs()
+        XCTAssertEqual(afterRepeatedWake.count, afterFirstWake)
 
         await gate.release()
     }
@@ -1105,6 +1120,24 @@ private enum RuntimeTestError: Error {
     case missingEvent
 }
 
+private final class DeterministicDateProvider: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dates: [Date]
+    private let fallback: Date
+
+    init(_ dates: [Date]) {
+        self.dates = dates
+        self.fallback = dates.last ?? Date(timeIntervalSince1970: 0)
+    }
+
+    func next() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        if dates.isEmpty { return fallback }
+        return dates.removeFirst()
+    }
+}
+
 private actor RecordingAppRuntimeIngester: AppStreamRuntimeIngesting {
     private let result: AppStreamRuntimeResult
     private var recorded: [AppStreamRuntimeRequest] = []
@@ -1149,6 +1182,26 @@ private struct BlockingAppRuntimeIngester: AppStreamRuntimeIngesting {
         await gate.wait()
         try Task.checkCancellation()
         return AppStreamRuntimeResult(streamID: request.streamID)
+    }
+}
+
+private actor LifecycleRecordingIngester: AppStreamRuntimeIngesting {
+    private let gate: RuntimeGate
+    private var requests: [AppStreamRuntimeRequest] = []
+
+    init(gate: RuntimeGate) {
+        self.gate = gate
+    }
+
+    func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        requests.append(request)
+        await gate.wait()
+        try Task.checkCancellation()
+        return AppStreamRuntimeResult(streamID: request.streamID)
+    }
+
+    func requestStreamIDs() -> [Int64] {
+        requests.map(\.streamID)
     }
 }
 

@@ -91,6 +91,7 @@ public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
     public var nextRetryAt: String?
     public var updatedAt: String?
     public var recentFailure: AppStreamRuntimeRecentFailure?
+    public var lifecycleEvidence: AppStreamRuntimeLifecycleEvidence?
     public var latestHLSDecision: AppStreamRuntimeHLSDecision?
 
     public init(
@@ -107,6 +108,7 @@ public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
         nextRetryAt: String?,
         updatedAt: String?,
         recentFailure: AppStreamRuntimeRecentFailure?,
+        lifecycleEvidence: AppStreamRuntimeLifecycleEvidence? = nil,
         latestHLSDecision: AppStreamRuntimeHLSDecision? = nil
     ) {
         self.streamID = streamID
@@ -122,6 +124,7 @@ public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
         self.nextRetryAt = nextRetryAt.map(IngestRedaction.redact)
         self.updatedAt = updatedAt.map(IngestRedaction.redact)
         self.recentFailure = recentFailure
+        self.lifecycleEvidence = lifecycleEvidence
         self.latestHLSDecision = latestHLSDecision
     }
 }
@@ -155,12 +158,17 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                         occurredAt: IngestRedaction.redact($0.occurredAt)
                     )
                 }
+                let lifecycleEvidence = update.lifecycleEvidence
+                let recoveryLatencyMS = lifecycleEvidence?.recoveryLatencySeconds.map {
+                    Int64(($0 * 1_000).rounded())
+                }
                 try db.execute(
                     sql: """
                     INSERT INTO stream_runtime_status (
                         stream_id, phase, attempt, max_attempts, next_retry_seconds,
-                        next_retry_at, recent_failure_message, recent_failure_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        next_retry_at, recent_failure_message, recent_failure_at, updated_at,
+                        lifecycle_reason, suspended_at, recovery_started_at, recovered_at, recovery_latency_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(stream_id) DO UPDATE SET
                         phase = excluded.phase,
                         attempt = excluded.attempt,
@@ -169,7 +177,12 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                         next_retry_at = excluded.next_retry_at,
                         recent_failure_message = excluded.recent_failure_message,
                         recent_failure_at = excluded.recent_failure_at,
-                        updated_at = excluded.updated_at
+                        updated_at = excluded.updated_at,
+                        lifecycle_reason = excluded.lifecycle_reason,
+                        suspended_at = excluded.suspended_at,
+                        recovery_started_at = excluded.recovery_started_at,
+                        recovered_at = excluded.recovered_at,
+                        recovery_latency_ms = excluded.recovery_latency_ms
                     """,
                     arguments: [
                         update.streamID,
@@ -180,7 +193,12 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                         update.nextRetryAt.map(IngestRedaction.redact),
                         failure?.message,
                         failure?.occurredAt,
-                        IngestRedaction.redact(update.updatedAt)
+                        IngestRedaction.redact(update.updatedAt),
+                        lifecycleEvidence?.reason,
+                        lifecycleEvidence?.suspendedAt,
+                        lifecycleEvidence?.recoveryStartedAt,
+                        lifecycleEvidence?.recoveredAt,
+                        recoveryLatencyMS
                     ]
                 )
             }
@@ -267,6 +285,11 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                            stream_runtime_status.recent_failure_message,
                            stream_runtime_status.recent_failure_at,
                            stream_runtime_status.updated_at AS runtime_updated_at,
+                           stream_runtime_status.lifecycle_reason,
+                           stream_runtime_status.suspended_at,
+                           stream_runtime_status.recovery_started_at,
+                           stream_runtime_status.recovered_at,
+                           stream_runtime_status.recovery_latency_ms,
                            latest_hls_decision.reason AS hls_reason,
                            latest_hls_decision.severity AS hls_severity,
                            latest_hls_decision.context_json AS hls_context_json,
@@ -352,7 +375,12 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                stream_runtime_status.next_retry_at,
                stream_runtime_status.recent_failure_message,
                stream_runtime_status.recent_failure_at,
-               stream_runtime_status.updated_at
+               stream_runtime_status.updated_at,
+               stream_runtime_status.lifecycle_reason,
+               stream_runtime_status.suspended_at,
+               stream_runtime_status.recovery_started_at,
+               stream_runtime_status.recovered_at,
+               stream_runtime_status.recovery_latency_ms
         FROM stream_runtime_status
         JOIN streams ON streams.id = stream_runtime_status.stream_id
         WHERE streams.name IS NOT NULL
@@ -389,7 +417,8 @@ public struct AppStreamRuntimeStatusStore: Sendable {
             nextRetrySeconds: row["next_retry_seconds"],
             nextRetryAt: row["next_retry_at"],
             updatedAt: row["updated_at"],
-            recentFailure: malformedFailure ?? persistedFailure
+            recentFailure: malformedFailure ?? persistedFailure,
+            lifecycleEvidence: decodeLifecycleEvidence(row: row)
         )
     }
 
@@ -432,7 +461,26 @@ public struct AppStreamRuntimeStatusStore: Sendable {
             nextRetryAt: row["next_retry_at"],
             updatedAt: runtimeUpdatedAt,
             recentFailure: malformedFailure ?? persistedFailure,
+            lifecycleEvidence: decodeLifecycleEvidence(row: row),
             latestHLSDecision: decodeHLSDecision(row: row)
+        )
+    }
+
+    private static func decodeLifecycleEvidence(row: Row) -> AppStreamRuntimeLifecycleEvidence? {
+        let reason: String? = row["lifecycle_reason"]
+        let suspendedAt: String? = row["suspended_at"]
+        let recoveryStartedAt: String? = row["recovery_started_at"]
+        let recoveredAt: String? = row["recovered_at"]
+        let recoveryLatencyMS: Int64? = row["recovery_latency_ms"]
+        guard reason != nil || suspendedAt != nil || recoveryStartedAt != nil || recoveredAt != nil || recoveryLatencyMS != nil else {
+            return nil
+        }
+        return AppStreamRuntimeLifecycleEvidence(
+            reason: reason ?? "Runtime lifecycle evidence unavailable.",
+            suspendedAt: suspendedAt,
+            recoveryStartedAt: recoveryStartedAt,
+            recoveredAt: recoveredAt,
+            recoveryLatencySeconds: recoveryLatencyMS.map { Double(max(0, $0)) / 1_000 }
         )
     }
 

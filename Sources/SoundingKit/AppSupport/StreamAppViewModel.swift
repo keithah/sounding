@@ -406,6 +406,22 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             canPauseRuntime = false
             canResumeRuntime = false
             canStopRuntime = true
+        case .suspended:
+            playerStateTitle = "Runtime suspended"
+            playerStateDetail = item.status.detail
+            controlsEnabled = true
+            canStartRuntime = false
+            canPauseRuntime = false
+            canResumeRuntime = false
+            canStopRuntime = true
+        case .recovering:
+            playerStateTitle = "Runtime recovering"
+            playerStateDetail = item.status.detail
+            controlsEnabled = true
+            canStartRuntime = false
+            canPauseRuntime = false
+            canResumeRuntime = false
+            canStopRuntime = true
         case .ready, .stopped:
             playerStateTitle = "Runtime ready"
             playerStateDetail = "Start this stream through the in-process SoundingKit runtime."

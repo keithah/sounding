@@ -28,7 +28,16 @@ enum StreamsOutput {
         var nextRetryAt: String?
         var updatedAt: String?
         var recentFailure: RecentFailure?
+        var lifecycleEvidence: LifecycleEvidence?
         var latestHLSDecision: HLSDecision?
+    }
+
+    struct LifecycleEvidence: Codable, Equatable {
+        var reason: String
+        var suspendedAt: String?
+        var recoveryStartedAt: String?
+        var recoveredAt: String?
+        var recoveryLatencySeconds: Double?
     }
 
     struct HLSDecision: Codable, Equatable {
@@ -106,7 +115,7 @@ enum StreamsOutput {
         }
 
         return records.map { record in
-            "id=\(record.streamID) name=\(record.name) type=\(record.streamType) stream_status=\(record.streamStatus) source=\(redactedSourceDescription(record.sourceDescription)) phase=\(record.phase) has_runtime_status=\(record.hasRuntimeStatus) attempt=\(record.attempt) max_attempts=\(record.maxAttempts) next_retry_seconds=\(optionalInt(record.nextRetrySeconds)) next_retry_at=\(optionalTimestamp(record.nextRetryAt)) updated_at=\(optionalTimestamp(record.updatedAt)) recent_failure=\(optionalFailure(record.recentFailure)) latest_hls_decision=\(optionalHLSDecision(record.latestHLSDecision))"
+            "id=\(record.streamID) name=\(record.name) type=\(record.streamType) stream_status=\(record.streamStatus) source=\(redactedSourceDescription(record.sourceDescription)) phase=\(record.phase) has_runtime_status=\(record.hasRuntimeStatus) attempt=\(record.attempt) max_attempts=\(record.maxAttempts) next_retry_seconds=\(optionalInt(record.nextRetrySeconds)) next_retry_at=\(optionalTimestamp(record.nextRetryAt)) updated_at=\(optionalTimestamp(record.updatedAt)) recent_failure=\(optionalFailure(record.recentFailure)) lifecycle=\(optionalLifecycleEvidence(record.lifecycleEvidence)) latest_hls_decision=\(optionalHLSDecision(record.latestHLSDecision))"
         }.joined(separator: "\n") + "\n"
     }
 
@@ -154,7 +163,18 @@ enum StreamsOutput {
             recentFailure: record.recentFailure.map {
                 RecentFailure(message: redactedSourceDescription($0.message), occurredAt: $0.occurredAt)
             },
+            lifecycleEvidence: record.lifecycleEvidence.map(sanitizedLifecycleEvidence),
             latestHLSDecision: record.latestHLSDecision.map(sanitizedHLSDecision)
+        )
+    }
+
+    private static func sanitizedLifecycleEvidence(_ evidence: AppStreamRuntimeLifecycleEvidence) -> LifecycleEvidence {
+        LifecycleEvidence(
+            reason: redactedSourceDescription(evidence.reason),
+            suspendedAt: evidence.suspendedAt.map(redactedSourceDescription),
+            recoveryStartedAt: evidence.recoveryStartedAt.map(redactedSourceDescription),
+            recoveredAt: evidence.recoveredAt.map(redactedSourceDescription),
+            recoveryLatencySeconds: evidence.recoveryLatencySeconds
         )
     }
 
@@ -189,6 +209,16 @@ enum StreamsOutput {
     private static func optionalFailure(_ failure: AppStreamRuntimeRecentFailure?) -> String {
         guard let failure else { return "none" }
         return "\(redactedSourceDescription(failure.message)) at \(failure.occurredAt)"
+    }
+
+    private static func optionalLifecycleEvidence(_ evidence: AppStreamRuntimeLifecycleEvidence?) -> String {
+        guard let evidence else { return "none" }
+        var fields = ["reason=\(redactedSourceDescription(evidence.reason))"]
+        if let value = evidence.suspendedAt { fields.append("suspended_at=\(redactedSourceDescription(value))") }
+        if let value = evidence.recoveryStartedAt { fields.append("recovery_started_at=\(redactedSourceDescription(value))") }
+        if let value = evidence.recoveredAt { fields.append("recovered_at=\(redactedSourceDescription(value))") }
+        if let value = evidence.recoveryLatencySeconds { fields.append("recovery_latency_seconds=\(value)") }
+        return fields.joined(separator: ",")
     }
 
     private static func optionalHLSDecision(_ decision: AppStreamRuntimeHLSDecision?) -> String {
