@@ -1,0 +1,449 @@
+#!/usr/bin/env bash
+# Credential-gated Developer ID package/sign/notarize workflow for Sounding.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." >/dev/null 2>&1 && pwd)"
+# shellcheck source=scripts/distribution/lib/diagnostics.sh
+source "$SCRIPT_DIR/lib/diagnostics.sh"
+
+JSON_OUTPUT=0
+DRY_RUN=1
+REAL_MODE=0
+ARCH="arm64"
+OUTPUT_DIR=""
+IDENTITY_SELECTOR=""
+NOTARY_PROFILE=""
+SKIP_BUILD=0
+FULL_XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-}"
+if [[ -z "$FULL_XCODE_DEVELOPER_DIR" || "$FULL_XCODE_DEVELOPER_DIR" != *"Xcode.app/Contents/Developer"* ]]; then
+    if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
+        FULL_XCODE_DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+    fi
+fi
+
+PACKAGE_PHASES=()
+PACKAGE_STATUSES=()
+PACKAGE_MESSAGES=()
+PACKAGE_GUIDANCES=()
+WORKSPACE=""
+LOG_DIR=""
+APP_STAGE=""
+DMG_STAGE=""
+
+usage() {
+    cat <<'USAGE'
+Usage: scripts/distribution/package --output-dir <ignored-dir> [--dry-run|--real] [--json] [--arch arm64] [--developer-id-identity <selector>] [--notary-profile <profile>] [--skip-build]
+
+Builds and packages the Sounding macOS app with redacted distribution diagnostics.
+
+Options:
+  --output-dir <ignored-dir>          Required local ignored workspace for build products and raw logs.
+  --dry-run                           Default. Build, stage, and DMG package without Apple credentials.
+  --real                              Enable credential-gated Developer ID signing, notarization, stapling, and Gatekeeper checks.
+  --json                              Emit one deterministic JSON document.
+  --arch arm64                        Package the known-good macOS arm64 distribution path.
+  --developer-id-identity <selector>  Required with --real. Local Developer ID Application selector for codesign.
+  --notary-profile <profile>          Required with --real. Local notarytool keychain profile name.
+  --skip-build                        Reuse an existing staged build product inside the output workspace; intended for smoke tests only.
+  --help                              Show this help text.
+
+Never pass Apple passwords, API keys, Apple IDs, raw certificate names, or generated artifact paths in tracked docs or examples.
+USAGE
+}
+
+add_step() {
+    PACKAGE_PHASES+=("$(distribution_safe_phase "${1-}")")
+    PACKAGE_STATUSES+=("$(distribution_safe_status "${2-}")")
+    local message guidance
+    message=$(distribution_redact_text "${3-}") || message="$DISTRIBUTION_STATUS_REDACTION_FAILURE"
+    guidance=$(distribution_redact_text "${4-}") || guidance="$DISTRIBUTION_GUIDANCE_REDACTION"
+    PACKAGE_MESSAGES+=("$message")
+    PACKAGE_GUIDANCES+=("$guidance")
+}
+
+has_high_risk_argument() {
+    local value="${1-}"
+    [[ "$value" =~ Developer[[:space:]]ID[[:space:]](Application|Installer): ]] && return 0
+    [[ "$value" =~ [A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,} ]] && return 0
+    [[ "$value" =~ [Tt][Oo][Kk][Ee][Nn]=|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]=|[Ss][Ee][Cc][Rr][Ee][Tt]=|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]= ]] && return 0
+    [[ "$value" =~ [?#][^[:space:]]+ ]] && return 0
+    return 1
+}
+
+safe_value_required() {
+    local option="$1"
+    local value="${2-}"
+    if [[ -z "$value" ]]; then
+        printf 'Invalid distribution package option: %s requires a non-empty value.\n' "$option" >&2
+        exit 64
+    fi
+    if has_high_risk_argument "$value"; then
+        printf 'Invalid distribution package option: %s value looks sensitive; use a non-secret selector, profile label, or ignored local directory.\n' "$option" >&2
+        exit 64
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json)
+            JSON_OUTPUT=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --real)
+            REAL_MODE=1
+            DRY_RUN=0
+            shift
+            ;;
+        --output-dir)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution package option: --output-dir requires a value.\n' >&2; exit 64; }
+            safe_value_required "$1" "$2"
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --arch)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution package option: --arch requires a value.\n' >&2; exit 64; }
+            ARCH="$2"
+            if [[ "$ARCH" != "arm64" ]]; then
+                printf 'Invalid distribution package option: unsupported architecture. The package path currently supports arm64 only.\n' >&2
+                exit 64
+            fi
+            shift 2
+            ;;
+        --developer-id-identity)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution package option: --developer-id-identity requires a value.\n' >&2; exit 64; }
+            safe_value_required "$1" "$2"
+            IDENTITY_SELECTOR="$2"
+            shift 2
+            ;;
+        --notary-profile)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution package option: --notary-profile requires a value.\n' >&2; exit 64; }
+            safe_value_required "$1" "$2"
+            NOTARY_PROFILE="$2"
+            shift 2
+            ;;
+        --skip-build)
+            SKIP_BUILD=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --*)
+            printf 'Invalid distribution package option: unknown option. Run scripts/distribution/package --help for supported flags.\n' >&2
+            exit 64
+            ;;
+        *)
+            printf 'Invalid distribution package option: positional arguments are not supported. Run scripts/distribution/package --help for supported flags.\n' >&2
+            exit 64
+            ;;
+    esac
+done
+
+if [[ -z "$OUTPUT_DIR" ]]; then
+    printf 'Invalid distribution package option: --output-dir is required.\n' >&2
+    exit 64
+fi
+if [[ "$REAL_MODE" -eq 1 && "$DRY_RUN" -eq 1 ]]; then
+    printf 'Invalid distribution package option: choose either --dry-run or --real, not both.\n' >&2
+    exit 64
+fi
+if [[ "$REAL_MODE" -eq 1 && ( -z "$IDENTITY_SELECTOR" || -z "$NOTARY_PROFILE" ) ]]; then
+    printf 'Invalid distribution package option: --real requires both --developer-id-identity and --notary-profile.\n' >&2
+    exit 64
+fi
+if [[ "$REAL_MODE" -eq 0 && ( -n "$IDENTITY_SELECTOR" || -n "$NOTARY_PROFILE" ) && "$DRY_RUN" -eq 1 ]]; then
+    # Dry-run accepts selectors only to prove they are never needed or emitted.
+    :
+fi
+
+run_bounded_to_log() {
+    local timeout_seconds="$1"
+    local log_path="$2"
+    shift 2
+    /usr/bin/python3 - "$timeout_seconds" "$log_path" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+log_path = sys.argv[2]
+cmd = sys.argv[3:]
+try:
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, check=False)
+    with open(log_path, "ab") as handle:
+        handle.write(result.stdout)
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired as exc:
+    with open(log_path, "ab") as handle:
+        if exc.stdout:
+            handle.write(exc.stdout)
+        handle.write(b"\n[distribution-package-timeout]\n")
+    sys.exit(124)
+except Exception as exc:
+    with open(log_path, "ab") as handle:
+        handle.write(("[distribution-package-error] " + exc.__class__.__name__ + "\n").encode("utf-8"))
+    sys.exit(127)
+PY
+}
+
+prepare_workspace() {
+    if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
+        add_step "$DISTRIBUTION_PHASE_OUTPUT" "$DISTRIBUTION_STATUS_FAILED" "Distribution output workspace could not be created." "$DISTRIBUTION_GUIDANCE_OUTPUT"
+        return 1
+    fi
+    if [[ ! -w "$OUTPUT_DIR" ]]; then
+        add_step "$DISTRIBUTION_PHASE_OUTPUT" "$DISTRIBUTION_STATUS_FAILED" "Distribution output workspace is not writable." "$DISTRIBUTION_GUIDANCE_OUTPUT"
+        return 1
+    fi
+    WORKSPACE="$OUTPUT_DIR/package-$(/bin/date +%Y%m%d-%H%M%S)"
+    LOG_DIR="$WORKSPACE/logs"
+    APP_STAGE="$WORKSPACE/Sounding.app"
+    DMG_STAGE="$WORKSPACE/Sounding.dmg"
+    if ! mkdir -p "$LOG_DIR"; then
+        add_step "$DISTRIBUTION_PHASE_OUTPUT" "$DISTRIBUTION_STATUS_FAILED" "Distribution run workspace could not be prepared." "$DISTRIBUTION_GUIDANCE_OUTPUT"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_OUTPUT" "$DISTRIBUTION_STATUS_READY" "Distribution workspace is writable and raw logs are isolated locally." "Inspect ignored local logs only when private diagnostics are needed."
+}
+
+check_environment() {
+    if [[ -z "$FULL_XCODE_DEVELOPER_DIR" || ! -d "$FULL_XCODE_DEVELOPER_DIR" || ! -x /usr/bin/xcodebuild || ! -x /usr/bin/python3 || ! -x /usr/bin/ditto ]]; then
+        add_step "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_FAILED" "Required package tool is unavailable." "$DISTRIBUTION_GUIDANCE_ENVIRONMENT"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_READY" "Required package tools are available." "Continue with the package workflow."
+}
+
+build_app() {
+    local build_log="$LOG_DIR/archive.log"
+    if [[ "$SKIP_BUILD" -eq 1 ]]; then
+        if [[ -d "$APP_STAGE" ]]; then
+            add_step "$DISTRIBUTION_PHASE_ARCHIVE" "$DISTRIBUTION_STATUS_READY" "Existing staged app bundle was reused for package smoke verification." "Use full builds for release packaging."
+            return 0
+        fi
+        add_step "$DISTRIBUTION_PHASE_ARCHIVE" "$DISTRIBUTION_STATUS_FAILED" "Skip-build requested but no staged app bundle was available." "$DISTRIBUTION_GUIDANCE_ARCHIVE"
+        return 1
+    fi
+
+    local derived_data="$WORKSPACE/DerivedData"
+    set +e
+    run_bounded_to_log 900 "$build_log" \
+        /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" \
+        /usr/bin/xcodebuild \
+        -project "$REPO_ROOT/Sounding.xcodeproj" \
+        -scheme Sounding \
+        -configuration Release \
+        -destination "platform=macOS,arch=$ARCH" \
+        -derivedDataPath "$derived_data" \
+        CODE_SIGNING_ALLOWED=NO \
+        build
+    local status=$?
+    set -e
+    if [[ "$status" -eq 124 ]]; then
+        add_step "$DISTRIBUTION_PHASE_ARCHIVE" "$DISTRIBUTION_STATUS_FAILED" "Release app build timed out." "$DISTRIBUTION_GUIDANCE_ARCHIVE"
+        return 1
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_ARCHIVE" "$DISTRIBUTION_STATUS_FAILED" "Release app build failed." "$DISTRIBUTION_GUIDANCE_ARCHIVE"
+        return 1
+    fi
+
+    local built_app="$derived_data/Build/Products/Release/Sounding.app"
+    if [[ ! -d "$built_app" ]]; then
+        add_step "$DISTRIBUTION_PHASE_ARCHIVE" "$DISTRIBUTION_STATUS_FAILED" "Release build completed but app bundle was not found." "$DISTRIBUTION_GUIDANCE_ARCHIVE"
+        return 1
+    fi
+    if ! /usr/bin/ditto "$built_app" "$APP_STAGE" >>"$build_log" 2>&1; then
+        add_step "$DISTRIBUTION_PHASE_ARCHIVE" "$DISTRIBUTION_STATUS_FAILED" "Release app bundle could not be staged." "$DISTRIBUTION_GUIDANCE_ARCHIVE"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_ARCHIVE" "$DISTRIBUTION_STATUS_READY" "Unsigned Release app bundle was built and staged." "Use the staged app for dry-run packaging or credential-gated signing."
+}
+
+sign_app() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        add_step "$DISTRIBUTION_PHASE_CODESIGN" "$DISTRIBUTION_STATUS_SKIPPED" "Developer ID signing skipped during dry-run packaging." "$DISTRIBUTION_GUIDANCE_SIGNING_IDENTITY"
+        return 0
+    fi
+
+    local sign_log="$LOG_DIR/codesign.log"
+    set +e
+    run_bounded_to_log 120 "$sign_log" /usr/bin/codesign --force --deep --options runtime --timestamp --sign "$IDENTITY_SELECTOR" "$APP_STAGE"
+    local sign_status=$?
+    set -e
+    if [[ "$sign_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_CODESIGN" "$DISTRIBUTION_STATUS_FAILED" "Developer ID signing failed." "$DISTRIBUTION_GUIDANCE_CODESIGN"
+        return 1
+    fi
+
+    set +e
+    run_bounded_to_log 60 "$sign_log" /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_STAGE"
+    local verify_status=$?
+    set -e
+    if [[ "$verify_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_CODESIGN" "$DISTRIBUTION_STATUS_FAILED" "Developer ID signature verification failed." "$DISTRIBUTION_GUIDANCE_CODESIGN"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_CODESIGN" "$DISTRIBUTION_STATUS_READY" "Developer ID signing and verification completed." "Continue with notarization."
+}
+
+create_dmg() {
+    local dmg_log="$LOG_DIR/dmg.log"
+    if [[ ! -x /usr/bin/hdiutil ]]; then
+        add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_SKIPPED" "DMG creation skipped because hdiutil is unavailable." "$DISTRIBUTION_GUIDANCE_DMG"
+        return 0
+    fi
+    rm -f "$DMG_STAGE"
+    set +e
+    run_bounded_to_log 180 "$dmg_log" /usr/bin/hdiutil create -volname Sounding -srcfolder "$APP_STAGE" -ov -format UDZO "$DMG_STAGE"
+    local create_status=$?
+    set -e
+    if [[ "$create_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_FAILED" "DMG creation failed." "$DISTRIBUTION_GUIDANCE_DMG"
+        return 1
+    fi
+    set +e
+    run_bounded_to_log 60 "$dmg_log" /usr/bin/hdiutil verify "$DMG_STAGE"
+    local verify_status=$?
+    set -e
+    if [[ "$verify_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_FAILED" "DMG verification failed." "$DISTRIBUTION_GUIDANCE_DMG"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_READY" "DMG was created and verified." "Use the generated DMG for credential-gated notarization when running in real mode."
+}
+
+notarize_and_staple() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_SKIPPED" "Notary submission skipped during dry-run packaging." "Configure operator-local notarization credentials before real notarization."
+        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_SKIPPED" "Stapling skipped during dry-run packaging." "$DISTRIBUTION_GUIDANCE_STAPLE"
+        add_step "$DISTRIBUTION_PHASE_GATEKEEPER" "$DISTRIBUTION_STATUS_SKIPPED" "Gatekeeper assessment skipped during dry-run packaging." "$DISTRIBUTION_GUIDANCE_GATEKEEPER"
+        return 0
+    fi
+
+    local notary_log="$LOG_DIR/notary-submit.log"
+    local stapler_log="$LOG_DIR/staple.log"
+    local gatekeeper_log="$LOG_DIR/gatekeeper.log"
+
+    set +e
+    run_bounded_to_log 1800 "$notary_log" /usr/bin/xcrun notarytool submit "$DMG_STAGE" --keychain-profile "$NOTARY_PROFILE" --wait
+    local notary_status=$?
+    set -e
+    if [[ "$notary_status" -eq 124 ]]; then
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "Notary submission timed out." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        return 1
+    fi
+    if [[ "$notary_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_NOTARIZATION_REJECTED" "Notary submission failed or was rejected." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        add_step "$DISTRIBUTION_PHASE_NOTARY_LOG" "$DISTRIBUTION_STATUS_FAILED" "Notary diagnostics were preserved in the local ignored workspace." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "Notary submission completed." "Continue with stapling and assessment."
+
+    set +e
+    run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$APP_STAGE"
+    local staple_app_status=$?
+    run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$DMG_STAGE"
+    local staple_dmg_status=$?
+    set -e
+    if [[ "$staple_app_status" -ne 0 || "$staple_dmg_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_FAILED" "Stapling failed." "$DISTRIBUTION_GUIDANCE_STAPLE"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_READY" "Stapling completed for packaged artifacts." "Continue with Gatekeeper assessment."
+
+    set +e
+    run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type execute --verbose=2 "$APP_STAGE"
+    local app_assess_status=$?
+    run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type open --verbose=2 "$DMG_STAGE"
+    local dmg_assess_status=$?
+    set -e
+    if [[ "$app_assess_status" -ne 0 || "$dmg_assess_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_GATEKEEPER" "$DISTRIBUTION_STATUS_FAILED" "Gatekeeper assessment failed." "$DISTRIBUTION_GUIDANCE_GATEKEEPER"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_GATEKEEPER" "$DISTRIBUTION_STATUS_READY" "Gatekeeper assessment completed." "Package workflow completed."
+}
+
+overall_status() {
+    local overall="$DISTRIBUTION_STATUS_READY"
+    local status
+    for status in "${PACKAGE_STATUSES[@]}"; do
+        case "$status" in
+            "$DISTRIBUTION_STATUS_FAILED"|"$DISTRIBUTION_STATUS_REDACTION_FAILURE"|"$DISTRIBUTION_STATUS_NOTARIZATION_REJECTED")
+                overall="$DISTRIBUTION_STATUS_FAILED"
+                ;;
+            "$DISTRIBUTION_STATUS_MISSING_CREDENTIAL")
+                if [[ "$overall" == "$DISTRIBUTION_STATUS_READY" ]]; then
+                    overall="$DISTRIBUTION_STATUS_MISSING_CREDENTIAL"
+                fi
+                ;;
+        esac
+    done
+    printf '%s' "$overall"
+}
+
+emit_json() {
+    printf '{"checks":['
+    local index
+    for index in "${!PACKAGE_PHASES[@]}"; do
+        [[ "$index" -gt 0 ]] && printf ','
+        printf '{"guidance":"%s","message":"%s","phase":"%s","status":"%s"}' \
+            "$(distribution_json_escape "${PACKAGE_GUIDANCES[$index]}")" \
+            "$(distribution_json_escape "${PACKAGE_MESSAGES[$index]}")" \
+            "$(distribution_json_escape "${PACKAGE_PHASES[$index]}")" \
+            "$(distribution_json_escape "${PACKAGE_STATUSES[$index]}")"
+    done
+    printf '],"dryRun":%s,"overallStatus":"%s","schemaVersion":1}\n' \
+        "$([[ "$DRY_RUN" -eq 1 ]] && printf true || printf false)" \
+        "$(distribution_json_escape "$(overall_status)")"
+}
+
+emit_human() {
+    local index
+    for index in "${!PACKAGE_PHASES[@]}"; do
+        distribution_emit_human_summary \
+            "${PACKAGE_PHASES[$index]}" \
+            "${PACKAGE_STATUSES[$index]}" \
+            "${PACKAGE_MESSAGES[$index]}" \
+            "${PACKAGE_GUIDANCES[$index]}"
+    done
+}
+
+main() {
+    local failed=0
+    prepare_workspace || failed=1
+    if [[ "$failed" -eq 0 ]]; then
+        check_environment || failed=1
+    fi
+    if [[ "$failed" -eq 0 ]]; then
+        build_app || failed=1
+    fi
+    if [[ "$failed" -eq 0 ]]; then
+        sign_app || failed=1
+    fi
+    if [[ "$failed" -eq 0 ]]; then
+        create_dmg || failed=1
+    fi
+    if [[ "$failed" -eq 0 ]]; then
+        notarize_and_staple || failed=1
+    fi
+
+    if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+        emit_json
+    else
+        emit_human
+    fi
+
+    if [[ "$(overall_status)" == "$DISTRIBUTION_STATUS_FAILED" ]]; then
+        exit 1
+    fi
+}
+
+main

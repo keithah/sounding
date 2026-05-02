@@ -76,8 +76,82 @@ final class DistributionScriptSmokeTests: XCTestCase {
         ])
     }
 
+    func testPackageHelpDocumentsDryRunAndRealModeCredentialGating() throws {
+        let result = try runPackage(["--help"])
+        XCTAssertEqual(result.exitCode, 0, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("Usage: scripts/distribution/package"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--dry-run"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--real"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--output-dir <ignored-dir>"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--developer-id-identity <selector>"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--notary-profile <profile>"), result.sanitizedDiagnosticSummary)
+        XCTAssertFalse(result.stdoutText.localizedCaseInsensitiveContains(".env"), result.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText)
+    }
+
+    func testDryRunPackageBuildsStagesAndReportsCredentialGatedStatuses() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-dry-run")
+        let result = try runPackage(["--dry-run", "--json", "--output-dir", outputDir.path], timeoutSeconds: 900)
+        XCTAssertEqual(result.exitCode, 0, result.sanitizedDiagnosticSummary)
+        XCTAssertEqual(result.stderrText, "", result.sanitizedDiagnosticSummary)
+        let report = try result.decodeJSON(PackageReport.self)
+        XCTAssertEqual(report.schemaVersion, 1, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.dryRun, result.sanitizedDiagnosticSummary)
+        XCTAssertEqual(report.overallStatus, "ready", result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.checks.contains { $0.phase == "archive" && $0.status == "ready" }, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.checks.contains { $0.phase == "codesign" && $0.status == "skipped" }, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.checks.contains { $0.phase == "notarySubmit" && $0.status == "skipped" }, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.checks.contains { $0.phase == "staple" && $0.status == "skipped" }, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.checks.contains { $0.phase == "gatekeeper" && $0.status == "skipped" }, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.checks.contains { $0.phase == "dmg" && ["ready", "skipped"].contains($0.status) }, result.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText)
+    }
+
+    func testPackageRejectsInvalidRealModeCombinationsBeforeToolSubmission() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-invalid-real")
+        let missingCredentials = try runPackage(["--real", "--json", "--output-dir", outputDir.path])
+        XCTAssertEqual(missingCredentials.exitCode, 64, missingCredentials.sanitizedDiagnosticSummary)
+        XCTAssertTrue(missingCredentials.stderrText.contains("--real requires both"), missingCredentials.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(missingCredentials.stdoutText + missingCredentials.stderrText)
+
+        let conflictingModes = try runPackage(["--real", "--dry-run", "--json", "--output-dir", outputDir.path, "--developer-id-identity", "LocalSelector", "--notary-profile", "LocalProfile"])
+        XCTAssertEqual(conflictingModes.exitCode, 64, conflictingModes.sanitizedDiagnosticSummary)
+        XCTAssertTrue(conflictingModes.stderrText.contains("choose either --dry-run or --real"), conflictingModes.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(conflictingModes.stdoutText + conflictingModes.stderrText, additionalForbidden: ["LocalSelector", "LocalProfile"])
+    }
+
+    func testPackageRejectsSecretLikeOutputAndCredentialArgumentsWithoutEchoing() throws {
+        let secretPath = "shipping.local/token=super-secret"
+        let secretOutput = try runPackage(["--dry-run", "--json", "--output-dir", secretPath])
+        XCTAssertEqual(secretOutput.exitCode, 64, secretOutput.sanitizedDiagnosticSummary)
+        XCTAssertTrue(secretOutput.stderrText.contains("looks sensitive"), secretOutput.sanitizedDiagnosticSummary)
+        XCTAssertFalse(secretOutput.stderrText.contains(secretPath), secretOutput.sanitizedDiagnosticSummary)
+
+        let secretSelector = "Developer ID Application: Alice Example (ABCDE12345) alice@example.test token=super-secret"
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-secret-args")
+        let secretCredential = try runPackage(["--real", "--json", "--output-dir", outputDir.path, "--developer-id-identity", secretSelector, "--notary-profile", "LocalProfile"])
+        XCTAssertEqual(secretCredential.exitCode, 64, secretCredential.sanitizedDiagnosticSummary)
+        XCTAssertTrue(secretCredential.stderrText.contains("looks sensitive"), secretCredential.sanitizedDiagnosticSummary)
+        XCTAssertFalse(secretCredential.stderrText.contains(secretSelector), secretCredential.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(secretOutput.stdoutText + secretOutput.stderrText + secretCredential.stdoutText + secretCredential.stderrText, additionalForbidden: [
+            "Alice Example",
+            "alice@example.test",
+            "ABCDE12345",
+            "super-secret",
+            "LocalProfile",
+            "token=",
+        ])
+    }
+
     private struct CheckReport: Decodable {
         var checks: [Check]
+        var overallStatus: String
+        var schemaVersion: Int
+    }
+
+    private struct PackageReport: Decodable {
+        var checks: [Check]
+        var dryRun: Bool
         var overallStatus: String
         var schemaVersion: Int
     }
@@ -107,7 +181,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
             do {
                 return try JSONDecoder().decode(type, from: stdout)
             } catch {
-                XCTFail("Failed to decode check JSON: \(error). \(sanitizedDiagnosticSummary)", file: file, line: line)
+                XCTFail("Failed to decode distribution JSON: \(error). \(sanitizedDiagnosticSummary)", file: file, line: line)
                 throw CLIError.invalidJSON
             }
         }
@@ -118,7 +192,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
                 .replacingOccurrences(of: #"[A-Za-z][A-Za-z0-9+.-]*://[^\s]+"#, with: "<redacted-url>", options: .regularExpression)
                 .replacingOccurrences(of: #"(?i)(Developer ID Application:|Developer ID Installer:).*"#, with: "<redacted-developer-id>", options: .regularExpression)
                 .replacingOccurrences(of: #"(?i)(token|secret|password|profile)=([^\s&]+)"#, with: "$1=<redacted>", options: .regularExpression)
-                .replacingOccurrences(of: #"(?<![A-Za-z0-9])(?:/Users|/private/tmp|/tmp)/[^\s]+"#, with: "<redacted-path>", options: .regularExpression)
+                .replacingOccurrences(of: #"(?<![A-Za-z0-9])(?:/Users|/private/tmp|/tmp|/var/folders)/[^\s]+"#, with: "<redacted-path>", options: .regularExpression)
                 .replacingOccurrences(of: #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#, with: "<redacted-email>", options: [.regularExpression, .caseInsensitive])
             if text.count > maxLength {
                 text = String(text.prefix(maxLength)) + "…"
@@ -133,7 +207,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
                 if redactNext {
                     sanitized.append("<redacted>")
                     redactNext = false
-                } else if argument == "--developer-id-identity" || argument == "--notary-profile" {
+                } else if argument == "--developer-id-identity" || argument == "--notary-profile" || argument == "--output-dir" {
                     sanitized.append(argument)
                     redactNext = true
                 } else {
@@ -150,8 +224,27 @@ final class DistributionScriptSmokeTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> ScriptResult {
+        try runScript(checkScriptURL, arguments: arguments, timeoutSeconds: timeoutSeconds, file: file, line: line)
+    }
+
+    private func runPackage(
+        _ arguments: [String],
+        timeoutSeconds: TimeInterval = 60,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> ScriptResult {
+        try runScript(packageScriptURL, arguments: arguments, timeoutSeconds: timeoutSeconds, file: file, line: line)
+    }
+
+    private func runScript(
+        _ scriptURL: URL,
+        arguments: [String],
+        timeoutSeconds: TimeInterval,
+        file: StaticString,
+        line: UInt
+    ) throws -> ScriptResult {
         let process = Process()
-        process.executableURL = checkScriptURL
+        process.executableURL = scriptURL
         process.arguments = arguments
         process.currentDirectoryURL = packageRootURL
 
@@ -180,9 +273,18 @@ final class DistributionScriptSmokeTests: XCTestCase {
             arguments: arguments
         )
         if timedOut {
-            XCTFail("Distribution check timed out. \(result.sanitizedDiagnosticSummary)", file: file, line: line)
+            XCTFail("Distribution script timed out. \(result.sanitizedDiagnosticSummary)", file: file, line: line)
         }
         return result
+    }
+
+    private func makeIgnoredOutputDirectory(name: String) throws -> URL {
+        let root = packageRootURL
+            .appendingPathComponent("shipping.local", isDirectory: true)
+            .appendingPathComponent("tests", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
     }
 
     private var packageRootURL: URL {
@@ -199,6 +301,13 @@ final class DistributionScriptSmokeTests: XCTestCase {
             .appendingPathComponent("check")
     }
 
+    private var packageScriptURL: URL {
+        packageRootURL
+            .appendingPathComponent("scripts")
+            .appendingPathComponent("distribution")
+            .appendingPathComponent("package")
+    }
+
     private func assertNoForbiddenDistributionSubstrings(
         _ text: String,
         additionalForbidden: [String] = [],
@@ -209,6 +318,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
             "/Users/",
             "/private/tmp/",
             "/tmp/",
+            "/var/folders/",
             "alice@example.test",
             "Alice Example",
             "ABCDE12345",
@@ -233,7 +343,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
         for literal in forbidden {
             XCTAssertFalse(
                 lowercased.contains(literal.lowercased()),
-                "Expected distribution check output to redact forbidden literal '\(literal)', got sanitized summary: \(ScriptResult.sanitizedSnippet(from: Data(text.utf8)))",
+                "Expected distribution output to redact forbidden literal '\(literal)', got sanitized summary: \(ScriptResult.sanitizedSnippet(from: Data(text.utf8)))",
                 file: file,
                 line: line
             )

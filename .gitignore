@@ -50,5 +50,9 @@ soak-proof.local/
 soak-evidence/
 *.soak-evidence.json
 *.soak-evidence.ndjson
+
+# Local-only Developer ID packaging workspaces and generated artifacts/logs.
+shipping.local/
+*.distribution-package.local/
 !docs/soak-evidence.example.json
 !live-streams.example.json
