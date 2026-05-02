@@ -5,10 +5,12 @@ import SoundingKit
 struct AppDiagnosticsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "app-diagnostics",
-        abstract: "Summarize Sounding.app local runtime event, failure, and app-verify evidence logs."
+        abstract:
+            "Summarize Sounding.app local runtime event, failure, and app-verify evidence logs."
     )
 
-    @Option(name: .long, help: "Directory containing runtime-events.jsonl and runtime-errors.jsonl.")
+    @Option(
+        name: .long, help: "Directory containing runtime-events.jsonl and runtime-errors.jsonl.")
     var logDirectory: String?
 
     @Option(name: .long, help: "Number of recent entries to print from each log.")
@@ -17,7 +19,8 @@ struct AppDiagnosticsCommand: ParsableCommand {
     @Flag(name: .long, help: "Print raw JSONL entries instead of a compact summary.")
     var raw = false
 
-    @Option(name: .long, help: "App-verify JSON evidence file to summarize. Repeat for multiple files.")
+    @Option(
+        name: .long, help: "App-verify JSON evidence file to summarize. Repeat for multiple files.")
     var evidence: [String] = []
 
     mutating func run() throws {
@@ -52,7 +55,7 @@ struct AppDiagnosticsCommand: ParsableCommand {
         let text = String(decoding: data, as: UTF8.self)
         return text.split(separator: "\n").compactMap { line in
             guard let lineData = String(line).data(using: .utf8),
-                  let entry = try? JSONDecoder().decode(RuntimeLogEntry.self, from: lineData)
+                let entry = try? JSONDecoder().decode(RuntimeLogEntry.self, from: lineData)
             else { return nil }
             return entry.sanitized()
         }
@@ -86,7 +89,7 @@ struct AppDiagnosticsCommand: ParsableCommand {
         for entry in entries.suffix(limit) {
             if raw {
                 if let data = try? JSONEncoder.sorted.encode(entry),
-                   let json = String(data: data, encoding: .utf8)
+                    let json = String(data: data, encoding: .utf8)
                 {
                     print(json)
                 }
@@ -94,12 +97,16 @@ struct AppDiagnosticsCommand: ParsableCommand {
                 let stream = entry.streamID.map { " stream=\($0)" } ?? ""
                 let phase = entry.phase.map { " phase=\($0)" } ?? ""
                 let message = entry.message.map { " message=\($0)" } ?? ""
-                let fields = entry.fields.isEmpty
+                let fields =
+                    entry.fields.isEmpty
                     ? ""
-                    : " fields=" + entry.fields.sorted { $0.key < $1.key }
+                    : " fields="
+                        + entry.fields.sorted { $0.key < $1.key }
                         .map { "\($0.key):\($0.value)" }
                         .joined(separator: ",")
-                print("  \(entry.timestamp) level=\(entry.level) event=\(entry.event)\(stream)\(phase)\(message)\(fields)")
+                print(
+                    "  \(entry.timestamp) level=\(entry.level) event=\(entry.event)\(stream)\(phase)\(message)\(fields)"
+                )
             }
         }
     }
@@ -138,7 +145,8 @@ private enum AppVerifyEvidenceReviewError: Error, Equatable {
 private struct AppVerifyEvidenceReview {
     var evidence: AppVerifyEvidence
 
-    static func load(path: String) -> Result<AppVerifyEvidenceReview, AppVerifyEvidenceReviewError> {
+    static func load(path: String) -> Result<AppVerifyEvidenceReview, AppVerifyEvidenceReviewError>
+    {
         let data: Data
         do {
             data = try Data(contentsOf: URL(fileURLWithPath: path))
@@ -156,14 +164,19 @@ private struct AppVerifyEvidenceReview {
 
     func printReview() {
         print("app-diagnostics evidence=[redacted-path]")
-        print("  schemaVersion=\(max(0, evidence.schemaVersion)) runID=\(safe(evidence.runID)) status=\(evidence.summary.status.rawValue)")
-        print("  required=\(evidence.summary.requiredCheckCount) requiredFailures=\(evidence.summary.failedRequiredCheckCount) warnings=\(evidence.summary.warningCheckCount) checks=\(evidence.checks.count)")
+        print(
+            "  schemaVersion=\(max(0, evidence.schemaVersion)) runID=\(safe(evidence.runID)) status=\(evidence.summary.status.rawValue)"
+        )
+        print(
+            "  required=\(evidence.summary.requiredCheckCount) requiredFailures=\(evidence.summary.failedRequiredCheckCount) warnings=\(evidence.summary.warningCheckCount) checks=\(evidence.checks.count)"
+        )
         print("  message=\(safe(evidence.summary.message))")
         printPhaseCounts()
         printFailedRequiredChecks()
         printWarnings()
         printArtifacts()
         printRecentDiagnosticEvents()
+        printDiagnosisHints()
     }
 
     private func printPhaseCounts() {
@@ -192,7 +205,9 @@ private struct AppVerifyEvidenceReview {
     private func printCheck(_ check: AppVerifyCheckRecord) {
         let reason = check.reason.map { " reason=\(safe($0))" } ?? ""
         let context = factContext(for: check).map { " facts=\($0)" } ?? ""
-        print("    check=\(safe(check.name.rawValue)) phase=\(safe(check.phase.rawValue)) required=\(check.required) status=\(check.status.rawValue)\(reason)\(context)")
+        print(
+            "    check=\(safe(check.name.rawValue)) phase=\(safe(check.phase.rawValue)) required=\(check.required) status=\(check.status.rawValue)\(reason)\(context)"
+        )
     }
 
     private func printArtifacts() {
@@ -210,6 +225,115 @@ private struct AppVerifyEvidenceReview {
         for event in recentDiagnosticEvents().prefix(32) {
             print("    \(safe(event))")
         }
+    }
+
+    private func printDiagnosisHints() {
+        print("  diagnosis")
+        for line in diagnosisHints().prefix(32) {
+            print(
+                "    diagnosis category=\(line.category) check=\(line.check) phase=\(line.phase) status=\(line.status) \(line.detail) events=\(line.events) artifacts=\(line.artifacts)"
+            )
+        }
+    }
+
+    private func diagnosisHints() -> [DiagnosisHint] {
+        evidence.checks.compactMap { check in
+            guard let category = diagnosisCategory(for: check) else { return nil }
+            return DiagnosisHint(
+                category: category,
+                check: safe(check.name.rawValue),
+                phase: safe(check.phase.rawValue),
+                status: check.status.rawValue,
+                detail: diagnosisDetail(for: check),
+                events: safeList(diagnosticEvents(for: check), limit: 6),
+                artifacts: artifactKinds(for: check)
+            )
+        }
+    }
+
+    private func diagnosisCategory(for check: AppVerifyCheckRecord) -> String? {
+        switch check.name {
+        case .runtimeStarted, .decodeCompleted, .avfoundationPlaybackScheduled, .runtimeStopped,
+            .diagnosticsWritten:
+            return "runtime"
+        case .playbackMuted, .playbackUnmuted, .playbackVolumeChanged, .runtimeStopObserved,
+            .runtimeRestartObserved:
+            return "control"
+        case .transcriptPersistence, .transcriptTimelineProjection, .transcriptSearchProjection,
+            .songMetadataProjection, .adMetadataProjection:
+            return "projection"
+        case .liveTranscriptObserved, .liveMetadataObserved:
+            return check.status == .pass ? nil : "live"
+        default:
+            return nil
+        }
+    }
+
+    private func diagnosisDetail(for check: AppVerifyCheckRecord) -> String {
+        var parts = ["required=\(check.required)"]
+        if let facts = check.facts {
+            parts.append("processed=\(facts.processedChunks)")
+            parts.append("decoded=\(facts.decodedChunks)")
+            parts.append("scheduled=\(facts.scheduledBuffers)")
+            parts.append("diagnostics=\(facts.diagnosticCount)")
+        }
+        if let controlFacts = check.controlFacts {
+            parts.append("action=\(safe(controlFacts.requestedAction))")
+            parts.append("observedPhase=\(safe(controlFacts.observedRuntimePhase.rawValue))")
+            if let timelineState = controlFacts.timelineState {
+                parts.append("timeline=\(safe(timelineState))")
+            }
+            if let muted = controlFacts.muted {
+                parts.append("muted=\(muted)")
+            }
+            if let effectiveVolume = controlFacts.effectiveVolume {
+                parts.append("effectiveVolume=\(String(format: "%.3f", effectiveVolume))")
+            }
+        }
+        if let projectionFacts = check.projectionFacts {
+            parts.append("surface=\(safe(projectionFacts.surface))")
+            parts.append("rows=\(projectionFacts.rowCount)")
+            parts.append("projections=\(projectionFacts.projectionCount)")
+            parts.append("metadata=\(projectionFacts.metadataCount)")
+        }
+        if let liveFacts = check.liveFacts {
+            parts.append("stream=\(safe(liveFacts.streamID))")
+            parts.append("type=\(liveFacts.resolvedStreamType.rawValue)")
+            parts.append("liveRequired=\(liveFacts.required)")
+            parts.append("transcriptExpectation=\(liveFacts.transcriptExpectation.rawValue)")
+            parts.append("metadataExpectation=\(liveFacts.metadataExpectation.rawValue)")
+            parts.append("processed=\(liveFacts.processedChunks)")
+            parts.append("decoded=\(liveFacts.decodedChunks)")
+            parts.append("scheduled=\(liveFacts.scheduledBuffers)")
+            parts.append("transcripts=\(liveFacts.transcriptCount)")
+            parts.append("metadata=\(liveFacts.metadataCount)")
+        }
+        if let reason = check.reason {
+            parts.append("reason=\(safe(reason))")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private func diagnosticEvents(for check: AppVerifyCheckRecord) -> [String] {
+        var events: [String] = []
+        if let facts = check.facts {
+            events.append(contentsOf: facts.recentDiagnosticEvents)
+        }
+        if let controlFacts = check.controlFacts {
+            events.append(contentsOf: controlFacts.diagnosticEventNames)
+            events.append(contentsOf: controlFacts.diagnostics.map(\.event))
+        }
+        if let projectionFacts = check.projectionFacts {
+            events.append(contentsOf: projectionFacts.recentDiagnosticEvents)
+        }
+        if let liveFacts = check.liveFacts {
+            events.append(contentsOf: liveFacts.recentDiagnosticEvents)
+        }
+        return unique(events.map(safe))
+    }
+
+    private func artifactKinds(for check: AppVerifyCheckRecord) -> String {
+        safeList(unique((check.artifacts + evidence.artifacts).map { safe($0.kind) }), limit: 6)
     }
 
     private func counted(_ values: [String]) -> [(String, Int)] {
@@ -252,7 +376,9 @@ private struct AppVerifyEvidenceReview {
     private func factContext(for check: AppVerifyCheckRecord) -> String? {
         var parts: [String] = []
         if let facts = check.facts {
-            parts.append("runtime(processed=\(facts.processedChunks),decoded=\(facts.decodedChunks),scheduled=\(facts.scheduledBuffers),diagnostics=\(facts.diagnosticCount))")
+            parts.append(
+                "runtime(processed=\(facts.processedChunks),decoded=\(facts.decodedChunks),scheduled=\(facts.scheduledBuffers),diagnostics=\(facts.diagnosticCount))"
+            )
         }
         if let controlFacts = check.controlFacts {
             var control = [
@@ -274,10 +400,14 @@ private struct AppVerifyEvidenceReview {
             parts.append("control(\(control.joined(separator: ",")))")
         }
         if let projectionFacts = check.projectionFacts {
-            parts.append("projection(surface=\(safe(projectionFacts.surface)),rows=\(projectionFacts.rowCount),projections=\(projectionFacts.projectionCount),metadata=\(projectionFacts.metadataCount),events=\(safeList(projectionFacts.recentDiagnosticEvents, limit: 6)))")
+            parts.append(
+                "projection(surface=\(safe(projectionFacts.surface)),rows=\(projectionFacts.rowCount),projections=\(projectionFacts.projectionCount),metadata=\(projectionFacts.metadataCount),events=\(safeList(projectionFacts.recentDiagnosticEvents, limit: 6)))"
+            )
         }
         if let liveFacts = check.liveFacts {
-            parts.append("live(stream=\(safe(liveFacts.streamID)),type=\(liveFacts.resolvedStreamType.rawValue),required=\(liveFacts.required),processed=\(liveFacts.processedChunks),decoded=\(liveFacts.decodedChunks),scheduled=\(liveFacts.scheduledBuffers),transcripts=\(liveFacts.transcriptCount),metadata=\(liveFacts.metadataCount),events=\(safeList(liveFacts.recentDiagnosticEvents, limit: 6)))")
+            parts.append(
+                "live(stream=\(safe(liveFacts.streamID)),type=\(liveFacts.resolvedStreamType.rawValue),required=\(liveFacts.required),processed=\(liveFacts.processedChunks),decoded=\(liveFacts.decodedChunks),scheduled=\(liveFacts.scheduledBuffers),transcripts=\(liveFacts.transcriptCount),metadata=\(liveFacts.metadataCount),events=\(safeList(liveFacts.recentDiagnosticEvents, limit: 6)))"
+            )
         }
         guard !parts.isEmpty else { return nil }
         return parts.joined(separator: ";")
@@ -306,14 +436,26 @@ private struct AppVerifyEvidenceReview {
     }
 
     private func safe(_ value: String) -> String {
-        AppDiagnosticsRedaction.bounded(AppDiagnosticsRedaction.scrubSecretKeyNames(IngestRedaction.redact(value)))
+        AppDiagnosticsRedaction.bounded(
+            AppDiagnosticsRedaction.scrubSecretKeyNames(IngestRedaction.redact(value)))
     }
+}
+
+private struct DiagnosisHint {
+    var category: String
+    var check: String
+    var phase: String
+    var status: String
+    var detail: String
+    var events: String
+    var artifacts: String
 }
 
 private enum AppDiagnosticsRedaction {
     static func scrubSecretKeyNames(_ value: String) -> String {
         value.replacingOccurrences(
-            of: #"(?i)\b(?:token|access_token|api[_-]?key|secret|password|passwd|pwd|key)=\[redacted\]"#,
+            of:
+                #"(?i)\b(?:token|access_token|api[_-]?key|secret|password|passwd|pwd|key)=\[redacted\]"#,
             with: "[redacted-secret]",
             options: .regularExpression
         )
@@ -362,7 +504,8 @@ private struct RuntimeLogEntry: Codable {
     private static func sanitizeFieldKey(_ key: String) -> String {
         let redacted = sanitize(key)
         if redacted.range(
-            of: #"(?i)\b(token|access[_-]?token|api[_-]?key|secret|password|passwd|pwd|credential|authorization)\b"#,
+            of:
+                #"(?i)\b(token|access[_-]?token|api[_-]?key|secret|password|passwd|pwd|credential|authorization)\b"#,
             options: .regularExpression
         ) != nil {
             return "[redacted-secret-key]"
@@ -375,7 +518,8 @@ private struct RuntimeLogEntry: Codable {
     }
 
     private static func sanitize(_ value: String) -> String {
-        AppDiagnosticsRedaction.bounded(AppDiagnosticsRedaction.scrubSecretKeyNames(IngestRedaction.redact(value)))
+        AppDiagnosticsRedaction.bounded(
+            AppDiagnosticsRedaction.scrubSecretKeyNames(IngestRedaction.redact(value)))
     }
 
     private static func bounded(_ value: String) -> String {
@@ -383,8 +527,8 @@ private struct RuntimeLogEntry: Codable {
     }
 }
 
-private extension JSONEncoder {
-    static var sorted: JSONEncoder {
+extension JSONEncoder {
+    fileprivate static var sorted: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return encoder
