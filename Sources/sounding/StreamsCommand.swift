@@ -6,7 +6,7 @@ struct StreamsCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "streams",
         abstract: "Manage named streams in a Sounding SQLite database.",
-        subcommands: [Add.self, List.self, Pause.self, Resume.self, Remove.self]
+        subcommands: [Add.self, List.self, Status.self, Pause.self, Resume.self, Remove.self]
     )
 
     struct Add: AsyncParsableCommand {
@@ -94,6 +94,54 @@ struct StreamsCommand: AsyncParsableCommand {
                 throw ExitCode.failure
             } catch let error as StreamRegistryError {
                 StreamsCommand.writeStandardError(StreamsCommandError.registry(error).description)
+                throw ExitCode.failure
+            } catch let error as StreamsOutput.OutputError {
+                StreamsCommand.writeStandardError(
+                    StreamsCommandError.outputFailed(reason: String(describing: error)).description)
+                throw ExitCode.failure
+            } catch let error as EncodingError {
+                StreamsCommand.writeStandardError(
+                    StreamsCommandError.outputFailed(reason: String(describing: error)).description)
+                throw ExitCode.failure
+            } catch {
+                StreamsCommand.writeStandardError(
+                    StreamsCommandError.operationFailed(reason: String(describing: error))
+                        .description)
+                throw ExitCode.failure
+            }
+        }
+    }
+
+    struct Status: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "status",
+            abstract: "Inspect per-stream runtime reconnect and backoff status from the Sounding SQLite database."
+        )
+
+        @Option(name: .long, help: "Path to the Sounding SQLite database to read.")
+        var db: String
+
+        @Flag(name: .long, help: "Emit stream runtime status records as stable JSON.")
+        var json = false
+
+        @Flag(name: .long, help: "Include soft-removed streams in results.")
+        var includeRemoved = false
+
+        mutating func run() async throws {
+            do {
+                let database = try StreamsCommand.database(dbPath: db)
+                let records = try AppStreamRuntimeStatusStore(database: database)
+                    .inspections(includeRemoved: includeRemoved)
+                if json {
+                    try StreamsCommand.writeStandardOutput(try StreamsOutput.encodeRuntimeStatusJSON(records))
+                } else {
+                    try StreamsCommand.writeStandardOutput(StreamsOutput.formatRuntimeStatusHuman(records))
+                }
+            } catch let error as StreamsCommandError {
+                StreamsCommand.writeStandardError(error.description)
+                throw ExitCode.failure
+            } catch let error as AppStreamRuntimeStatusStoreError {
+                StreamsCommand.writeStandardError(StreamsCommandError.runtimeStatus(error).description)
                 throw ExitCode.failure
             } catch let error as StreamsOutput.OutputError {
                 StreamsCommand.writeStandardError(
@@ -233,9 +281,12 @@ struct StreamsCommand: AsyncParsableCommand {
     }
 
     private static func registry(dbPath: String) throws -> StreamRegistry {
+        StreamRegistry(database: try database(dbPath: dbPath))
+    }
+
+    private static func database(dbPath: String) throws -> SoundingDatabase {
         do {
-            let database = try SoundingDatabase(fileURL: URL(fileURLWithPath: dbPath))
-            return StreamRegistry(database: database)
+            return try SoundingDatabase(fileURL: URL(fileURLWithPath: dbPath))
         } catch {
             throw StreamsCommandError.databaseOpenFailed
         }
@@ -269,6 +320,7 @@ private enum StreamsCommandError: Error, CustomStringConvertible {
     case configuration(reason: String)
     case databaseOpenFailed
     case registry(StreamRegistryError)
+    case runtimeStatus(AppStreamRuntimeStatusStoreError)
     case operationFailed(reason: String)
     case outputFailed(reason: String)
 
@@ -280,6 +332,8 @@ private enum StreamsCommandError: Error, CustomStringConvertible {
             return "Streams database failed: could not open redacted database path."
         case .registry(let error):
             return registryDescription(error)
+        case .runtimeStatus(let error):
+            return runtimeStatusDescription(error)
         case .operationFailed(let reason):
             return "Streams operation failed: \(redact(reason))."
         case .outputFailed:
@@ -309,6 +363,19 @@ private enum StreamsCommandError: Error, CustomStringConvertible {
             return "Streams database failed: \(redact(message))."
         case .databaseWriteFailed(let message):
             return "Streams database failed: \(redact(message))."
+        }
+    }
+
+    private func runtimeStatusDescription(_ error: AppStreamRuntimeStatusStoreError) -> String {
+        switch error {
+        case .invalidStreamID:
+            return "Streams runtime status failed: stream id must be greater than zero."
+        case .streamNotFound:
+            return "Streams runtime status failed: stream reference was not found."
+        case .databaseReadFailed(let message):
+            return "Streams runtime status database failed: \(redact(message))."
+        case .databaseWriteFailed(let message):
+            return "Streams runtime status database failed: \(redact(message))."
         }
     }
 

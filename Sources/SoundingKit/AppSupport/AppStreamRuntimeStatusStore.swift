@@ -21,6 +21,56 @@ public enum AppStreamRuntimeStatusStoreError: Error, Equatable, Sendable, Custom
     }
 }
 
+/// CLI/app inspection projection that pairs every stream registry row with its current runtime status.
+///
+/// `hasRuntimeStatus == false` represents an absent status row. Callers should render that as an
+/// idle/unknown runtime state instead of failing inspection for the whole database.
+public struct AppStreamRuntimeStatusInspection: Equatable, Sendable {
+    public var streamID: Int64
+    public var name: String
+    public var streamType: String
+    public var streamStatus: String
+    public var sourceDescription: String
+    public var phase: String
+    public var hasRuntimeStatus: Bool
+    public var attempt: Int
+    public var maxAttempts: Int
+    public var nextRetrySeconds: Int?
+    public var nextRetryAt: String?
+    public var updatedAt: String?
+    public var recentFailure: AppStreamRuntimeRecentFailure?
+
+    public init(
+        streamID: Int64,
+        name: String,
+        streamType: String,
+        streamStatus: String,
+        sourceDescription: String,
+        phase: String,
+        hasRuntimeStatus: Bool,
+        attempt: Int,
+        maxAttempts: Int,
+        nextRetrySeconds: Int?,
+        nextRetryAt: String?,
+        updatedAt: String?,
+        recentFailure: AppStreamRuntimeRecentFailure?
+    ) {
+        self.streamID = streamID
+        self.name = IngestRedaction.redact(name)
+        self.streamType = IngestRedaction.redact(streamType)
+        self.streamStatus = IngestRedaction.redact(streamStatus)
+        self.sourceDescription = IngestRedaction.sourceDescription(sourceDescription)
+        self.phase = IngestRedaction.redact(phase)
+        self.hasRuntimeStatus = hasRuntimeStatus
+        self.attempt = max(0, attempt)
+        self.maxAttempts = max(0, maxAttempts)
+        self.nextRetrySeconds = nextRetrySeconds.map { max(0, $0) }
+        self.nextRetryAt = nextRetryAt.map(IngestRedaction.redact)
+        self.updatedAt = updatedAt.map(IngestRedaction.redact)
+        self.recentFailure = recentFailure
+    }
+}
+
 /// SQLite-backed current runtime status projection for app and CLI inspection surfaces.
 ///
 /// The store intentionally persists one row per stream and no history. Runtime callers replace
@@ -141,6 +191,45 @@ public struct AppStreamRuntimeStatusStore: Sendable {
         }
     }
 
+    public func inspections(includeRemoved: Bool = false) throws -> [AppStreamRuntimeStatusInspection] {
+        do {
+            return try database.read { db in
+                let removedClause = includeRemoved ? "" : "AND streams.removed_at IS NULL"
+                return try Row.fetchAll(
+                    db,
+                    sql: """
+                    SELECT streams.id,
+                           streams.name,
+                           streams.stream_type,
+                           streams.status,
+                           streams.source,
+                           stream_runtime_status.stream_id AS runtime_stream_id,
+                           stream_runtime_status.phase,
+                           stream_runtime_status.attempt,
+                           stream_runtime_status.max_attempts,
+                           stream_runtime_status.next_retry_seconds,
+                           stream_runtime_status.next_retry_at,
+                           stream_runtime_status.recent_failure_message,
+                           stream_runtime_status.recent_failure_at,
+                           stream_runtime_status.updated_at AS runtime_updated_at
+                    FROM streams
+                    LEFT JOIN stream_runtime_status
+                      ON stream_runtime_status.stream_id = streams.id
+                    WHERE streams.name IS NOT NULL
+                      \(removedClause)
+                    ORDER BY streams.name COLLATE NOCASE, streams.id
+                    """
+                ).map(Self.decodeInspection(row:))
+            }
+        } catch let error as AppStreamRuntimeStatusStoreError {
+            throw error
+        } catch {
+            throw AppStreamRuntimeStatusStoreError.databaseReadFailed(
+                message: Self.redactedDatabaseMessage(error)
+            )
+        }
+    }
+
     private func fetchStatus(streamID: Int64, db: Database) throws -> AppStreamRuntimeStatusSnapshot? {
         try Row.fetchOne(
             db,
@@ -218,6 +307,48 @@ public struct AppStreamRuntimeStatusStore: Sendable {
             nextRetrySeconds: row["next_retry_seconds"],
             nextRetryAt: row["next_retry_at"],
             updatedAt: row["updated_at"],
+            recentFailure: malformedFailure ?? persistedFailure
+        )
+    }
+
+    private static func decodeInspection(row: Row) -> AppStreamRuntimeStatusInspection {
+        let rawPhase: String? = row["phase"]
+        let runtimeUpdatedAt: String? = row["runtime_updated_at"]
+        let phase: String
+        let malformedFailure: AppStreamRuntimeRecentFailure?
+        if let rawPhase, AppStreamRuntimeStatusPhase(rawValue: rawPhase) == nil {
+            phase = AppStreamRuntimeStatusPhase.error.rawValue
+            malformedFailure = AppStreamRuntimeRecentFailure(
+                message: malformedPhaseMessage,
+                occurredAt: runtimeUpdatedAt ?? "unknown"
+            )
+        } else {
+            phase = rawPhase ?? "unknown"
+            malformedFailure = nil
+        }
+
+        let persistedFailureMessage: String? = row["recent_failure_message"]
+        let persistedFailureAt: String? = row["recent_failure_at"]
+        let persistedFailure = persistedFailureMessage.map { message in
+            AppStreamRuntimeRecentFailure(
+                message: message,
+                occurredAt: persistedFailureAt ?? runtimeUpdatedAt ?? "unknown"
+            )
+        }
+
+        return AppStreamRuntimeStatusInspection(
+            streamID: row["id"],
+            name: row["name"],
+            streamType: row["stream_type"],
+            streamStatus: row["status"],
+            sourceDescription: row["source"],
+            phase: phase,
+            hasRuntimeStatus: rawPhase != nil,
+            attempt: (row["attempt"] as Int?) ?? 0,
+            maxAttempts: (row["max_attempts"] as Int?) ?? 0,
+            nextRetrySeconds: row["next_retry_seconds"],
+            nextRetryAt: row["next_retry_at"],
+            updatedAt: runtimeUpdatedAt,
             recentFailure: malformedFailure ?? persistedFailure
         )
     }

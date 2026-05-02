@@ -154,6 +154,23 @@ swift run --package-path sounding sounding count "sponsor message" \
 
 Both commands validate empty phrases and invalid search bounds before opening the database, and database-open failures report redacted paths.
 
+## Stream runtime diagnostics
+
+M005 adds an operator-facing status surface for Sounding.app runtime reconnect/backoff state. The app runtime persists one redacted row per stream in `stream_runtime_status`; the CLI reads those same rows without requiring app IPC:
+
+```sh
+swift run --package-path sounding sounding streams status \
+  --db /tmp/sounding-app.sqlite
+
+swift run --package-path sounding sounding streams status \
+  --db /tmp/sounding-app.sqlite \
+  --json
+```
+
+Use `--include-removed` when diagnosing a stream that was soft-removed after a failure. Output includes the stream id/name/type/source description, registry status, runtime phase, reconnect attempt/max attempts, next retry delay/time, updated timestamp, and recent redacted failure. Streams with no runtime row are reported as `phase=unknown` rather than causing the whole inspection to fail. Malformed persisted phases are projected as `phase=error` with an actionable redacted failure message so an operator can clear or refresh the status row.
+
+Do not paste generated database paths, raw `source_url` values, signed query strings, credentials, URL fragments, evidence paths, or secret-like filenames into tracked diagnostics. The status command should only print redacted stream descriptions and redacted failure text; if private source details appear, treat that as a redaction bug.
+
 ## Local-only live verification
 
 Live stream verification is available through:

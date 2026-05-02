@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import SoundingKit
 import XCTest
 
 final class StreamsCommandSmokeTests: XCTestCase {
@@ -12,7 +13,7 @@ final class StreamsCommandSmokeTests: XCTestCase {
         let streams = try runSounding(arguments: ["streams", "--help"])
         XCTAssertEqual(streams.exitCode, 0, streams.diagnosticSummary)
         let streamsHelp = String(data: streams.stdout, encoding: .utf8) ?? ""
-        for command in ["add", "list", "pause", "resume", "remove"] {
+        for command in ["add", "list", "status", "pause", "resume", "remove"] {
             XCTAssertTrue(streamsHelp.contains(command), streams.diagnosticSummary)
         }
 
@@ -28,6 +29,13 @@ final class StreamsCommandSmokeTests: XCTestCase {
         let listHelp = String(data: list.stdout, encoding: .utf8) ?? ""
         for text in ["--db", "--json", "--include-removed"] {
             XCTAssertTrue(listHelp.contains(text), list.diagnosticSummary)
+        }
+
+        let status = try runSounding(arguments: ["streams", "status", "--help"])
+        XCTAssertEqual(status.exitCode, 0, status.diagnosticSummary)
+        let statusHelp = String(data: status.stdout, encoding: .utf8) ?? ""
+        for text in ["--db", "--json", "--include-removed"] {
+            XCTAssertTrue(statusHelp.contains(text), status.diagnosticSummary)
         }
 
         for command in ["pause", "resume", "remove"] {
@@ -98,6 +106,188 @@ final class StreamsCommandSmokeTests: XCTestCase {
         XCTAssertNil(stream.resumedAt, json.diagnosticSummary)
         XCTAssertNil(stream.removedAt, json.diagnosticSummary)
         assertStreamOutputSanitized(String(data: json.stdout, encoding: .utf8) ?? "", dbURL: dbURL)
+    }
+
+    func testRuntimeStatusReportsUnknownWhenRowsAreAbsent() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "status-missing-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+
+        let add = try addStream(dbURL: dbURL, name: "Idle")
+        XCTAssertEqual(add.exitCode, 0, add.diagnosticSummary)
+
+        let human = try runSounding(arguments: ["streams", "status", "--db", dbURL.path])
+        XCTAssertEqual(human.exitCode, 0, human.diagnosticSummary)
+        XCTAssertEqual(human.stderr.count, 0, human.diagnosticSummary)
+        let humanText = String(data: human.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(humanText.contains("name=Idle"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("phase=unknown"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("has_runtime_status=false"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("attempt=0 max_attempts=0"), human.diagnosticSummary)
+        assertStreamOutputSanitized(humanText, dbURL: dbURL)
+
+        let json = try runSounding(arguments: [
+            "streams", "status", "--db", dbURL.path, "--json",
+        ])
+        XCTAssertEqual(json.exitCode, 0, json.diagnosticSummary)
+        let payload = try decodeJSON(
+            RuntimeStatusPayload.self, from: json.stdout, context: json.diagnosticSummary)
+        XCTAssertEqual(payload.streams.count, 1, json.diagnosticSummary)
+        XCTAssertEqual(payload.streams.first?.phase, "unknown", json.diagnosticSummary)
+        XCTAssertEqual(payload.streams.first?.hasRuntimeStatus, false, json.diagnosticSummary)
+        XCTAssertNil(payload.streams.first?.updatedAt, json.diagnosticSummary)
+        assertStreamOutputSanitized(String(data: json.stdout, encoding: .utf8) ?? "", dbURL: dbURL)
+    }
+
+    func testRuntimeStatusHumanAndJSONExposeReconnectAndTerminalErrorsRedacted() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "runtime-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        let reconnecting = try addStream(dbURL: dbURL, name: "Alpha")
+        let terminal = try addStream(dbURL: dbURL, name: "Beta")
+        XCTAssertEqual(reconnecting.exitCode, 0, reconnecting.diagnosticSummary)
+        XCTAssertEqual(terminal.exitCode, 0, terminal.diagnosticSummary)
+
+        let database = try SoundingDatabase(fileURL: dbURL)
+        let store = AppStreamRuntimeStatusStore(database: database)
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: 1,
+                phase: .reconnecting,
+                attempt: 2,
+                maxAttempts: 3,
+                nextRetrySeconds: 8,
+                nextRetryAt: "2026-05-01T10:00:08Z",
+                updatedAt: "2026-05-01T10:00:01Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message: "failed https://user:pass@example.test/live.m3u8?token=synthetic-secret#frag at \(dbURL.path) api_key=synthetic-secret",
+                    occurredAt: "2026-05-01T10:00:00Z"
+                )
+            )
+        )
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: 2,
+                phase: .error,
+                attempt: 3,
+                maxAttempts: 3,
+                updatedAt: "2026-05-01T10:01:00Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message: "bounded retry exhausted for /tmp/secret-like-filename-token=synthetic-secret.wav",
+                    occurredAt: "2026-05-01T10:01:00Z"
+                )
+            )
+        )
+
+        let human = try runSounding(arguments: ["streams", "status", "--db", dbURL.path])
+        XCTAssertEqual(human.exitCode, 0, human.diagnosticSummary)
+        XCTAssertEqual(human.stderr.count, 0, human.diagnosticSummary)
+        let humanText = String(data: human.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(humanText.contains("name=Alpha"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("phase=reconnecting"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("attempt=2 max_attempts=3"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("next_retry_seconds=8"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("next_retry_at=2026-05-01T10:00:08Z"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("name=Beta"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("phase=error"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("bounded retry exhausted"), human.diagnosticSummary)
+        assertStreamOutputSanitized(humanText, dbURL: dbURL)
+
+        let json = try runSounding(arguments: [
+            "streams", "status", "--db", dbURL.path, "--json",
+        ])
+        XCTAssertEqual(json.exitCode, 0, json.diagnosticSummary)
+        XCTAssertEqual(json.stderr.count, 0, json.diagnosticSummary)
+        XCTAssertTrue(String(data: json.stdout, encoding: .utf8)?.hasSuffix("\n") == true)
+        let payload = try decodeJSON(
+            RuntimeStatusPayload.self, from: json.stdout, context: json.diagnosticSummary)
+        XCTAssertEqual(payload.streams.map(\.name), ["Alpha", "Beta"], json.diagnosticSummary)
+        let alpha = try XCTUnwrap(payload.streams.first, json.diagnosticSummary)
+        XCTAssertEqual(alpha.phase, "reconnecting", json.diagnosticSummary)
+        XCTAssertEqual(alpha.hasRuntimeStatus, true, json.diagnosticSummary)
+        XCTAssertEqual(alpha.attempt, 2, json.diagnosticSummary)
+        XCTAssertEqual(alpha.maxAttempts, 3, json.diagnosticSummary)
+        XCTAssertEqual(alpha.nextRetrySeconds, 8, json.diagnosticSummary)
+        XCTAssertEqual(alpha.nextRetryAt, "2026-05-01T10:00:08Z", json.diagnosticSummary)
+        XCTAssertEqual(alpha.updatedAt, "2026-05-01T10:00:01Z", json.diagnosticSummary)
+        XCTAssertNotNil(alpha.recentFailure, json.diagnosticSummary)
+        let beta = try XCTUnwrap(payload.streams.last, json.diagnosticSummary)
+        XCTAssertEqual(beta.phase, "error", json.diagnosticSummary)
+        XCTAssertEqual(beta.attempt, 3, json.diagnosticSummary)
+        XCTAssertEqual(beta.maxAttempts, 3, json.diagnosticSummary)
+        XCTAssertTrue(beta.recentFailure?.message.contains("bounded retry exhausted") == true)
+        assertStreamOutputSanitized(String(data: json.stdout, encoding: .utf8) ?? "", dbURL: dbURL)
+    }
+
+    func testRuntimeStatusIncludeRemovedAndMalformedRowsAreActionableAndRedacted() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "malformed-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        XCTAssertEqual(try addStream(dbURL: dbURL, name: "Removed").exitCode, 0)
+        XCTAssertEqual(try runSounding(arguments: ["streams", "remove", "--db", dbURL.path, "1"]).exitCode, 0)
+
+        let hidden = try runSounding(arguments: [
+            "streams", "status", "--db", dbURL.path, "--json",
+        ])
+        XCTAssertEqual(hidden.exitCode, 0, hidden.diagnosticSummary)
+        let hiddenPayload = try decodeJSON(
+            RuntimeStatusPayload.self, from: hidden.stdout, context: hidden.diagnosticSummary)
+        XCTAssertEqual(hiddenPayload.streams.count, 0, hidden.diagnosticSummary)
+
+        try DatabaseQueue(path: dbURL.path).write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO stream_runtime_status (
+                    stream_id, phase, attempt, max_attempts, updated_at, recent_failure_message
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                arguments: [
+                    1,
+                    "raw https://user:pass@example.test/live.m3u8?token=synthetic-secret#frag \(dbURL.path)",
+                    1,
+                    3,
+                    "2026-05-01T10:02:00Z",
+                    "stored failure at \(dbURL.path) token=synthetic-secret"
+                ]
+            )
+        }
+
+        let includeRemoved = try runSounding(arguments: [
+            "streams", "status", "--db", dbURL.path, "--json", "--include-removed",
+        ])
+        XCTAssertEqual(includeRemoved.exitCode, 0, includeRemoved.diagnosticSummary)
+        XCTAssertEqual(includeRemoved.stderr.count, 0, includeRemoved.diagnosticSummary)
+        let payload = try decodeJSON(
+            RuntimeStatusPayload.self, from: includeRemoved.stdout,
+            context: includeRemoved.diagnosticSummary)
+        XCTAssertEqual(payload.streams.count, 1, includeRemoved.diagnosticSummary)
+        let stream = try XCTUnwrap(payload.streams.first, includeRemoved.diagnosticSummary)
+        XCTAssertEqual(stream.streamStatus, "removed", includeRemoved.diagnosticSummary)
+        XCTAssertEqual(stream.phase, "error", includeRemoved.diagnosticSummary)
+        XCTAssertEqual(stream.hasRuntimeStatus, true, includeRemoved.diagnosticSummary)
+        XCTAssertEqual(
+            stream.recentFailure?.message,
+            "Runtime status row contains an unsupported phase value. Clear or refresh the status row.",
+            includeRemoved.diagnosticSummary)
+        assertStreamOutputSanitized(
+            String(data: includeRemoved.stdout, encoding: .utf8) ?? "", dbURL: dbURL)
+    }
+
+    func testRuntimeStatusUnopenableSecretBearingDatabasePathIsRedacted() throws {
+        let missingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "sounding-runtime-status-db-user:pass@example.test?token=synthetic-secret#frag",
+                isDirectory: true)
+        let dbURL = missingDirectory.appendingPathComponent("streams.sqlite")
+        defer { try? FileManager.default.removeItem(at: missingDirectory) }
+
+        let result = try runSounding(arguments: [
+            "streams", "status", "--db", dbURL.path, "--json",
+        ])
+
+        XCTAssertNotEqual(result.exitCode, 0, result.diagnosticSummary)
+        XCTAssertEqual(result.stdoutLineCount, 0, result.diagnosticSummary)
+        let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+        XCTAssertTrue(stderr.contains("Streams database failed"), result.diagnosticSummary)
+        XCTAssertTrue(stderr.contains("redacted database path"), result.diagnosticSummary)
+        assertStreamOutputSanitized(stderr, dbURL: dbURL)
     }
 
     func testPauseResumeRemoveIdempotenceAndIncludeRemovedBehavior() throws {
@@ -241,6 +431,31 @@ final class StreamsCommandSmokeTests: XCTestCase {
 
     private struct StreamsPayload: Decodable {
         var streams: [Stream]
+    }
+
+    private struct RuntimeStatusPayload: Decodable {
+        var streams: [RuntimeStatus]
+    }
+
+    private struct RuntimeStatus: Decodable {
+        var id: Int64
+        var name: String
+        var streamType: String
+        var streamStatus: String
+        var source: String
+        var phase: String
+        var hasRuntimeStatus: Bool
+        var attempt: Int
+        var maxAttempts: Int
+        var nextRetrySeconds: Int?
+        var nextRetryAt: String?
+        var updatedAt: String?
+        var recentFailure: RecentFailure?
+    }
+
+    private struct RecentFailure: Decodable {
+        var message: String
+        var occurredAt: String
     }
 
     private struct Stream: Decodable {

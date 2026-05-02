@@ -10,6 +10,31 @@ enum StreamsOutput {
         var streams: [Stream]
     }
 
+    struct RuntimeStatusPayload: Codable, Equatable {
+        var streams: [RuntimeStatus]
+    }
+
+    struct RuntimeStatus: Codable, Equatable {
+        var id: Int64
+        var name: String
+        var streamType: String
+        var streamStatus: String
+        var source: String
+        var phase: String
+        var hasRuntimeStatus: Bool
+        var attempt: Int
+        var maxAttempts: Int
+        var nextRetrySeconds: Int?
+        var nextRetryAt: String?
+        var updatedAt: String?
+        var recentFailure: RecentFailure?
+    }
+
+    struct RecentFailure: Codable, Equatable {
+        var message: String
+        var occurredAt: String
+    }
+
     struct Stream: Codable, Equatable {
         var id: Int64
         var name: String
@@ -34,6 +59,18 @@ enum StreamsOutput {
         }
     }
 
+    static func encodeRuntimeStatusJSON(_ records: [AppStreamRuntimeStatusInspection]) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        do {
+            let data = try encoder.encode(
+                RuntimeStatusPayload(streams: records.map(sanitizedRuntimeStatus)))
+            return String(decoding: data, as: UTF8.self) + "\n"
+        } catch {
+            throw OutputError.encodingFailed
+        }
+    }
+
     static func formatListHuman(_ records: [StreamRecord]) -> String {
         guard !records.isEmpty else {
             return "No streams found.\n"
@@ -41,6 +78,16 @@ enum StreamsOutput {
 
         return records.map { record in
             "id=\(record.id) name=\(record.name) type=\(record.streamType) status=\(record.status.rawValue) created_at=\(record.createdAt) updated_at=\(record.updatedAt) paused_at=\(optionalTimestamp(record.pausedAt)) resumed_at=\(optionalTimestamp(record.resumedAt)) removed_at=\(optionalTimestamp(record.removedAt)) source=\(redactedSourceDescription(record.sourceDescription))"
+        }.joined(separator: "\n") + "\n"
+    }
+
+    static func formatRuntimeStatusHuman(_ records: [AppStreamRuntimeStatusInspection]) -> String {
+        guard !records.isEmpty else {
+            return "No streams found.\n"
+        }
+
+        return records.map { record in
+            "id=\(record.streamID) name=\(record.name) type=\(record.streamType) stream_status=\(record.streamStatus) source=\(redactedSourceDescription(record.sourceDescription)) phase=\(record.phase) has_runtime_status=\(record.hasRuntimeStatus) attempt=\(record.attempt) max_attempts=\(record.maxAttempts) next_retry_seconds=\(optionalInt(record.nextRetrySeconds)) next_retry_at=\(optionalTimestamp(record.nextRetryAt)) updated_at=\(optionalTimestamp(record.updatedAt)) recent_failure=\(optionalFailure(record.recentFailure))"
         }.joined(separator: "\n") + "\n"
     }
 
@@ -69,8 +116,39 @@ enum StreamsOutput {
         )
     }
 
+    private static func sanitizedRuntimeStatus(_ record: AppStreamRuntimeStatusInspection)
+        -> RuntimeStatus
+    {
+        RuntimeStatus(
+            id: record.streamID,
+            name: record.name,
+            streamType: record.streamType,
+            streamStatus: record.streamStatus,
+            source: redactedSourceDescription(record.sourceDescription),
+            phase: record.phase,
+            hasRuntimeStatus: record.hasRuntimeStatus,
+            attempt: record.attempt,
+            maxAttempts: record.maxAttempts,
+            nextRetrySeconds: record.nextRetrySeconds,
+            nextRetryAt: record.nextRetryAt,
+            updatedAt: record.updatedAt,
+            recentFailure: record.recentFailure.map {
+                RecentFailure(message: redactedSourceDescription($0.message), occurredAt: $0.occurredAt)
+            }
+        )
+    }
+
     private static func optionalTimestamp(_ value: String?) -> String {
         value ?? "none"
+    }
+
+    private static func optionalInt(_ value: Int?) -> String {
+        value.map(String.init) ?? "none"
+    }
+
+    private static func optionalFailure(_ failure: AppStreamRuntimeRecentFailure?) -> String {
+        guard let failure else { return "none" }
+        return "\(redactedSourceDescription(failure.message)) at \(failure.occurredAt)"
     }
 
     private static func redactedSourceDescription(_ source: String) -> String {
