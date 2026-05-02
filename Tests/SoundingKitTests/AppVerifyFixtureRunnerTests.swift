@@ -25,11 +25,28 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         assertCheck(evidence, .runtimeStopObserved, .pass)
         assertCheck(evidence, .runtimeRestartObserved, .pass)
         assertCheck(evidence, .diagnosticsWritten, .pass)
+        let transcriptPersistence = try projectionCheck(evidence, .transcriptPersistence, .pass)
+        XCTAssertGreaterThan(transcriptPersistence.projectionFacts?.rowCount ?? 0, 0)
+        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["segments"], "1")
+        let transcriptTimeline = try projectionCheck(evidence, .transcriptTimelineProjection, .pass)
+        XCTAssertGreaterThan(transcriptTimeline.projectionFacts?.projectionCount ?? 0, 0)
+        let transcriptSearch = try projectionCheck(evidence, .transcriptSearchProjection, .pass)
+        XCTAssertGreaterThan(transcriptSearch.projectionFacts?.projectionCount ?? 0, 0)
+        XCTAssertEqual(
+            transcriptSearch.projectionFacts?.sampleFields["phrase"], "app verify fixture")
+        let songMetadata = try projectionCheck(evidence, .songMetadataProjection, .pass)
+        XCTAssertGreaterThan(songMetadata.projectionFacts?.metadataCount ?? 0, 0)
+        let adMetadata = try projectionCheck(evidence, .adMetadataProjection, .pass)
+        XCTAssertGreaterThan(adMetadata.projectionFacts?.metadataCount ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.processedChunks ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.decodedChunks ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.scheduledBuffers ?? 0, 0)
-        XCTAssertTrue(evidence.runtimeFacts?.recentDiagnosticEvents.contains("playback.prepare.succeeded") == true)
-        XCTAssertTrue(evidence.runtimeFacts?.recentDiagnosticEvents.contains("playback.play.scheduled") == true)
+        XCTAssertTrue(
+            evidence.runtimeFacts?.recentDiagnosticEvents.contains("playback.prepare.succeeded")
+                == true)
+        XCTAssertTrue(
+            evidence.runtimeFacts?.recentDiagnosticEvents.contains("playback.play.scheduled")
+                == true)
         XCTAssertTrue(evidence.artifacts.contains { $0.kind == "runtime-events" })
     }
 
@@ -62,9 +79,12 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
 
         XCTAssertEqual(evidence.summary.status, .fail)
         assertCheck(evidence, .decodeCompleted, .pass)
-        let playback = try XCTUnwrap(evidence.checks.first { $0.name == .avfoundationPlaybackScheduled })
+        let playback = try XCTUnwrap(
+            evidence.checks.first { $0.name == .avfoundationPlaybackScheduled })
         XCTAssertEqual(playback.status, .fail)
-        XCTAssertTrue(playback.reason?.contains("missing required AVFoundation diagnostic events") == true, playback.reason ?? "")
+        XCTAssertTrue(
+            playback.reason?.contains("missing required AVFoundation diagnostic events") == true,
+            playback.reason ?? "")
     }
 
     func testRuntimeTimeoutProducesFailedStopEvidenceAndCleansUpPlayer() async throws {
@@ -102,9 +122,42 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         XCTAssertEqual(evidence.summary.status, .fail)
         let diagnostics = try XCTUnwrap(evidence.checks.first { $0.name == .diagnosticsWritten })
         XCTAssertEqual(diagnostics.status, .fail)
-        XCTAssertTrue(diagnostics.reason?.contains("malformed JSONL") == true, diagnostics.reason ?? "")
+        XCTAssertTrue(
+            diagnostics.reason?.contains("malformed JSONL") == true, diagnostics.reason ?? "")
     }
 
+    func testRuntimeThatReachesProjectionStageWithoutRowsFailsS03RequiredChecks() async throws {
+        let root = temporaryRoot("missing-projections")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let player = DiagnosticsRecordingPlayer()
+        let runner = makeRunner(
+            root: root,
+            player: player,
+            ingesterFactory: { _, _, _, _, _, _, player, timeline, _, diagnosticsLog, _ in
+                NoProjectionIngester(
+                    player: player,
+                    timeline: timeline,
+                    diagnosticsLog: diagnosticsLog
+                )
+            }
+        )
+
+        let evidence = await runner.run()
+
+        XCTAssertEqual(evidence.summary.status, .fail)
+        XCTAssertEqual(
+            evidence.summary.failedRequiredCheckCount,
+            AppVerifyCheckName.s03ProjectionRequired.count)
+        for name in AppVerifyCheckName.s03ProjectionRequired {
+            let check = try projectionCheck(evidence, name, .fail)
+            XCTAssertTrue(check.required, "Expected \(name) to remain required")
+            XCTAssertNotNil(
+                check.projectionFacts, "Expected \(name) to include bounded projection facts")
+            XCTAssertTrue(
+                check.reason?.contains("non-zero sanitized count") == true, check.reason ?? "")
+        }
+    }
 
     func testMissingVolumeAppliedDiagnosticFailsControlProof() async throws {
         let root = temporaryRoot("missing-volume")
@@ -118,7 +171,9 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         XCTAssertEqual(evidence.summary.status, .fail)
         assertCheck(evidence, .playbackMuted, .fail)
         let muted = try XCTUnwrap(evidence.checks.first { $0.name == .playbackMuted })
-        XCTAssertTrue(muted.reason?.contains("timed out") == true || muted.reason?.contains("Control window") == true, muted.reason ?? "")
+        XCTAssertTrue(
+            muted.reason?.contains("timed out") == true
+                || muted.reason?.contains("Control window") == true, muted.reason ?? "")
         XCTAssertGreaterThan(player.stopCount(), 0)
     }
 
@@ -157,7 +212,9 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
                 player.attach(volumeStore: volumeStore, diagnosticsLog: diagnosticsLog)
                 return player
             },
-            ingesterFactory: ingesterFactory ?? { database, decoder, transcriber, diarizer, fingerprinter, fingerprintEnricher, player, timeline, rollingBuffer, diagnosticsLog, now in
+            ingesterFactory: ingesterFactory ?? {
+                database, decoder, transcriber, diarizer, fingerprinter, fingerprintEnricher,
+                player, timeline, rollingBuffer, diagnosticsLog, now in
                 StreamIngestAppRuntimeRunner(
                     database: database,
                     decoder: decoder,
@@ -178,7 +235,8 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
 
     private func temporaryRoot(_ name: String) -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("AppVerifyFixtureRunnerTests-\(name)-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent(
+                "AppVerifyFixtureRunnerTests-\(name)-\(UUID().uuidString)", isDirectory: true)
     }
 
     private func assertCheck(
@@ -189,7 +247,29 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         line: UInt = #line
     ) {
         let check = evidence.checks.first { $0.name == name }
-        XCTAssertEqual(check?.status, status, "Missing or unexpected check \(name)", file: file, line: line)
+        XCTAssertEqual(
+            check?.status, status, "Missing or unexpected check \(name)", file: file, line: line)
+    }
+
+    private func projectionCheck(
+        _ evidence: AppVerifyEvidence,
+        _ name: AppVerifyCheckName,
+        _ status: AppVerifyEvidenceStatus,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> AppVerifyCheckRecord {
+        let check = try XCTUnwrap(
+            evidence.checks.first { $0.name == name },
+            "Missing projection check \(name)",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            check.status, status, "Unexpected projection check status for \(name)", file: file,
+            line: line)
+        XCTAssertNotNil(
+            check.projectionFacts, "Missing projection facts for \(name)", file: file, line: line)
+        return check
     }
 }
 
@@ -197,13 +277,17 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
     private let recordScheduledEvent: Bool
     private let recordVolumeEvent: Bool
     private let writeMalformedDiagnostics: Bool
-    private let queue = DispatchQueue(label: "AppVerifyFixtureRunnerTests.DiagnosticsRecordingPlayer")
+    private let queue = DispatchQueue(
+        label: "AppVerifyFixtureRunnerTests.DiagnosticsRecordingPlayer")
     private var diagnosticsLog: AppRuntimeDiagnosticsLog?
     private var currentStreamID: Int64?
     private var volumeObserverTask: Task<Void, Never>?
     private var stops = 0
 
-    init(recordScheduledEvent: Bool = true, recordVolumeEvent: Bool = true, writeMalformedDiagnostics: Bool = false) {
+    init(
+        recordScheduledEvent: Bool = true, recordVolumeEvent: Bool = true,
+        writeMalformedDiagnostics: Bool = false
+    ) {
         self.recordScheduledEvent = recordScheduledEvent
         self.recordVolumeEvent = recordVolumeEvent
         self.writeMalformedDiagnostics = writeMalformedDiagnostics
@@ -240,7 +324,9 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
         }
     }
 
-    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock) async throws {
+    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock)
+        async throws
+    {
         setCurrentStreamID(streamID)
         currentDiagnosticsLog()?.recordEvent(
             "playback.prepare.succeeded",
@@ -262,8 +348,10 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
             )
         }
         if writeMalformedDiagnostics, let diagnosticsLog {
-            try? "not-json\n".data(using: .utf8)?.write(to: diagnosticsLog.eventLogURL, options: .atomic)
-            diagnosticsLog.recordEvent("runtime.event.published", streamID: frames.first?.streamID, phase: "test")
+            try? "not-json\n".data(using: .utf8)?.write(
+                to: diagnosticsLog.eventLogURL, options: .atomic)
+            diagnosticsLog.recordEvent(
+                "runtime.event.published", streamID: frames.first?.streamID, phase: "test")
         }
         await timeline.recordDecodedFrames(frames)
         await timeline.updatePlayerState(
@@ -329,6 +417,47 @@ private struct FixedLinearPCMDecoder: AudioDecoding {
 
 private struct EmptyDecoder: AudioDecoding {
     func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] { [] }
+}
+
+private struct NoProjectionIngester: AppStreamRuntimeIngesting {
+    var player: any AppPCMPlaybackAdapting
+    var timeline: AppPlayerTimelineClock
+    var diagnosticsLog: AppRuntimeDiagnosticsLog
+
+    func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        try await player.prepare(
+            streamID: request.streamID,
+            sourceDescription: request.sourceDescription,
+            timeline: timeline
+        )
+        let frame = SharedPCMFrame(
+            streamID: request.streamID,
+            sequence: 0,
+            audio: Data([0x00, 0x00, 0x10, 0x00]),
+            startSeconds: 0,
+            endSeconds: 0.25
+        )
+        try await player.play([frame], timeline: timeline)
+        diagnosticsLog.recordEvent(
+            "runner.ingest.completed",
+            streamID: request.streamID,
+            streamName: request.name,
+            source: request.source,
+            sourceDescription: request.sourceDescription,
+            phase: "runner.ingest",
+            fields: [
+                "runID": "0",
+                "processedChunks": "1",
+                "diagnosticCount": "1",
+            ]
+        )
+        return AppStreamRuntimeResult(
+            streamID: request.streamID,
+            processedChunks: 1,
+            diagnosticCount: 1,
+            playerTimeline: await timeline.snapshot()
+        )
+    }
 }
 
 private struct HangingIngester: AppStreamRuntimeIngesting {
