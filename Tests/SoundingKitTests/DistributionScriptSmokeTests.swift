@@ -143,6 +143,46 @@ final class DistributionScriptSmokeTests: XCTestCase {
         ])
     }
 
+    func testShippingRunbookExampleAndReadmeLinksAreSafeForTrackedDocs() throws {
+        let runbookURL = packageRootURL.appendingPathComponent("Docs/shipping.md")
+        let exampleURL = packageRootURL.appendingPathComponent("Docs/shipping-diagnostics.example.json")
+        let readmeURL = packageRootURL.appendingPathComponent("README.md")
+
+        let runbookText = try readUTF8(runbookURL)
+        let readmeText = try readUTF8(readmeURL)
+        let exampleData = try Data(contentsOf: exampleURL)
+        let exampleText = String(data: exampleData, encoding: .utf8) ?? ""
+        let example = try JSONDecoder().decode(ShippingDiagnosticsExample.self, from: exampleData)
+
+        XCTAssertEqual(example.schemaVersion, 1)
+        XCTAssertEqual(Set(example.examples.map(\.name)), Set(["readinessWithoutCredentials", "packageDryRun", "realModeRejectedNotarization"]))
+        XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "signingIdentity" && $0.status == "missingCredential" } })
+        XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "notarySubmit" && $0.status == "notarizationRejected" } })
+        XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "staple" && $0.status == "failed" } })
+        XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "gatekeeper" && $0.status == "failed" } })
+        XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "dmg" && $0.status == "failed" } })
+        XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "redaction" && $0.status == "redactionFailure" } })
+
+        XCTAssertTrue(readmeText.contains("[`Docs/shipping.md`](Docs/shipping.md)"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: runbookURL.path), "README shipping link must match tracked Docs path capitalization.")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exampleURL.path), "README/example references must resolve to tracked Docs path capitalization.")
+        XCTAssertTrue(runbookText.contains("sounding soak proof"))
+        XCTAssertTrue(runbookText.contains("sounding database health"))
+        XCTAssertTrue(runbookText.contains("sounding database checkpoint"))
+        XCTAssertTrue(runbookText.contains("missingCredential"))
+        XCTAssertTrue(runbookText.contains("notarizationRejected"))
+        XCTAssertTrue(runbookText.contains("redactionFailure"))
+
+        let readmeShippingSection = readmeText
+            .components(separatedBy: "## Distribution and shipping")
+            .dropFirst()
+            .joined(separator: "## Distribution and shipping")
+            .components(separatedBy: "## Database health and recovery")
+            .first ?? ""
+
+        assertTrackedDistributionDocsAreSanitized(runbookText + "\n" + readmeShippingSection + "\n" + exampleText)
+    }
+
     private struct CheckReport: Decodable {
         var checks: [Check]
         var overallStatus: String
@@ -152,6 +192,25 @@ final class DistributionScriptSmokeTests: XCTestCase {
     private struct PackageReport: Decodable {
         var checks: [Check]
         var dryRun: Bool
+        var overallStatus: String
+        var schemaVersion: Int
+    }
+
+    private struct ShippingDiagnosticsExample: Decodable {
+        var description: String
+        var examples: [ShippingDiagnosticsCase]
+        var schemaVersion: Int
+    }
+
+    private struct ShippingDiagnosticsCase: Decodable {
+        var command: String
+        var name: String
+        var output: ShippingDiagnosticsOutput
+    }
+
+    private struct ShippingDiagnosticsOutput: Decodable {
+        var checks: [Check]
+        var dryRun: Bool?
         var overallStatus: String
         var schemaVersion: Int
     }
@@ -306,6 +365,70 @@ final class DistributionScriptSmokeTests: XCTestCase {
             .appendingPathComponent("scripts")
             .appendingPathComponent("distribution")
             .appendingPathComponent("package")
+    }
+
+    private func readUTF8(_ url: URL, file: StaticString = #filePath, line: UInt = #line) throws -> String {
+        let data = try Data(contentsOf: url)
+        guard let text = String(data: data, encoding: .utf8) else {
+            XCTFail("Expected UTF-8 text at \(url.lastPathComponent)", file: file, line: line)
+            throw CLIError.invalidJSON
+        }
+        return text
+    }
+
+    private func assertTrackedDistributionDocsAreSanitized(
+        _ text: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let forbiddenLiterals = [
+            "Alice Example",
+            "alice@example.test",
+            "ABCDE12345",
+            "super-secret",
+            "hunter2",
+            "Developer ID Application:",
+            "Developer ID Installer:",
+            "/Users/",
+            "/private/tmp/",
+            "/tmp/",
+            "/var/folders/",
+            "token=",
+            "password=",
+            "app-specific-password=",
+            "notary-profile=",
+            "TeamIdentifier=",
+            "12345678-1234-1234-1234-123456789abc",
+            "?token=",
+            "?submission=",
+            "#frag",
+            "#fragment",
+        ]
+        let lowercased = text.lowercased()
+        for literal in forbiddenLiterals {
+            XCTAssertFalse(
+                lowercased.contains(literal.lowercased()),
+                "Tracked distribution docs/examples contain forbidden literal '\(literal)'.",
+                file: file,
+                line: line
+            )
+        }
+
+        let forbiddenPatterns: [(String, NSRegularExpression.Options)] = [
+            (#"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#, [.caseInsensitive]),
+            (#"\b[A-Z0-9]{10}\b"#, []),
+            (#"Developer ID (Application|Installer):"#, [.caseInsensitive]),
+        ]
+        for (pattern, options) in forbiddenPatterns {
+            let regex = try! NSRegularExpression(pattern: pattern, options: options)
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            XCTAssertNil(
+                regex.firstMatch(in: text, options: [], range: range),
+                "Tracked distribution docs/examples contain forbidden pattern '\(pattern)'.",
+                file: file,
+                line: line
+            )
+        }
     }
 
     private func assertNoForbiddenDistributionSubstrings(

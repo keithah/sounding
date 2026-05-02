@@ -53,6 +53,19 @@ soak-evidence/
 
 # Local-only Developer ID packaging workspaces and generated artifacts/logs.
 shipping.local/
+release.local/
+notary-logs.local/
 *.distribution-package.local/
+*.xcarchive
+*.dmg
+*.pkg
+*.ipa
+*.xcdistributionlogs/
+ExportOptions.local.plist
+ExportedProducts/
+export.local/
+release-logs.local/
 !docs/soak-evidence.example.json
+!Docs/soak-evidence.example.json
+!Docs/shipping-diagnostics.example.json
 !live-streams.example.json

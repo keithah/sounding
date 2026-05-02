@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic safe examples for Sounding distribution diagnostics. Values are placeholders and must not be replaced with generated local output.",
+  "examples": [
+    {
+      "name": "readinessWithoutCredentials",
+      "command": "scripts/distribution/check --json",
+      "output": {
+        "schemaVersion": 1,
+        "overallStatus": "ready",
+        "checks": [
+          {
+            "phase": "environment",
+            "status": "ready",
+            "message": "Required distribution tools are available.",
+            "guidance": "Continue with project and credential readiness checks."
+          },
+          {
+            "phase": "signingIdentity",
+            "status": "skipped",
+            "message": "Developer ID identity check skipped because no selector was supplied.",
+            "guidance": "Install a local Developer ID Application certificate and rerun the check."
+          },
+          {
+            "phase": "notarySubmit",
+            "status": "skipped",
+            "message": "Notary credential check skipped because no credential label was supplied.",
+            "guidance": "Configure operator-local notarization credentials before real notarization."
+          }
+        ]
+      }
+    },
+    {
+      "name": "packageDryRun",
+      "command": "scripts/distribution/package --dry-run --json --output-dir [ignored-output-workspace]",
+      "output": {
+        "schemaVersion": 1,
+        "dryRun": true,
+        "overallStatus": "ready",
+        "checks": [
+          {
+            "phase": "output",
+            "status": "ready",
+            "message": "Distribution workspace is writable and raw logs are isolated locally.",
+            "guidance": "Inspect ignored local logs only when private diagnostics are needed."
+          },
+          {
+            "phase": "archive",
+            "status": "ready",
+            "message": "Unsigned Release app bundle was built and staged.",
+            "guidance": "Use the staged app for dry-run packaging or credential-gated signing."
+          },
+          {
+            "phase": "codesign",
+            "status": "skipped",
+            "message": "Developer ID signing skipped during dry-run packaging.",
+            "guidance": "Install a local Developer ID Application certificate and rerun the check."
+          },
+          {
+            "phase": "dmg",
+            "status": "ready",
+            "message": "DMG was created and verified.",
+            "guidance": "Use the generated DMG for credential-gated notarization when running in real mode."
+          },
+          {
+            "phase": "notarySubmit",
+            "status": "skipped",
+            "message": "Notary submission skipped during dry-run packaging.",
+            "guidance": "Configure operator-local notarization credentials before real notarization."
+          },
+          {
+            "phase": "staple",
+            "status": "skipped",
+            "message": "Stapling skipped during dry-run packaging.",
+            "guidance": "Retry stapling after notarization succeeds and inspect the local stapler log."
+          },
+          {
+            "phase": "gatekeeper",
+            "status": "skipped",
+            "message": "Gatekeeper assessment skipped during dry-run packaging.",
+            "guidance": "Inspect local Gatekeeper assessment output for the generated artifact."
+          }
+        ]
+      }
+    },
+    {
+      "name": "realModeRejectedNotarization",
+      "command": "scripts/distribution/package --real --json --output-dir [ignored-output-workspace] --developer-id-identity [local-identity-selector] --notary-profile [local-profile-label]",
+      "output": {
+        "schemaVersion": 1,
+        "dryRun": false,
+        "overallStatus": "failed",
+        "checks": [
+          {
+            "phase": "environment",
+            "status": "ready",
+            "message": "Required package tools are available.",
+            "guidance": "Continue with the package workflow."
+          },
+          {
+            "phase": "signingIdentity",
+            "status": "missingCredential",
+            "message": "Developer ID Application identity selector did not match a usable local certificate.",
+            "guidance": "Install a local Developer ID Application certificate and rerun the check."
+          },
+          {
+            "phase": "notarySubmit",
+            "status": "notarizationRejected",
+            "message": "Notary submission failed or was rejected.",
+            "guidance": "Inspect the local notary log in the ignored distribution workspace."
+          },
+          {
+            "phase": "notaryWait",
+            "status": "notarizationRejected",
+            "message": "Notary wait reported a rejected package.",
+            "guidance": "Inspect the local notary log in the ignored distribution workspace."
+          },
+          {
+            "phase": "notaryLog",
+            "status": "failed",
+            "message": "Notary diagnostics were preserved in the local ignored workspace.",
+            "guidance": "Inspect the local notary log in the ignored distribution workspace."
+          },
+          {
+            "phase": "staple",
+            "status": "failed",
+            "message": "Stapling failed.",
+            "guidance": "Retry stapling after notarization succeeds and inspect the local stapler log."
+          },
+          {
+            "phase": "gatekeeper",
+            "status": "failed",
+            "message": "Gatekeeper assessment failed.",
+            "guidance": "Inspect local Gatekeeper assessment output for the generated artifact."
+          },
+          {
+            "phase": "dmg",
+            "status": "failed",
+            "message": "DMG verification failed.",
+            "guidance": "Inspect the local DMG creation or verification log in the ignored distribution workspace."
+          },
+          {
+            "phase": "redaction",
+            "status": "redactionFailure",
+            "message": "redactionFailure",
+            "guidance": "Do not emit raw tool output; inspect ignored local logs instead."
+          }
+        ]
+      }
+    }
+  ]
+}

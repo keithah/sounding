@@ -229,6 +229,17 @@ swift run --package-path sounding sounding soak proof \
 
 For operator-local unattended proof with three or more authorized streams, follow [`docs/soak-evidence.md`](docs/soak-evidence.md). The runbook defines the ignored `soak-proof.local/YYYYMMDD-HHMM/` artifact layout, start/during/end capture cadence, sleep/wake capture, DB/WAL/checkpoint interpretation, queue/resource/reconnect/HLS count interpretation, pass/fail criteria, and the redaction checklist. The schema example in [`docs/soak-evidence.example.json`](docs/soak-evidence.example.json) is safe synthetic content only; do not replace it with generated local evidence.
 
+## Distribution and shipping
+
+M005 adds a script-backed Developer ID distribution path plus a cold-reader shipping runbook. Start with the no-credential readiness and dry-run packaging checks, then use operator-local credentials only when producing a real notarized release:
+
+```sh
+scripts/distribution/check --json
+scripts/distribution/package --dry-run --json --output-dir shipping.local/dry-run
+```
+
+The full workflow is documented in [`Docs/shipping.md`](Docs/shipping.md). Its synthetic diagnostics example is [`Docs/shipping-diagnostics.example.json`](Docs/shipping-diagnostics.example.json). The dry-run path proves local packaging, redacted phase/status diagnostics, and generated-artifact hygiene without Apple credentials. A signed, notarized, stapled, Gatekeeper-checked release remains operator-local because it requires a locally installed Developer ID identity and notarytool keychain profile; do not commit Apple accounts, signing identities, notary profile values, raw logs, generated disk images, archives, or local output paths.
+
 ## Database health and recovery
 
 M005 adds a database inspection surface for the same SQLite database used by Sounding.app and the CLI. Use it when the app reports persistence trouble, before and after copying a database for local investigation, after an unclean shutdown, or when WAL growth suggests checkpoint work is not completing.
@@ -295,6 +306,6 @@ The deferred roadmap is product expansion beyond the M001 ad-marker and live-ver
 - M002 adds transcript ingestion, word and speaker persistence, diarization/transcription workflows, and local transcript/search foundations.
 - M003 adds song fingerprinting, AcoustID lookup/cache behavior, stream management, and reports over `ad_events` and future song rows.
 - M004 adds the native macOS app experience: stream sidebar, passthrough listening, rolling rewind, live transcript, timeline, and search UI.
-- M005 hardens unattended operation, logging/status surfaces, crash and database safety, soak verification, code signing, notarization, and user-facing documentation.
+- M005 hardens unattended operation, logging/status surfaces, crash and database safety, soak verification, script-backed Developer ID distribution, notarization diagnostics, and user-facing documentation.
 
-Do not use this README to promise polished installation, packaged distribution, app-store readiness, or release support before M005 completes.
+Do not use this README to promise App Store readiness or public release support. Distribution is now documented and script/runbook-backed for local dry-run proof, but a signed, notarized, stapled release still requires operator-local Apple credentials and must keep generated artifacts and raw logs out of tracked files.
