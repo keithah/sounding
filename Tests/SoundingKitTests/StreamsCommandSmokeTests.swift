@@ -301,12 +301,10 @@ final class StreamsCommandSmokeTests: XCTestCase {
                 sql: """
                 INSERT INTO ingest_diagnostics (
                     stream_id, run_id, chunk_id, phase, severity, reason, source, source_class, stream_type, context_json, created_at
-                ) VALUES (?, ?, ?, 'persist', 'warning', 'hls-media-sequence-gap', NULL, 'hls_segment', 'hls', ?, ?)
+                ) VALUES (?, NULL, NULL, 'persist', 'warning', 'hls-media-sequence-gap', NULL, 'hls_segment', 'hls', ?, ?)
                 """,
                 arguments: [
                     1,
-                    11,
-                    nil,
                     """
                     {"decision":"sequence-gap","mediaSequence":12,"expectedMediaSequence":10,"observedMediaSequence":12,"previousMediaSequence":9,"segmentIdentity":"https://example.test/private/seg12.ts","segmentIdentityHash":"hash-12","currentRunID":11}
                     """,
@@ -317,12 +315,10 @@ final class StreamsCommandSmokeTests: XCTestCase {
                 sql: """
                 INSERT INTO ingest_diagnostics (
                     stream_id, run_id, chunk_id, phase, severity, reason, source, source_class, stream_type, context_json, created_at
-                ) VALUES (?, ?, ?, 'persist', 'info', 'hls-segment-duplicate', NULL, 'hls_segment', 'hls', ?, ?)
+                ) VALUES (?, NULL, NULL, 'persist', 'info', 'hls-segment-duplicate', NULL, 'hls_segment', 'hls', ?, ?)
                 """,
                 arguments: [
                     1,
-                    12,
-                    34,
                     """
                     {"decision":"duplicate-skip","mediaSequence":13,"segmentIdentity":"https://example.test/private/seg13.ts?token=synthetic-secret#frag","segmentIdentityHash":"hash-13","existingRunID":11,"existingChunkID":33,"currentRunID":12}
                     """,
@@ -669,9 +665,10 @@ final class StreamsCommandSmokeTests: XCTestCase {
     }
 
     private func removeDatabaseFiles(_ url: URL) {
-        try? FileManager.default.removeItem(at: url)
-        try? FileManager.default.removeItem(at: url.appendingPathExtension("wal"))
-        try? FileManager.default.removeItem(at: url.appendingPathExtension("shm"))
+        for candidate in [url, url.appendingPathExtension("wal"), url.appendingPathExtension("shm")] {
+            guard FileManager.default.fileExists(atPath: candidate.path) else { continue }
+            try? FileManager.default.removeItem(at: candidate)
+        }
     }
 
     private var packageRootURL: URL {

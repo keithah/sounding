@@ -13,7 +13,7 @@ final class TemporarySoundingDatabase {
 
     deinit {
         try? FileManager.default.removeItem(at: fileURL)
-        try? FileManager.default.removeItem(at: fileURL.appendingPathExtension("wal"))
-        try? FileManager.default.removeItem(at: fileURL.appendingPathExtension("shm"))
+        try? FileManager.default.removeItem(atPath: fileURL.path + "-wal")
+        try? FileManager.default.removeItem(atPath: fileURL.path + "-shm")
     }
 }

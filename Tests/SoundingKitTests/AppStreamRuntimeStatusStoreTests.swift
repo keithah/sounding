@@ -111,6 +111,19 @@ final class AppStreamRuntimeStatusStoreTests: XCTestCase {
             createdAt: "2026-05-01T10:00:00Z"
         )
         let store = AppStreamRuntimeStatusStore(database: temporary.database)
+        let persistence = IngestPersistence(database: temporary.database)
+        let runID = try persistence.createRun(
+            streamID: alpha.id,
+            startedAt: "2026-05-01T10:00:01Z",
+            status: .running
+        )
+        let chunkID = try persistence.createChunk(
+            runID: runID,
+            sequence: 12,
+            segmentURI: "https://example.test/private/seg12.ts",
+            byteCount: 128,
+            startedAt: "2026-05-01T10:00:02Z"
+        )
 
         try temporary.database.write { db in
             try db.execute(
@@ -133,8 +146,8 @@ final class AppStreamRuntimeStatusStoreTests: XCTestCase {
                 """,
                 arguments: [
                     alpha.id,
-                    42,
-                    99,
+                    runID,
+                    chunkID,
                     """
                     {"decision":"duplicate-skip","mediaSequence":12,"segmentIdentity":"https://example.test/private/seg12.ts","segmentIdentityHash":"abc123","existingRunID":7,"existingChunkID":8,"currentRunID":42}
                     """,
