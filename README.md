@@ -169,6 +169,49 @@ swift run --package-path sounding sounding streams status \
 
 Use `--include-removed` when diagnosing a stream that was soft-removed after a failure. Output includes the stream id/name/type/source description, registry status, runtime phase, reconnect attempt/max attempts, next retry delay/time, updated timestamp, and recent redacted failure. Streams with no runtime row are reported as `phase=unknown` rather than causing the whole inspection to fail. Malformed persisted phases are projected as `phase=error` with an actionable redacted failure message so an operator can clear or refresh the status row.
 
+M005/S04 also wires Sounding.app to macOS sleep/wake notifications. The app observes `NSWorkspace.willSleepNotification` and `NSWorkspace.didWakeNotification` only at the SwiftUI/AppKit seam, delegates lifecycle policy to SoundingKit, and refreshes the same `stream_runtime_status` rows used by the app and CLI. During a system sleep/wake cycle, active streams should move through `suspended` and `recovering`, then return to running or publish a redacted failure through the normal reconnect-source path.
+
+Deterministic automated proof does not require putting the Mac to sleep:
+
+```sh
+swift test --filter SoundingKitTests.AppStreamRuntimeTests
+swift test --filter SoundingKitTests.AppStreamRuntimeStatusStoreTests
+swift test --filter SoundingKitTests.StreamAppViewModelTests
+swift test --filter SoundingKitTests.StreamsCommandSmokeTests
+swift test --filter SoundingKitTests.SoundingDatabaseMigrationTests
+swift build --product sounding
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  xcodebuild -project Sounding.xcodeproj -scheme Sounding -configuration Debug build
+```
+
+For a compact one-line slice check, run:
+
+```sh
+swift test --filter SoundingKitTests.AppStreamRuntimeTests && \
+swift test --filter SoundingKitTests.AppStreamRuntimeStatusStoreTests && \
+swift test --filter SoundingKitTests.StreamAppViewModelTests && \
+swift test --filter SoundingKitTests.StreamsCommandSmokeTests && \
+swift test --filter SoundingKitTests.SoundingDatabaseMigrationTests && \
+swift build --product sounding
+```
+
+After deterministic or live app proof, inspect the persisted lifecycle surface with placeholder paths only:
+
+```sh
+swift run sounding streams status --db "[redacted-db-path]"
+swift run sounding streams status --db "[redacted-db-path]" --json
+```
+
+The JSON form should expose only redacted stream descriptions and lifecycle evidence such as `phase`, `lifecycleReason`, `suspendedAt`, `recoveryStartedAt`, `recoveredAt`, and recovery latency fields. It must not include raw stream URLs, signed query strings, URL fragments, credentials, local database paths, screenshots, or evidence artifact paths.
+
+Operator-local live sleep/wake checklist:
+
+1. Use an authorized stream source already stored in the app database; do not paste the raw URL into tracked notes.
+2. Start Sounding.app, start one or more streams, and confirm `sounding streams status --db "[redacted-db-path]" --json` reports a running phase using only a placeholder database path in any notes.
+3. Put the Mac to sleep and wake it normally. Do not automate this in CI and do not commit screenshots, generated databases, app logs, or command transcripts from the local machine.
+4. Re-run `sounding streams status --db "[redacted-db-path]" --json` and confirm each active stream shows suspended/recovering/recovered lifecycle evidence or a redacted recovery failure.
+5. Before copying any live proof into tracked text, scan it for `://`, `?`, `#`, `token`, `password`, `/Users/`, `/tmp/`, `/private/tmp/`, `/var/`, `.sqlite`, `.db`, `.wal`, `.shm`, and local evidence directory names. Replace any match with placeholders such as `[authorized-live-url]`, `[redacted-db-path]`, or `live-proof.local/...`.
+
 Do not paste generated database paths, raw `source_url` values, signed query strings, credentials, URL fragments, evidence paths, or secret-like filenames into tracked diagnostics. The status command should only print redacted stream descriptions and redacted failure text; if private source details appear, treat that as a redaction bug.
 
 ## Database health and recovery

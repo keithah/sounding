@@ -1,3 +1,4 @@
+import AppKit
 import SoundingKit
 import SwiftUI
 
@@ -40,6 +41,18 @@ struct ContentView: View {
         .onChange(of: viewModel.selectedStreamID) { _, _ in
             refreshRuntimeStatuses()
             refreshSelectedTimeline()
+        }
+        .onReceive(
+            NSWorkspace.shared.notificationCenter.publisher(
+                for: NSWorkspace.willSleepNotification)
+        ) { _ in
+            handleSystemSleepNotification()
+        }
+        .onReceive(
+            NSWorkspace.shared.notificationCenter.publisher(
+                for: NSWorkspace.didWakeNotification)
+        ) { _ in
+            handleSystemWakeNotification()
         }
     }
 
@@ -230,6 +243,22 @@ struct ContentView: View {
     private func stopRuntime(for streamID: Int64) {
         guard let runtime else { return }
         Task { await runtime.stop(streamID: streamID) }
+    }
+
+    private func handleSystemSleepNotification() {
+        guard let runtime else { return }
+        Task {
+            await runtime.suspendForSystemSleep(reason: "system-sleep")
+            refreshRuntimeStatuses()
+        }
+    }
+
+    private func handleSystemWakeNotification() {
+        guard let runtime else { return }
+        Task {
+            await runtime.recoverFromSystemWake(reason: "system-wake")
+            refreshRuntimeStatuses()
+        }
     }
 
     private func seekToLive() {
@@ -1452,9 +1481,9 @@ private struct StatusPill: View {
             return .red
         case .running:
             return .green
-        case .connecting, .reconnecting:
+        case .connecting, .recovering, .reconnecting:
             return .orange
-        case .ready, .paused, .stopped:
+        case .ready, .paused, .suspended, .stopped:
             return .secondary
         }
     }
