@@ -85,19 +85,27 @@ final class DistributionScriptSmokeTests: XCTestCase {
         XCTAssertTrue(result.stdoutText.contains("--output-dir <ignored-dir>"), result.sanitizedDiagnosticSummary)
         XCTAssertTrue(result.stdoutText.contains("--developer-id-identity <selector>"), result.sanitizedDiagnosticSummary)
         XCTAssertTrue(result.stdoutText.contains("--notary-profile <profile>"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--app-verify-fixture-evidence <json>"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stdoutText.contains("--app-verify-live-evidence <json>"), result.sanitizedDiagnosticSummary)
         XCTAssertFalse(result.stdoutText.localizedCaseInsensitiveContains(".env"), result.sanitizedDiagnosticSummary)
         assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText)
     }
 
     func testDryRunPackageBuildsStagesAndReportsCredentialGatedStatuses() throws {
         let outputDir = try makeIgnoredOutputDirectory(name: "package-dry-run")
-        let result = try runPackage(["--dry-run", "--json", "--output-dir", outputDir.path], timeoutSeconds: 900)
+        let evidence = try writeAppVerifyEvidencePair(in: outputDir, fixtureStatus: "pass", liveStatus: "pass")
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", evidence.fixture.path,
+            "--app-verify-live-evidence", evidence.live.path,
+        ], timeoutSeconds: 900)
         XCTAssertEqual(result.exitCode, 0, result.sanitizedDiagnosticSummary)
         XCTAssertEqual(result.stderrText, "", result.sanitizedDiagnosticSummary)
         let report = try result.decodeJSON(PackageReport.self)
         XCTAssertEqual(report.schemaVersion, 1, result.sanitizedDiagnosticSummary)
         XCTAssertTrue(report.dryRun, result.sanitizedDiagnosticSummary)
         XCTAssertEqual(report.overallStatus, "ready", result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(report.checks.contains { $0.phase == "appVerify" && $0.status == "ready" }, result.sanitizedDiagnosticSummary)
         XCTAssertTrue(report.checks.contains { $0.phase == "archive" && $0.status == "ready" }, result.sanitizedDiagnosticSummary)
         XCTAssertTrue(report.checks.contains { $0.phase == "codesign" && $0.status == "skipped" }, result.sanitizedDiagnosticSummary)
         XCTAssertTrue(report.checks.contains { $0.phase == "notarySubmit" && $0.status == "skipped" }, result.sanitizedDiagnosticSummary)
@@ -141,6 +149,129 @@ final class DistributionScriptSmokeTests: XCTestCase {
             "LocalProfile",
             "token=",
         ])
+    }
+
+    func testPackageRequiresAppVerifyEvidenceFlagsBeforeWorkspaceUse() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-missing-evidence-flags")
+        let result = try runPackage(["--dry-run", "--json", "--output-dir", outputDir.path])
+        XCTAssertEqual(result.exitCode, 64, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("--app-verify-fixture-evidence"), result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("--app-verify-live-evidence"), result.sanitizedDiagnosticSummary)
+        XCTAssertEqual(result.stdoutText, "", result.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText)
+    }
+
+    func testPackageReportsMissingAppVerifyEvidenceFilesBeforeArchiveOrDMG() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-missing-evidence-files")
+        let missingFixture = outputDir.appendingPathComponent("missing-fixture.json")
+        let missingLive = outputDir.appendingPathComponent("missing-live.json")
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", missingFixture.path,
+            "--app-verify-live-evidence", missingLive.path,
+            "--skip-build",
+        ])
+        try assertPackageAppVerifyGateFailure(
+            result,
+            expectedMessageFragments: ["Fixture App verification evidence is missing.", "Live App verification evidence is missing."],
+            additionalForbidden: [missingFixture.path, missingLive.path]
+        )
+    }
+
+    func testPackageReportsMalformedAppVerifyEvidenceBeforeArchiveOrDMG() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-malformed-evidence")
+        let evidence = try writeAppVerifyEvidencePair(in: outputDir, fixtureStatus: "pass", liveStatus: "pass")
+        try "{\"schemaVersion\": 1,".write(to: evidence.fixture, atomically: true, encoding: .utf8)
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", evidence.fixture.path,
+            "--app-verify-live-evidence", evidence.live.path,
+            "--skip-build",
+        ])
+        try assertPackageAppVerifyGateFailure(
+            result,
+            expectedMessageFragments: ["Fixture App verification evidence is malformed or incomplete."],
+            additionalForbidden: [evidence.fixture.path, evidence.live.path, "schemaVersion"]
+        )
+    }
+
+    func testPackageReportsFixtureMissingS03CheckBeforeArchiveOrDMG() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-fixture-missing-s03")
+        let evidence = try writeAppVerifyEvidencePair(in: outputDir, fixtureStatus: "pass", liveStatus: "pass", omitFixtureCheck: "song_metadata_projection")
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", evidence.fixture.path,
+            "--app-verify-live-evidence", evidence.live.path,
+            "--skip-build",
+        ])
+        try assertPackageAppVerifyGateFailure(
+            result,
+            expectedMessageFragments: ["Fixture App verification evidence is missing required check names."],
+            additionalForbidden: [evidence.fixture.path, evidence.live.path, "song_metadata_projection"]
+        )
+    }
+
+    func testPackageReportsFixtureFailedSummaryBeforeArchiveOrDMG() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-fixture-fail")
+        let evidence = try writeAppVerifyEvidencePair(in: outputDir, fixtureStatus: "fail", liveStatus: "pass")
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", evidence.fixture.path,
+            "--app-verify-live-evidence", evidence.live.path,
+            "--skip-build",
+        ])
+        try assertPackageAppVerifyGateFailure(
+            result,
+            expectedMessageFragments: ["Fixture App verification evidence did not report an acceptable summary status."],
+            additionalForbidden: [evidence.fixture.path, evidence.live.path]
+        )
+    }
+
+    func testPackageReportsLiveFailedRequiredCountBeforeArchiveOrDMG() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-live-failed-required")
+        let evidence = try writeAppVerifyEvidencePair(in: outputDir, fixtureStatus: "pass", liveStatus: "warn", liveFailedRequiredCount: 1)
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", evidence.fixture.path,
+            "--app-verify-live-evidence", evidence.live.path,
+            "--skip-build",
+        ])
+        try assertPackageAppVerifyGateFailure(
+            result,
+            expectedMessageFragments: ["Live App verification evidence reported failed required checks."],
+            additionalForbidden: [evidence.fixture.path, evidence.live.path]
+        )
+    }
+
+    func testPackageAcceptsLiveWarnEvidenceWithNoFailedRequiredChecks() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-live-warn-success")
+        let evidence = try writeAppVerifyEvidencePair(in: outputDir, fixtureStatus: "pass", liveStatus: "warn")
+        try FileManager.default.createDirectory(at: outputDir.appendingPathComponent("package-20990101-000000/Sounding.app", isDirectory: true), withIntermediateDirectories: true)
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", evidence.fixture.path,
+            "--app-verify-live-evidence", evidence.live.path,
+            "--skip-build",
+        ])
+        // The timestamped workspace is not predictable, so skip-build may still fail at archive; the gate itself must pass first.
+        let report = try result.decodeJSON(PackageReport.self)
+        XCTAssertTrue(report.checks.contains { $0.phase == "appVerify" && $0.status == "ready" }, result.sanitizedDiagnosticSummary)
+        XCTAssertFalse(report.checks.contains { $0.phase == "dmg" && $0.status == "ready" }, result.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText, additionalForbidden: [evidence.fixture.path, evidence.live.path])
+    }
+
+    func testPackageRejectsSecretLikeAppVerifyEvidenceArgumentsWithoutEchoing() throws {
+        let outputDir = try makeIgnoredOutputDirectory(name: "package-secret-evidence-args")
+        let secretEvidencePath = "fixture.json?token=super-secret#frag"
+        let result = try runPackage([
+            "--dry-run", "--json", "--output-dir", outputDir.path,
+            "--app-verify-fixture-evidence", secretEvidencePath,
+            "--app-verify-live-evidence", outputDir.appendingPathComponent("live.json").path,
+        ])
+        XCTAssertEqual(result.exitCode, 64, result.sanitizedDiagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("looks sensitive"), result.sanitizedDiagnosticSummary)
+        XCTAssertFalse(result.stderrText.contains(secretEvidencePath), result.sanitizedDiagnosticSummary)
+        assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText, additionalForbidden: ["fixture.json", "super-secret", "token="])
     }
 
     func testShippingRunbookExampleAndReadmeLinksAreSafeForTrackedDocs() throws {
@@ -266,7 +397,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
                 if redactNext {
                     sanitized.append("<redacted>")
                     redactNext = false
-                } else if argument == "--developer-id-identity" || argument == "--notary-profile" || argument == "--output-dir" {
+                } else if argument == "--developer-id-identity" || argument == "--notary-profile" || argument == "--output-dir" || argument == "--app-verify-fixture-evidence" || argument == "--app-verify-live-evidence" {
                     sanitized.append(argument)
                     redactNext = true
                 } else {
@@ -335,6 +466,105 @@ final class DistributionScriptSmokeTests: XCTestCase {
             XCTFail("Distribution script timed out. \(result.sanitizedDiagnosticSummary)", file: file, line: line)
         }
         return result
+    }
+
+    private let fixtureRequiredChecks = [
+        "fixture_source_created",
+        "database_opened",
+        "stream_registered",
+        "runtime_started",
+        "decode_completed",
+        "avfoundation_playback_scheduled",
+        "runtime_stopped",
+        "diagnostics_written",
+        "playback_muted",
+        "playback_unmuted",
+        "playback_volume_changed",
+        "runtime_stop_observed",
+        "runtime_restart_observed",
+        "transcript_persistence",
+        "transcript_timeline_projection",
+        "transcript_search_projection",
+        "song_metadata_projection",
+        "ad_metadata_projection",
+    ]
+
+    private let liveRequiredChecks = [
+        "live_config_validated",
+        "live_stream_registered",
+        "live_runtime_started",
+        "live_decode_opened",
+        "live_playback_scheduled",
+        "live_runtime_stopped",
+        "live_diagnostics_written",
+        "live_transcript_observed",
+        "live_metadata_observed",
+    ]
+
+    private func writeAppVerifyEvidencePair(
+        in outputDir: URL,
+        fixtureStatus: String,
+        liveStatus: String,
+        liveFailedRequiredCount: Int = 0,
+        omitFixtureCheck: String? = nil
+    ) throws -> (fixture: URL, live: URL) {
+        let fixture = outputDir.appendingPathComponent("fixture-evidence.json")
+        let live = outputDir.appendingPathComponent("live-evidence.json")
+        try writeEvidence(
+            at: fixture,
+            status: fixtureStatus,
+            failedRequiredCheckCount: fixtureStatus == "fail" ? 1 : 0,
+            checks: fixtureRequiredChecks.filter { $0 != omitFixtureCheck }
+        )
+        try writeEvidence(
+            at: live,
+            status: liveStatus,
+            failedRequiredCheckCount: liveFailedRequiredCount,
+            checks: liveRequiredChecks
+        )
+        return (fixture, live)
+    }
+
+    private func writeEvidence(at url: URL, status: String, failedRequiredCheckCount: Int, checks: [String]) throws {
+        let payload: [String: Any] = [
+            "checks": checks.map { name in
+                ["name": name, "status": "pass", "required": true, "phase": "output"]
+            },
+            "generatedAt": "2026-05-02T00:00:00Z",
+            "runID": "synthetic",
+            "schemaVersion": 1,
+            "summary": [
+                "failedRequiredCheckCount": failedRequiredCheckCount,
+                "message": "synthetic",
+                "requiredCheckCount": checks.count,
+                "status": status,
+                "warningCheckCount": 0,
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        try data.write(to: url, options: [.atomic])
+    }
+
+    private func assertPackageAppVerifyGateFailure(
+        _ result: ScriptResult,
+        expectedMessageFragments: [String],
+        additionalForbidden: [String] = [],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        XCTAssertEqual(result.exitCode, 1, result.sanitizedDiagnosticSummary, file: file, line: line)
+        XCTAssertEqual(result.stderrText, "", result.sanitizedDiagnosticSummary, file: file, line: line)
+        let report = try result.decodeJSON(PackageReport.self, file: file, line: line)
+        XCTAssertEqual(report.overallStatus, "failed", result.sanitizedDiagnosticSummary, file: file, line: line)
+        XCTAssertTrue(report.checks.contains { $0.phase == "appVerify" && $0.status == "failed" }, result.sanitizedDiagnosticSummary, file: file, line: line)
+        for fragment in expectedMessageFragments {
+            XCTAssertTrue(report.checks.contains { $0.phase == "appVerify" && $0.message.contains(fragment) }, "Missing appVerify fragment: \(fragment). \(result.sanitizedDiagnosticSummary)", file: file, line: line)
+        }
+        XCTAssertFalse(report.checks.contains { $0.phase == "archive" && $0.status == "ready" }, result.sanitizedDiagnosticSummary, file: file, line: line)
+        XCTAssertFalse(report.checks.contains { $0.phase == "dmg" && $0.status == "ready" }, result.sanitizedDiagnosticSummary, file: file, line: line)
+        XCTAssertFalse(result.stdoutText.contains("Traceback"), result.sanitizedDiagnosticSummary, file: file, line: line)
+        XCTAssertFalse(result.stdoutText.contains("JSONDecodeError"), result.sanitizedDiagnosticSummary, file: file, line: line)
+        assertNoForbiddenDistributionSubstrings(result.stdoutText + result.stderrText, additionalForbidden: additionalForbidden, file: file, line: line)
     }
 
     private func makeIgnoredOutputDirectory(name: String) throws -> URL {

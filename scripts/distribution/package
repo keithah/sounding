@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." >/dev/null 2>&1 && pwd)"
 # shellcheck source=scripts/distribution/lib/diagnostics.sh
 source "$SCRIPT_DIR/lib/diagnostics.sh"
+# shellcheck source=scripts/distribution/lib/app_verify_gate.sh
+source "$SCRIPT_DIR/lib/app_verify_gate.sh"
 
 JSON_OUTPUT=0
 DRY_RUN=1
@@ -15,6 +17,8 @@ ARCH="arm64"
 OUTPUT_DIR=""
 IDENTITY_SELECTOR=""
 NOTARY_PROFILE=""
+APP_VERIFY_FIXTURE_EVIDENCE=""
+APP_VERIFY_LIVE_EVIDENCE=""
 SKIP_BUILD=0
 FULL_XCODE_DEVELOPER_DIR="${DEVELOPER_DIR:-}"
 if [[ -z "$FULL_XCODE_DEVELOPER_DIR" || "$FULL_XCODE_DEVELOPER_DIR" != *"Xcode.app/Contents/Developer"* ]]; then
@@ -34,7 +38,7 @@ DMG_STAGE=""
 
 usage() {
     cat <<'USAGE'
-Usage: scripts/distribution/package --output-dir <ignored-dir> [--dry-run|--real] [--json] [--arch arm64] [--developer-id-identity <selector>] [--notary-profile <profile>] [--skip-build]
+Usage: scripts/distribution/package --output-dir <ignored-dir> --app-verify-fixture-evidence <json> --app-verify-live-evidence <json> [--dry-run|--real] [--json] [--arch arm64] [--developer-id-identity <selector>] [--notary-profile <profile>] [--skip-build]
 
 Builds and packages the Sounding macOS app with redacted distribution diagnostics.
 
@@ -46,6 +50,8 @@ Options:
   --arch arm64                        Package the known-good macOS arm64 distribution path.
   --developer-id-identity <selector>  Required with --real. Local Developer ID Application selector for codesign.
   --notary-profile <profile>          Required with --real. Local notarytool keychain profile name.
+  --app-verify-fixture-evidence <json> Required compact fixture app-verify evidence JSON from the ignored local workspace.
+  --app-verify-live-evidence <json>   Required compact live app-verify evidence JSON from the ignored local workspace.
   --skip-build                        Reuse an existing staged build product inside the output workspace; intended for smoke tests only.
   --help                              Show this help text.
 
@@ -127,6 +133,18 @@ while [[ $# -gt 0 ]]; do
             NOTARY_PROFILE="$2"
             shift 2
             ;;
+        --app-verify-fixture-evidence)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution package option: --app-verify-fixture-evidence requires a value.\n' >&2; exit 64; }
+            safe_value_required "$1" "$2"
+            APP_VERIFY_FIXTURE_EVIDENCE="$2"
+            shift 2
+            ;;
+        --app-verify-live-evidence)
+            [[ $# -ge 2 ]] || { printf 'Invalid distribution package option: --app-verify-live-evidence requires a value.\n' >&2; exit 64; }
+            safe_value_required "$1" "$2"
+            APP_VERIFY_LIVE_EVIDENCE="$2"
+            shift 2
+            ;;
         --skip-build)
             SKIP_BUILD=1
             shift
@@ -161,6 +179,10 @@ fi
 if [[ "$REAL_MODE" -eq 0 && ( -n "$IDENTITY_SELECTOR" || -n "$NOTARY_PROFILE" ) && "$DRY_RUN" -eq 1 ]]; then
     # Dry-run accepts selectors only to prove they are never needed or emitted.
     :
+fi
+if [[ -z "$APP_VERIFY_FIXTURE_EVIDENCE" || -z "$APP_VERIFY_LIVE_EVIDENCE" ]]; then
+    printf 'Invalid distribution package option: both --app-verify-fixture-evidence and --app-verify-live-evidence are required.\n' >&2
+    exit 64
 fi
 
 run_bounded_to_log() {
@@ -218,6 +240,74 @@ check_environment() {
         return 1
     fi
     add_step "$DISTRIBUTION_PHASE_ENVIRONMENT" "$DISTRIBUTION_STATUS_READY" "Required package tools are available." "Continue with the package workflow."
+}
+
+app_verify_label_for_kind() {
+    case "${1-}" in
+        "$APP_VERIFY_GATE_KIND_FIXTURE") printf '%s' "Fixture" ;;
+        "$APP_VERIFY_GATE_KIND_LIVE") printf '%s' "Live" ;;
+        *) printf '%s' "App" ;;
+    esac
+}
+
+add_app_verify_result_step() {
+    local kind="$1"
+    local status="$2"
+    local code="$3"
+    local label message
+    label=$(app_verify_label_for_kind "$kind")
+    if [[ "$status" == "$APP_VERIFY_GATE_STATUS_READY" && "$code" == "$APP_VERIFY_GATE_CODE_READY" ]]; then
+        message="$label app verification evidence is ready for packaging."
+        add_step "$DISTRIBUTION_PHASE_APP_VERIFY" "$DISTRIBUTION_STATUS_READY" "$message" "Continue with archive and package workflow."
+        return 0
+    fi
+
+    message="$label $(app_verify_gate_message_for_code "$code")"
+    add_step "$DISTRIBUTION_PHASE_APP_VERIFY" "$DISTRIBUTION_STATUS_FAILED" "$message" "$DISTRIBUTION_GUIDANCE_APP_VERIFY"
+}
+
+validate_one_app_verify_evidence() {
+    local kind="$1"
+    local evidence_path="$2"
+    local output status code
+
+    set +e
+    output=$(app_verify_gate_validate_evidence "$kind" "$evidence_path")
+    local validator_status=$?
+    set -e
+
+    status=${output%%$'\t'*}
+    code=${output#*$'\t'}
+    code=${code%%$'\t'*}
+
+    if [[ -z "$output" || "$status" == "$output" ]]; then
+        status="$APP_VERIFY_GATE_STATUS_FAILED"
+        code="$APP_VERIFY_GATE_CODE_VALIDATOR"
+    fi
+    if [[ "$status" != "$APP_VERIFY_GATE_STATUS_READY" && "$status" != "$APP_VERIFY_GATE_STATUS_FAILED" ]]; then
+        status="$APP_VERIFY_GATE_STATUS_FAILED"
+        code="$APP_VERIFY_GATE_CODE_VALIDATOR"
+    fi
+    if ! app_verify_gate_known_code "$code"; then
+        code="$APP_VERIFY_GATE_CODE_VALIDATOR"
+    fi
+
+    if [[ "$status" == "$APP_VERIFY_GATE_STATUS_READY" && "$code" == "$APP_VERIFY_GATE_CODE_READY" ]]; then
+        return 0
+    fi
+
+    add_app_verify_result_step "$kind" "$status" "$code"
+    return 1
+}
+
+app_verify_gate() {
+    local failed=0
+    validate_one_app_verify_evidence "$APP_VERIFY_GATE_KIND_FIXTURE" "$APP_VERIFY_FIXTURE_EVIDENCE" || failed=1
+    validate_one_app_verify_evidence "$APP_VERIFY_GATE_KIND_LIVE" "$APP_VERIFY_LIVE_EVIDENCE" || failed=1
+    if [[ "$failed" -eq 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_APP_VERIFY" "$DISTRIBUTION_STATUS_READY" "Fixture and live app verification evidence are ready for packaging." "Continue with archive and package workflow."
+    fi
+    return "$failed"
 }
 
 build_app() {
@@ -421,6 +511,9 @@ main() {
     prepare_workspace || failed=1
     if [[ "$failed" -eq 0 ]]; then
         check_environment || failed=1
+    fi
+    if [[ "$failed" -eq 0 ]]; then
+        app_verify_gate || failed=1
     fi
     if [[ "$failed" -eq 0 ]]; then
         build_app || failed=1
