@@ -171,6 +171,40 @@ Use `--include-removed` when diagnosing a stream that was soft-removed after a f
 
 Do not paste generated database paths, raw `source_url` values, signed query strings, credentials, URL fragments, evidence paths, or secret-like filenames into tracked diagnostics. The status command should only print redacted stream descriptions and redacted failure text; if private source details appear, treat that as a redaction bug.
 
+## Database health and recovery
+
+M005 adds a database inspection surface for the same SQLite database used by Sounding.app and the CLI. Use it when the app reports persistence trouble, before and after copying a database for local investigation, after an unclean shutdown, or when WAL growth suggests checkpoint work is not completing.
+
+```sh
+swift run --package-path sounding sounding database health \
+  --db "$SOUNDING_DB_PATH" \
+  --json
+
+swift run --package-path sounding sounding database checkpoint \
+  --db "$SOUNDING_DB_PATH" \
+  --mode passive \
+  --json
+```
+
+`database health` opens the database through SoundingKit and reports operator-safe WAL and SQLite checks: journal mode, WAL auto-checkpoint pages, database/WAL/SHM byte counts, page size/count, `quick_check`, `foreign_key_check`, optional `integrity_check`, classified failure phase, and recovery guidance. The default check depth is `quick`; add `--check-depth integrity` only when investigating suspected corruption or when slower full-file checks are acceptable.
+
+`database checkpoint` runs a constrained WAL checkpoint and then prints post-checkpoint health. The default mode is `passive`, which observes checkpoint progress without blocking active readers or truncating the WAL. Use stronger modes (`full`, `restart`, or `truncate`) only during a maintenance window or when the app is stopped, because those modes can wait on concurrent database users and change WAL file state.
+
+Interpret `status` consistently:
+
+- `healthy` means WAL mode, file metrics, and requested SQLite checks completed without detected issues.
+- `degraded` means the database opened but one or more checks or checkpoint counters need attention, such as busy frames that could not be checkpointed while another process held the database.
+- `unhealthy` means Sounding could not safely complete the requested operation, such as open failure or corruption classification. Treat this as an incident until a known-good copy is restored or the database is rebuilt from trusted source data.
+
+Recovery guidance is phase-specific:
+
+- **Open failures:** confirm the app/CLI is pointed at the intended local database, verify the containing directory and file permissions locally, and retry with JSON output for a stable redacted payload. Do not paste the real path into tracked issues or docs.
+- **Locked or busy checkpoints:** stop Sounding.app and any other process using the database, rerun a passive checkpoint, then escalate to `full` or `restart` only if busy frames remain and a maintenance window is available.
+- **Corruption:** stop writers immediately, preserve a local-only copy for investigation, run `health --check-depth integrity`, and restore from a known-good backup if corruption remains. Do not continue ingesting into a database classified as corrupt.
+- **Degraded checks:** inspect the redacted check name, status, issue count, and guidance before deciding whether to retry, restore, or rebuild derived data.
+
+Database recovery evidence is private by default. Copied databases, backups, WAL/SHM companions, command transcripts, screenshots, and investigation notes with machine-specific paths belong only in ignored local workspaces. Tracked text must redact database paths, WAL/SHM paths, local recovery artifact paths, raw SQLite or GRDB errors, stream URLs, credentials, signed query tokens, and URL fragments. If any `sounding database` output includes those details, treat it as a redaction bug rather than evidence to preserve.
+
 ## Local-only live verification
 
 Live stream verification is available through:

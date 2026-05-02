@@ -29,7 +29,7 @@ final class DatabaseCommandSmokeTests: XCTestCase {
     }
 
     func testHealthHumanAndJSONOutputsAreRedactedAndDeterministic() throws {
-        let dbURL = temporaryDatabaseURL(secretComponent: "health-token=synthetic-secret")
+        let dbURL = temporaryDatabaseURL(secretComponent: "health-user:pass@example.test?token=synthetic-secret#frag")
         defer { removeDatabaseFiles(dbURL) }
 
         let human = try runSounding(arguments: ["database", "health", "--db", dbURL.path])
@@ -65,7 +65,7 @@ final class DatabaseCommandSmokeTests: XCTestCase {
     }
 
     func testCheckpointHumanAndJSONOutputsDecodeAndRemainRedacted() throws {
-        let dbURL = temporaryDatabaseURL(secretComponent: "checkpoint-token=synthetic-secret")
+        let dbURL = temporaryDatabaseURL(secretComponent: "checkpoint-user:pass@example.test?token=synthetic-secret#frag")
         defer { removeDatabaseFiles(dbURL) }
         XCTAssertEqual(try runSounding(arguments: ["database", "health", "--db", dbURL.path]).exitCode, 0)
 
