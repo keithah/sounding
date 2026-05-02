@@ -51,9 +51,15 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
             let start = Double(index) * chunkDurationSeconds
             let duration = Double(segment.duration ?? "") ?? chunkDurationSeconds
             let end = start + max(duration, 0.001)
+            let segmentDescription = resolvedSegmentDescription(segment.uri, relativeTo: request.source)
             chunks.append(DecodedAudioChunk(
                 sequence: index,
-                segmentURI: resolvedSegmentDescription(segment.uri, relativeTo: request.source),
+                segmentURI: segmentDescription,
+                hlsIdentity: HLSDecodedAudioChunkIdentity(
+                    mediaSequence: Int(segment.mediaSequence) ?? 0,
+                    segmentIdentity: segmentDescription,
+                    manifestPosition: index
+                ),
                 audio: data,
                 byteCount: data.count,
                 startSeconds: start,

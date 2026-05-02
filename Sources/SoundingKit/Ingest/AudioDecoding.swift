@@ -20,10 +20,30 @@ public struct AudioDecodeRequest: Equatable, Sendable {
     }
 }
 
+/// HLS-specific segment identity carried across the decode boundary for reconnect/resume and
+/// persistence-level deduplication. Values must be safe to persist: `segmentIdentity` should be a
+/// redacted, stable segment description rather than a raw URI or local path.
+public struct HLSDecodedAudioChunkIdentity: Equatable, Sendable {
+    public var mediaSequence: Int
+    public var segmentIdentity: String
+    public var manifestPosition: Int?
+
+    public init(
+        mediaSequence: Int,
+        segmentIdentity: String,
+        manifestPosition: Int? = nil
+    ) {
+        self.mediaSequence = mediaSequence
+        self.segmentIdentity = segmentIdentity
+        self.manifestPosition = manifestPosition
+    }
+}
+
 /// One decoded audio unit ready for transcription, diarization, and marker persistence.
 public struct DecodedAudioChunk: Equatable, Sendable {
     public var sequence: Int
     public var segmentURI: String?
+    public var hlsIdentity: HLSDecodedAudioChunkIdentity?
     public var audio: Data
     public var byteCount: Int
     public var startSeconds: Double
@@ -35,6 +55,7 @@ public struct DecodedAudioChunk: Equatable, Sendable {
     public init(
         sequence: Int,
         segmentURI: String? = nil,
+        hlsIdentity: HLSDecodedAudioChunkIdentity? = nil,
         audio: Data,
         byteCount: Int? = nil,
         startSeconds: Double,
@@ -45,6 +66,7 @@ public struct DecodedAudioChunk: Equatable, Sendable {
     ) {
         self.sequence = sequence
         self.segmentURI = segmentURI
+        self.hlsIdentity = hlsIdentity
         self.audio = audio
         self.byteCount = byteCount ?? audio.count
         self.startSeconds = startSeconds

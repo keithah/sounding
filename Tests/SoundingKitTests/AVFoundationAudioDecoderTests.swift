@@ -1,39 +1,45 @@
 import Foundation
 import XCTest
+
 @testable import SoundingKit
 
 final class AVFoundationAudioDecoderTests: XCTestCase {
     func testHLSManifestSegmentsProduceBoundedChunksWithManifestMarkers() async throws {
-        let manifestURL = temporaryManifestURL(contents: """
-        #EXTM3U
-        #EXT-X-TARGETDURATION:6
-        #EXT-X-MEDIA-SEQUENCE:7
-        #EXT-OATCLS-SCTE35:/DARAAAAAAAAAP/wAAAAAHpPGuQ=
-        #EXTINF:6.0,
-        segments/segment7.ts
-        #EXTINF:6.0,
-        segments/segment8.ts
-        #EXT-X-ENDLIST
-        """)
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:7
+                #EXT-OATCLS-SCTE35:/DARAAAAAAAAAP/wAAAAAHpPGuQ=
+                #EXTINF:6.0,
+                segments/segment7.ts
+                #EXTINF:6.0,
+                segments/segment8.ts
+                #EXT-X-ENDLIST
+                """)
         defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
 
         let decoder = AVFoundationAudioDecoder(
             chunkDurationSeconds: 6,
             segmentLoader: FixtureSegmentLoader(payloads: [
                 "segments/segment7.ts": Data([0x01, 0x02, 0x03]),
-                "segments/segment8.ts": Data([0x04, 0x05, 0x06])
+                "segments/segment8.ts": Data([0x04, 0x05, 0x06]),
             ]),
             now: { "2026-04-30T12:00:00Z" }
         )
 
-        let chunks = try await decoder.decodedChunks(for: AudioDecodeRequest(
-            source: manifestURL.path,
-            streamType: .hls,
-            maxChunks: 1
-        ))
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls,
+                maxChunks: 1
+            ))
 
         XCTAssertEqual(chunks.count, 1)
         XCTAssertEqual(chunks[0].sequence, 0)
+        XCTAssertEqual(chunks[0].hlsIdentity?.mediaSequence, 7)
+        XCTAssertEqual(chunks[0].hlsIdentity?.manifestPosition, 0)
+        XCTAssertEqual(chunks[0].hlsIdentity?.segmentIdentity, "[redacted-path]")
         XCTAssertEqual(chunks[0].audio, Data([0x01, 0x02, 0x03]))
         XCTAssertEqual(chunks[0].startSeconds, 0)
         XCTAssertEqual(chunks[0].endSeconds, 6)
@@ -42,15 +48,88 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         XCTAssertEqual(chunks[0].adMarkers[0].segment, "7")
     }
 
+    func testHLSIdentityUsesMediaSequenceForContiguousSegments() async throws {
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:7
+                #EXTINF:6.0,
+                segments/segment7.ts
+                #EXTINF:6.0,
+                segments/segment8.ts
+                #EXT-X-ENDLIST
+                """)
+        defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
+
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: FixtureSegmentLoader(payloads: [
+                "segments/segment7.ts": Data([0x01]),
+                "segments/segment8.ts": Data([0x02]),
+            ]),
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls
+            ))
+
+        XCTAssertEqual(chunks.map(\.sequence), [0, 1])
+        XCTAssertEqual(chunks.compactMap { $0.hlsIdentity?.mediaSequence }, [7, 8])
+        XCTAssertEqual(chunks.compactMap { $0.hlsIdentity?.manifestPosition }, [0, 1])
+    }
+
+    func testHLSSegmentLoaderFailureKeepsRawSegmentURIOutOfError() async throws {
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-MEDIA-SEQUENCE:7
+                #EXTINF:6.0,
+                https://user:pass@example.test/segment7.ts?token=secret#frag
+                #EXT-X-ENDLIST
+                """)
+        defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
+
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: FailingSegmentLoader(),
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        do {
+            _ = try await decoder.decodedChunks(
+                for: AudioDecodeRequest(
+                    source: manifestURL.path,
+                    streamType: .hls,
+                    maxChunks: 1
+                ))
+            XCTFail("Expected segment loader failure")
+        } catch let error as AVFoundationAudioDecoderError {
+            XCTAssertEqual(error.ingestDiagnosticPhase, .decode)
+            XCTAssertEqual(error.ingestDiagnosticReason, "decode-failed")
+            XCTAssertTrue(
+                error.description.contains("https://example.test/segment7.ts"), error.description)
+            XCTAssertFalse(error.description.contains("user:pass"), error.description)
+            XCTAssertFalse(error.description.contains("token=secret"), error.description)
+            XCTAssertFalse(error.description.contains("#frag"), error.description)
+        } catch {
+            XCTFail("Expected AVFoundationAudioDecoderError, got \(error)")
+        }
+    }
+
     func testMissingSourceThrowsSourceOpenDiagnosticErrorWithRedactedDescription() async throws {
         let decoder = AVFoundationAudioDecoder()
 
         do {
-            _ = try await decoder.decodedChunks(for: AudioDecodeRequest(
-                source: "/tmp/missing-token=secret.wav",
-                streamType: .icecast,
-                maxChunks: 1
-            ))
+            _ = try await decoder.decodedChunks(
+                for: AudioDecodeRequest(
+                    source: "/tmp/missing-token=secret.wav",
+                    streamType: .icecast,
+                    maxChunks: 1
+                ))
             XCTFail("Expected missing source failure")
         } catch let error as AVFoundationAudioDecoderError {
             XCTAssertEqual(error.ingestDiagnosticPhase, .sourceOpen)
@@ -62,14 +141,15 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
     }
 
     func testDurationBoundCanEndBeforeAnyHLSChunk() async throws {
-        let manifestURL = temporaryManifestURL(contents: """
-        #EXTM3U
-        #EXT-X-TARGETDURATION:6
-        #EXT-X-MEDIA-SEQUENCE:1
-        #EXTINF:6.0,
-        segment1.ts
-        #EXT-X-ENDLIST
-        """)
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:1
+                #EXTINF:6.0,
+                segment1.ts
+                #EXT-X-ENDLIST
+                """)
         defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
 
         let decoder = AVFoundationAudioDecoder(
@@ -78,23 +158,31 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
             now: { "2026-04-30T12:00:00Z" }
         )
 
-        let chunks = try await decoder.decodedChunks(for: AudioDecodeRequest(
-            source: manifestURL.path,
-            streamType: .hls,
-            durationSeconds: 0
-        ))
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls,
+                durationSeconds: 0
+            ))
 
         XCTAssertEqual(chunks, [])
     }
 
     private func temporaryManifestURL(contents: String) -> URL {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("sounding-hls-\(UUID().uuidString)", isDirectory: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "sounding-hls-\(UUID().uuidString)", isDirectory: true)
         try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let segments = directory.appendingPathComponent("segments", isDirectory: true)
         try! FileManager.default.createDirectory(at: segments, withIntermediateDirectories: true)
         let manifest = directory.appendingPathComponent("manifest.m3u8")
         try! contents.data(using: .utf8)!.write(to: manifest)
         return manifest
+    }
+}
+
+private struct FailingSegmentLoader: HLSSegmentLoading {
+    func loadSegment(uri: String, relativeTo manifestSource: String) async throws -> Data {
+        throw AVFoundationAudioDecoderError.sourceOpenFailed("failed loading \(uri)")
     }
 }
 

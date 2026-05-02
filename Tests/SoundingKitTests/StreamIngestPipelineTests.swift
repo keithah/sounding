@@ -278,6 +278,60 @@ final class StreamIngestPipelineTests: XCTestCase {
         )
     }
 
+    func testHLSIdentityIsPersistedInRedactedChunkContext() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let chunk = DecodedAudioChunk(
+            sequence: 0,
+            segmentURI: "https://user:pass@example.test/live/segment7.ts?token=secret#frag",
+            hlsIdentity: HLSDecodedAudioChunkIdentity(
+                mediaSequence: 7,
+                segmentIdentity:
+                    "https://user:pass@example.test/live/segment7.ts?token=secret#frag",
+                manifestPosition: 0
+            ),
+            audio: Data([0x01, 0x02, 0x03]),
+            startSeconds: 0,
+            endSeconds: 6,
+            startedAt: "2026-04-30T12:00:00Z",
+            endedAt: "2026-04-30T12:00:06Z"
+        )
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [chunk]),
+            transcriber: FakeTranscriber(),
+            diarizer: FakeDiarizer()
+        )
+
+        _ = try await pipeline.run(
+            source:
+                "https://viewer:letmein@example.test/live.m3u8?token=synthetic-secret#private-fragment",
+            streamType: .hls,
+            maxChunks: 1
+        )
+
+        let context =
+            try temporary.database.read { db in
+                try String.fetchOne(
+                    db,
+                    sql: "SELECT context_json FROM ingest_chunks WHERE sequence = 0"
+                )
+            } ?? ""
+
+        XCTAssertTrue(context.contains("\"hls\""), context)
+        XCTAssertTrue(context.contains("\"mediaSequence\":7"), context)
+        XCTAssertTrue(
+            context.contains(
+                "\"segmentIdentity\":\"https:\\/\\/example.test\\/live\\/segment7.ts\""), context)
+        XCTAssertTrue(context.contains("\"manifestPosition\":0"), context)
+        Self.assertNoForbiddenLiterals(
+            in: context,
+            forbidden: [
+                "user:pass", "viewer", "letmein", "secret", "synthetic-secret",
+                "token=secret", "private-fragment", "#frag",
+            ]
+        )
+    }
+
     func testEmptyChunksAreDiagnosedWithoutTranscriptRows() async throws {
         let temporary = try TemporarySoundingDatabase()
         let pipeline = StreamIngestPipeline(

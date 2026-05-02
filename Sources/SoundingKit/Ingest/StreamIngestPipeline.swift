@@ -568,10 +568,21 @@ public struct StreamIngestPipeline {
     }
 
     private func chunkContext(_ chunk: DecodedAudioChunk) -> [String: JSONValue] {
-        [
+        var context: [String: JSONValue] = [
             "startSeconds": .number(chunk.startSeconds),
             "endSeconds": .number(chunk.endSeconds),
         ]
+        if let hlsIdentity = chunk.hlsIdentity {
+            var hls: [String: JSONValue] = [
+                "mediaSequence": .number(Double(hlsIdentity.mediaSequence)),
+                "segmentIdentity": .string(hlsIdentity.segmentIdentity),
+            ]
+            if let manifestPosition = hlsIdentity.manifestPosition {
+                hls["manifestPosition"] = .number(Double(manifestPosition))
+            }
+            context["hls"] = .object(hls)
+        }
+        return IngestRedaction.context(context) ?? context
     }
 
     private func runContext(durationSeconds: Double?, maxChunks: Int?) -> [String: JSONValue] {
