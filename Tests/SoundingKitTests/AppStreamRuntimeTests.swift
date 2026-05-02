@@ -343,6 +343,116 @@ final class AppStreamRuntimeTests: XCTestCase {
         XCTAssertEqual(stopped.phase, .stopped)
     }
 
+    func testSystemSleepSuspendsActiveStreamsAndWakeRecoversWithDeterministicLatency() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let first = try registry.add(name: "Sleep HLS", streamType: "hls", source: "https://user:pass@example.test/sleep.m3u8?token=secret#frag")
+        let second = try registry.add(name: "Sleep ICY", streamType: "icy", source: "http://user:pass@example.test/live?api_key=secret")
+        let statusStore = AppStreamRuntimeStatusStore(database: temporary.database)
+        let gate = RuntimeGate()
+        let ingester = LifecycleRecordingIngester(gate: gate)
+        var dates = [Date(timeIntervalSince1970: 1_767_225_600), Date(timeIntervalSince1970: 1_767_225_605)]
+        let runtime = AppStreamRuntimeService(registry: registry, ingester: ingester, retryPolicy: .noRetry, statusStore: statusStore, now: { dates.isEmpty ? Date(timeIntervalSince1970: 1_767_225_605) : dates.removeFirst() })
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: first.id)
+        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .connecting)
+        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .running)
+        try await runtime.start(streamID: second.id)
+        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .connecting)
+        XCTAssertEqual(try await nextEvent(from: &iterator).phase, .running)
+
+        await runtime.suspendForSystemSleep(reason: "sleep for https://user:pass@example.test/private?token=secret at /Users/example/private")
+        let firstSuspended = try await nextEvent(from: &iterator)
+        let secondSuspended = try await nextEvent(from: &iterator)
+        XCTAssertEqual(firstSuspended.phase, .suspended)
+        XCTAssertEqual(secondSuspended.phase, .suspended)
+        XCTAssertFalse(firstSuspended.message.contains("user:pass"), firstSuspended.message)
+        XCTAssertFalse(firstSuspended.message.contains("token=secret"), firstSuspended.message)
+        XCTAssertFalse(firstSuspended.message.contains("/Users/example"), firstSuspended.message)
+        XCTAssertNil(firstSuspended.lifecycleEvidence?.recoveryLatencySeconds)
+        XCTAssertEqual(try statusStore.status(streamID: first.id)?.phase, .suspended)
+
+        await gate.release()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual((await runtime.snapshot(streamID: first.id))?.phase, .suspended)
+        XCTAssertEqual((await runtime.snapshot(streamID: second.id))?.phase, .suspended)
+
+        await runtime.recoverFromSystemWake(reason: "wake token=secret from /Users/example/private")
+        let firstRecovering = try await nextEvent(matching: { $0.streamID == first.id && $0.phase == .recovering }, from: &iterator)
+        XCTAssertEqual(firstRecovering.lifecycleEvidence?.recoveryLatencySeconds, 5)
+        XCTAssertFalse(firstRecovering.message.contains("token=secret"), firstRecovering.message)
+        XCTAssertFalse(firstRecovering.lifecycleEvidence?.reason.contains("token=secret") ?? true)
+        _ = try await nextEvent(matching: { $0.streamID == first.id && $0.phase == .connecting }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.streamID == second.id && $0.phase == .recovering }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.streamID == second.id && $0.phase == .connecting }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.streamID == first.id && $0.phase == .running }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.streamID == second.id && $0.phase == .running }, from: &iterator)
+        XCTAssertEqual(try statusStore.status(streamID: first.id)?.phase, .running)
+        XCTAssertEqual(try statusStore.status(streamID: second.id)?.phase, .running)
+        XCTAssertEqual(await ingester.requestStreamIDs(), [first.id, second.id, first.id, second.id])
+    }
+
+    func testWakeRecoveryFailureIsRedactedAndDoesNotBlockSibling() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let removed = try registry.add(name: "Removed HLS", streamType: "hls", source: "https://user:pass@example.test/removed.m3u8?token=secret")
+        let sibling = try registry.add(name: "Sibling ICY", streamType: "icy", source: "http://user:pass@example.test/live?token=sibling")
+        let gate = RuntimeGate()
+        let runtime = AppStreamRuntimeService(registry: registry, ingester: LifecycleRecordingIngester(gate: gate), retryPolicy: .noRetry, now: { Date(timeIntervalSince1970: 1_767_225_600) })
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: removed.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+        try await runtime.start(streamID: sibling.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+        await runtime.suspendForSystemSleep(reason: "sleep token=secret")
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+        _ = try registry.remove(id: removed.id)
+
+        await runtime.recoverFromSystemWake(reason: "wake token=secret")
+        let failure = try await nextEvent(matching: { $0.streamID == removed.id && $0.phase.statusPhase == .error }, from: &iterator)
+        XCTAssertFalse(failure.message.contains("token=secret"), failure.message)
+        _ = try await nextEvent(matching: { $0.streamID == sibling.id && $0.phase == .running }, from: &iterator)
+        XCTAssertEqual((await runtime.snapshot(streamID: sibling.id))?.phase, .running)
+
+        await gate.release()
+    }
+
+    func testSuspendWithNoActiveStreamsAndRepeatedWakeAreNoOps() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(name: "Noop HLS", streamType: "hls", source: "https://example.test/noop.m3u8")
+        let gate = RuntimeGate()
+        let ingester = LifecycleRecordingIngester(gate: gate)
+        let runtime = AppStreamRuntimeService(registry: registry, ingester: ingester, retryPolicy: .noRetry)
+
+        await runtime.suspendForSystemSleep(reason: "sleep with no active streams")
+        await runtime.recoverFromSystemWake(reason: "wake with no capture")
+        XCTAssertNil(await runtime.snapshot())
+
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(from: &iterator)
+        _ = try await nextEvent(from: &iterator)
+        await runtime.suspendForSystemSleep(reason: "sleep")
+        _ = try await nextEvent(from: &iterator)
+        await runtime.recoverFromSystemWake(reason: "wake")
+        _ = try await nextEvent(matching: { $0.phase == .running }, from: &iterator)
+        let afterFirstWake = await ingester.requestStreamIDs().count
+        await runtime.recoverFromSystemWake(reason: "repeated wake")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(await ingester.requestStreamIDs().count, afterFirstWake)
+
+        await gate.release()
+    }
+
     func testSeekToBufferedSecondPublishesPlayerTimelineEvent() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -975,6 +1085,19 @@ final class AppStreamRuntimeTests: XCTestCase {
             throw RuntimeTestError.missingEvent
         }
         return event
+    }
+
+    private func nextEvent(
+        matching predicate: (AppStreamRuntimeEvent) -> Bool,
+        from iterator: inout AsyncStream<AppStreamRuntimeEvent>.Iterator,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> AppStreamRuntimeEvent {
+        for _ in 0..<10 {
+            let event = try await nextEvent(from: &iterator, file: file, line: line)
+            if predicate(event) { return event }
+        }
+        throw RuntimeTestError.missingEvent
     }
 }
 

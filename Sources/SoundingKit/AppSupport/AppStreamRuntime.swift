@@ -156,9 +156,30 @@ public enum AppStreamRuntimeStatusPhase: String, CaseIterable, Codable, Equatabl
     case connecting
     case running
     case paused
+    case suspended
+    case recovering
     case reconnecting
     case stopped
     case error
+}
+
+public struct AppStreamRuntimeLifecycleEvidence: Equatable, Sendable {
+    public var reason: String
+    public var suspendedAt: String?
+    public var recoveryStartedAt: String?
+    public var recoveryLatencySeconds: Double?
+
+    public init(
+        reason: String,
+        suspendedAt: String? = nil,
+        recoveryStartedAt: String? = nil,
+        recoveryLatencySeconds: Double? = nil
+    ) {
+        self.reason = IngestRedaction.redact(reason)
+        self.suspendedAt = suspendedAt.map(IngestRedaction.redact)
+        self.recoveryStartedAt = recoveryStartedAt.map(IngestRedaction.redact)
+        self.recoveryLatencySeconds = recoveryLatencySeconds.map { max(0, $0) }
+    }
 }
 
 public struct AppStreamRuntimeRecentFailure: Equatable, Sendable {
@@ -246,6 +267,8 @@ public enum AppStreamRuntimePhase: Equatable, Sendable {
     case connecting
     case running
     case paused
+    case suspended
+    case recovering
     case reconnecting(nextRetrySeconds: Int?)
     case stopped
     case error(message: String)
@@ -258,6 +281,10 @@ public enum AppStreamRuntimePhase: Equatable, Sendable {
             return .running
         case .paused:
             return .paused
+        case .suspended:
+            return .suspended
+        case .recovering:
+            return .recovering
         case .reconnecting:
             return .reconnecting
         case .stopped:
@@ -275,6 +302,10 @@ public enum AppStreamRuntimePhase: Equatable, Sendable {
             return .running
         case .paused:
             return .paused
+        case .suspended:
+            return .suspended
+        case .recovering:
+            return .recovering
         case .reconnecting(let nextRetrySeconds):
             return .reconnecting(nextRetrySeconds: nextRetrySeconds)
         case .stopped:
@@ -290,17 +321,20 @@ public struct AppStreamRuntimeEvent: Equatable, Sendable {
     public var phase: AppStreamRuntimePhase
     public var message: String
     public var result: AppStreamRuntimeResult?
+    public var lifecycleEvidence: AppStreamRuntimeLifecycleEvidence?
 
     public init(
         streamID: Int64,
         phase: AppStreamRuntimePhase,
         message: String,
-        result: AppStreamRuntimeResult? = nil
+        result: AppStreamRuntimeResult? = nil,
+        lifecycleEvidence: AppStreamRuntimeLifecycleEvidence? = nil
     ) {
         self.streamID = streamID
         self.phase = phase
         self.message = IngestRedaction.redact(message)
         self.result = result
+        self.lifecycleEvidence = lifecycleEvidence
     }
 }
 
@@ -346,6 +380,8 @@ public protocol AppStreamRuntimeControlling: Sendable {
     func stop() async
     func stop(streamID: Int64) async
     func stopAll() async
+    func suspendForSystemSleep(reason: String) async
+    func recoverFromSystemWake(reason: String) async
     func seek(to seconds: Double) async
     func seekToLive() async
     func scrubBackward(seconds: Double) async
@@ -371,6 +407,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     private let timestampFormatter: ISO8601DateFormatter
 
     private var streamRuns: [Int64: StreamRunState] = [:]
+    private var suspendedStreams: [Int64: Date] = [:]
     private var currentStreamID: Int64?
     private var latestEvents: [Int64: AppStreamRuntimeEvent] = [:]
     private var latestEvent: AppStreamRuntimeEvent?
@@ -414,8 +451,12 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     }
 
     public func start(streamID: Int64) async throws {
+        suspendedStreams[streamID] = nil
         await stop(streamID: streamID)
+        try beginRun(streamID: streamID, connectionMessagePrefix: "Connecting")
+    }
 
+    private func beginRun(streamID: Int64, connectionMessagePrefix: String) throws {
         guard let reconnect = try registry.reconnectSource(id: streamID) else {
             let error = AppStreamRuntimeError.streamNotFound(streamID)
             publish(
@@ -459,7 +500,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             AppStreamRuntimeEvent(
                 streamID: streamID,
                 phase: .connecting,
-                message: "Connecting \(reconnect.name) via \(reconnect.sourceDescription)."
+                message: "\(connectionMessagePrefix) \(reconnect.name) via \(reconnect.sourceDescription)."
             ),
             attempt: 0
         )
@@ -628,6 +669,74 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         let streamIDs = Array(streamRuns.keys)
         for streamID in streamIDs {
             await stop(streamID: streamID)
+        }
+    }
+
+    public func suspendForSystemSleep(reason: String) async {
+        let suspendedAt = now()
+        let streamIDs = streamRuns.keys.sorted()
+        guard !streamIDs.isEmpty else { return }
+        let states = streamIDs.compactMap { streamID -> (Int64, StreamRunState)? in
+            guard let state = streamRuns.removeValue(forKey: streamID) else { return nil }
+            return (streamID, state)
+        }
+        currentStreamID = streamRuns.keys.sorted().first
+        for (streamID, state) in states {
+            suspendedStreams[streamID] = suspendedAt
+            state.task?.cancel()
+            let evidence = AppStreamRuntimeLifecycleEvidence(
+                reason: reason,
+                suspendedAt: timestamp(for: suspendedAt)
+            )
+            publish(
+                AppStreamRuntimeEvent(
+                    streamID: streamID,
+                    phase: .suspended,
+                    message: "Suspended stream \(streamID) for system sleep: \(reason).",
+                    lifecycleEvidence: evidence
+                ),
+                attempt: latestAttempt(streamID: streamID)
+            )
+        }
+    }
+
+    public func recoverFromSystemWake(reason: String) async {
+        let recoveryStartedAt = now()
+        let captured = suspendedStreams.sorted { $0.key < $1.key }
+        guard !captured.isEmpty else { return }
+        suspendedStreams.removeAll()
+        for (streamID, suspendedAt) in captured {
+            let latency = recoveryStartedAt.timeIntervalSince(suspendedAt)
+            let evidence = AppStreamRuntimeLifecycleEvidence(
+                reason: reason,
+                suspendedAt: timestamp(for: suspendedAt),
+                recoveryStartedAt: timestamp(for: recoveryStartedAt),
+                recoveryLatencySeconds: latency
+            )
+            publish(
+                AppStreamRuntimeEvent(
+                    streamID: streamID,
+                    phase: .recovering,
+                    message: "Recovering stream \(streamID) after system wake: \(reason).",
+                    lifecycleEvidence: evidence
+                ),
+                attempt: latestAttempt(streamID: streamID)
+            )
+            do {
+                try beginRun(streamID: streamID, connectionMessagePrefix: "Recovering")
+            } catch {
+                let redacted = IngestRedaction.redact(String(describing: error))
+                publish(
+                    AppStreamRuntimeEvent(
+                        streamID: streamID,
+                        phase: .error(message: redacted),
+                        message: "Recovery failed for stream \(streamID): \(redacted).",
+                        lifecycleEvidence: evidence
+                    ),
+                    attempt: latestAttempt(streamID: streamID),
+                    failureMessage: redacted
+                )
+            }
         }
     }
 

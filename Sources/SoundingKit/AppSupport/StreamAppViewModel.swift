@@ -110,6 +110,8 @@ public enum StreamAppStatus: Equatable, Sendable {
     case connecting
     case running
     case paused
+    case suspended
+    case recovering
     case reconnecting(nextRetrySeconds: Int?)
     case stopped
     case removed
@@ -136,6 +138,10 @@ public enum StreamAppStatus: Equatable, Sendable {
             return "Running"
         case .paused:
             return "Paused"
+        case .suspended:
+            return "Suspended"
+        case .recovering:
+            return "Recovering"
         case .reconnecting:
             return "Reconnecting"
         case .stopped:
@@ -157,6 +163,10 @@ public enum StreamAppStatus: Equatable, Sendable {
             return "Live ingest and playback are active."
         case .paused:
             return "The stream is paused."
+        case .suspended:
+            return "The stream is suspended for system sleep."
+        case .recovering:
+            return "The stream is recovering after system wake."
         case .reconnecting(let seconds):
             if let seconds {
                 return "Retrying in \(seconds) seconds."
@@ -180,7 +190,7 @@ public enum StreamAppStatus: Equatable, Sendable {
         switch self {
         case .ready, .stopped:
             return true
-        case .connecting, .running, .paused, .reconnecting, .removed, .error:
+        case .connecting, .running, .paused, .suspended, .recovering, .reconnecting, .removed, .error:
             return false
         }
     }
@@ -506,6 +516,10 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             return .running
         case .paused:
             return .paused
+        case .suspended:
+            return .suspended
+        case .recovering:
+            return .recovering
         case .reconnecting:
             return .reconnecting(nextRetrySeconds: runtimeStatus.nextRetrySeconds)
         case .stopped:
@@ -527,6 +541,10 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             return "Live ingest and playback are active."
         case .paused:
             return "The stream is paused."
+        case .suspended:
+            return "The stream is suspended for system sleep."
+        case .recovering:
+            return "The stream is recovering after system wake."
         case .reconnecting:
             var detail = "Retrying"
             if runtimeStatus.maxAttempts > 0 {
@@ -587,7 +605,7 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
                 message: eventMessage ?? status.detail,
                 actionLabel: "Wait for reconnect or stop the stream"
             )
-        case .ready, .connecting, .running, .paused, .stopped, .removed:
+        case .ready, .connecting, .running, .paused, .suspended, .recovering, .stopped, .removed:
             return nil
         }
     }
