@@ -213,6 +213,118 @@ final class SoakProofRunnerTests: XCTestCase {
         }
     }
 
+    func testShortSoakRunnerRecordsRuntimeQueueDatabaseLifecycleAndRedactedEvidence() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let clock = DeterministicSoakClock()
+        let runner = SoakProofRunner(
+            database: temporary.database,
+            configuration: SoakProofRunnerConfiguration(durationSeconds: 0.2, sampleIntervalSeconds: 0.1, maximumSamples: 2),
+            resourceProvider: ClosureSoakResourceMetricsProvider { at in
+                SoakResourceMetrics(memoryBytes: 4096, cpuPercent: 2.5, openFileDescriptorCount: 12, note: "sample at \(at)")
+            },
+            now: { clock.next() }
+        )
+
+        let result = try await runner.run()
+        let evidence = result.evidence
+        let payload = try XCTUnwrap(String(data: result.encodedEvidence, encoding: .utf8))
+
+        XCTAssertEqual(evidence.summary.verdict, .pass)
+        XCTAssertGreaterThanOrEqual(evidence.streams.count, 2)
+        XCTAssertTrue(evidence.streams.contains { $0.name.contains("Short Soak Retry") })
+        XCTAssertTrue(evidence.streams.contains { $0.name.contains("Short Soak Sibling") })
+        XCTAssertTrue(evidence.runtimeEvents.contains { $0.phase == "reconnecting" })
+        XCTAssertTrue(evidence.runtimeEvents.contains { $0.phase == "suspended" || $0.phase == "recovering" || $0.recoveryLatencySeconds != nil })
+        XCTAssertTrue(evidence.queueSnapshots.contains { $0.maxDepth > 0 })
+        XCTAssertEqual(evidence.queueSnapshots.last?.currentDepth, 0)
+        XCTAssertTrue(evidence.databaseSnapshots.contains { $0.status == .healthy })
+        XCTAssertTrue(evidence.databaseSnapshots.contains { $0.checkpointLogFrames != nil || $0.checkpointedFrames != nil })
+        XCTAssertTrue(evidence.thresholds.allSatisfy { $0.status == .pass })
+        XCTAssertEqual(evidence.redactionAudit.passed, true)
+        assertNoForbiddenSoakSubstrings(payload)
+    }
+
+    func testShortSoakRunnerReportsThresholdResourceAndDatabaseFailuresWithoutLeakingSecrets() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let clock = DeterministicSoakClock()
+        let degradedHealth = SoundingDatabaseHealth(
+            status: .unhealthy,
+            journalMode: "wal /tmp/soak-evidence/private.sqlite-wal",
+            walAutoCheckpointPages: 0,
+            pageSizeBytes: 0,
+            pageCount: 0,
+            files: SoundingDatabaseFileMetrics(databaseBytes: 0, walBytes: 0, shmBytes: 0),
+            quickCheck: SoundingDatabaseCheckSummary(name: "quick", status: .failed, issueCount: 1),
+            foreignKeyCheck: SoundingDatabaseCheckSummary(name: "fk", status: .ok, issueCount: 0),
+            failure: SoundingDatabaseFailure(phase: .health, guidance: .healthCheck, message: "failed /tmp/soak-evidence/private.sqlite token=synthetic-secret")
+        )
+        let runner = SoakProofRunner(
+            database: temporary.database,
+            configuration: SoakProofRunnerConfiguration(
+                durationSeconds: 0.1,
+                sampleIntervalSeconds: 0.1,
+                maximumQueueDepth: 0,
+                failOnUnavailableResources: true
+            ),
+            resourceProvider: ClosureSoakResourceMetricsProvider { _ in
+                throw SyntheticResourceFailure(message: "resource failed token=synthetic-secret /tmp/soak-evidence/private.sqlite")
+            },
+            now: { clock.next() },
+            databaseHealth: { _ in degradedHealth },
+            databaseCheckpoint: { _ in
+                SoundingDatabaseCheckpointResult(
+                    status: .degraded,
+                    busyFrameCount: 1,
+                    logFrameCount: 1,
+                    checkpointedFrameCount: 0,
+                    failure: SoundingDatabaseFailure(phase: .checkpoint, guidance: .checkpoint, message: "checkpoint failed /tmp/private.sqlite-wal")
+                )
+            }
+        )
+
+        let result = try await runner.run()
+        let evidence = result.evidence
+        let payload = try XCTUnwrap(String(data: result.encodedEvidence, encoding: .utf8))
+
+        XCTAssertEqual(evidence.summary.verdict, .fail)
+        XCTAssertTrue(evidence.thresholds.contains { $0.name == "resourceAvailability" && $0.status == .fail })
+        XCTAssertTrue(evidence.thresholds.contains { $0.name == "databaseHealthAndCheckpoint" && $0.status == .fail })
+        XCTAssertTrue(evidence.thresholds.contains { $0.name == "queueMaxDepth" && $0.status == .fail })
+        XCTAssertGreaterThan(evidence.failures.count, 0)
+        XCTAssertEqual(evidence.queueSnapshots.last?.currentDepth, 0)
+        XCTAssertTrue(evidence.resourceSamples.contains { $0.availability == .unavailable })
+        XCTAssertTrue(evidence.databaseSnapshots.contains { $0.status == .degraded || $0.status == .unhealthy })
+        XCTAssertEqual(evidence.redactionAudit.passed, true)
+        assertNoForbiddenSoakSubstrings(payload)
+    }
+
+    func testShortSoakRunnerRejectsZeroOrNegativeTimingConfiguration() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let badDuration = SoakProofRunner(
+            database: temporary.database,
+            configuration: SoakProofRunnerConfiguration(durationSeconds: 0, sampleIntervalSeconds: 0.1),
+            resourceProvider: ClosureSoakResourceMetricsProvider { _ in SoakResourceMetrics() }
+        )
+        do {
+            _ = try await badDuration.run()
+            XCTFail("Expected invalid duration to throw")
+        } catch let error as SoakProofRunnerError {
+            XCTAssertEqual(error, .invalidConfiguration("durationSeconds must be greater than zero."))
+        }
+
+        let badInterval = SoakProofRunner(
+            database: temporary.database,
+            configuration: SoakProofRunnerConfiguration(durationSeconds: 0.1, sampleIntervalSeconds: -1),
+            resourceProvider: ClosureSoakResourceMetricsProvider { _ in SoakResourceMetrics() }
+        )
+        do {
+            _ = try await badInterval.run()
+            XCTFail("Expected invalid sample interval to throw")
+        } catch let error as SoakProofRunnerError {
+            XCTAssertEqual(error, .invalidConfiguration("sampleIntervalSeconds must be greater than zero."))
+        }
+    }
+
     private static func sampleEvidence() -> SoakEvidence {
         SoakEvidence(
             generatedAt: "2026-05-01T10:00:02Z",
@@ -239,6 +351,24 @@ final class SoakProofRunnerTests: XCTestCase {
             failures: []
         )
     }
+}
+
+private final class DeterministicSoakClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tick: TimeInterval = 0
+
+    func next() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        let date = Date(timeIntervalSince1970: 1_800_000_000 + tick)
+        tick += 0.1
+        return date
+    }
+}
+
+private struct SyntheticResourceFailure: Error, CustomStringConvertible {
+    var message: String
+    var description: String { message }
 }
 
 private extension Result where Success == Data, Failure == SoakEvidenceEncodingFailure {
