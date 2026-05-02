@@ -41,6 +41,10 @@ live-streams.private.json
 live-streams.*.private.json
 live-verification-evidence/
 live-verify-evidence/
+app-verify-fixture-evidence/
+app-verify-fixture-proof.local/
+*.app-verify-fixture-evidence.json
+*.app-verify-fixture-evidence.ndjson
 app-verify-live.local.json
 app-verify-live.*.local.json
 app-verify-live.private.json

@@ -286,7 +286,10 @@ final class DistributionScriptSmokeTests: XCTestCase {
         let example = try JSONDecoder().decode(ShippingDiagnosticsExample.self, from: exampleData)
 
         XCTAssertEqual(example.schemaVersion, 1)
-        XCTAssertEqual(Set(example.examples.map(\.name)), Set(["readinessWithoutCredentials", "packageDryRun", "realModeRejectedNotarization"]))
+        XCTAssertEqual(Set(example.examples.map(\.name)), Set(["readinessWithoutCredentials", "packageDryRun", "packageMissingAppVerifyEvidence", "realModeRejectedNotarization"]))
+        XCTAssertTrue(example.examples.contains { $0.command.contains("--app-verify-fixture-evidence") && $0.command.contains("--app-verify-live-evidence") })
+        XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "appVerify" && $0.status == "ready" } })
+        XCTAssertTrue(example.examples.contains { $0.name == "packageMissingAppVerifyEvidence" && $0.output.checks.contains { $0.phase == "appVerify" && $0.status == "failed" && $0.message.contains("evidence is missing") } })
         XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "signingIdentity" && $0.status == "missingCredential" } })
         XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "notarySubmit" && $0.status == "notarizationRejected" } })
         XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "staple" && $0.status == "failed" } })
@@ -297,6 +300,11 @@ final class DistributionScriptSmokeTests: XCTestCase {
         XCTAssertTrue(readmeText.contains("[`Docs/shipping.md`](Docs/shipping.md)"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: runbookURL.path), "README shipping link must match tracked Docs path capitalization.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: exampleURL.path), "README/example references must resolve to tracked Docs path capitalization.")
+        XCTAssertTrue(runbookText.contains("swift run sounding app-verify fixture"))
+        XCTAssertTrue(runbookText.contains("swift run sounding app-verify live"))
+        XCTAssertTrue(runbookText.contains("--app-verify-fixture-evidence"))
+        XCTAssertTrue(runbookText.contains("--app-verify-live-evidence"))
+        XCTAssertTrue(runbookText.contains("appVerify"))
         XCTAssertTrue(runbookText.contains("sounding soak proof"))
         XCTAssertTrue(runbookText.contains("sounding database health"))
         XCTAssertTrue(runbookText.contains("sounding database checkpoint"))
@@ -310,6 +318,12 @@ final class DistributionScriptSmokeTests: XCTestCase {
             .joined(separator: "## Distribution and shipping")
             .components(separatedBy: "## Database health and recovery")
             .first ?? ""
+
+        XCTAssertTrue(readmeShippingSection.contains("swift run sounding app-verify fixture"))
+        XCTAssertTrue(readmeShippingSection.contains("swift run sounding app-verify live"))
+        XCTAssertTrue(readmeShippingSection.contains("--app-verify-fixture-evidence"))
+        XCTAssertTrue(readmeShippingSection.contains("--app-verify-live-evidence"))
+        XCTAssertTrue(readmeShippingSection.contains("appVerify"))
 
         assertTrackedDistributionDocsAreSanitized(runbookText + "\n" + readmeShippingSection + "\n" + exampleText)
     }

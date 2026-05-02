@@ -14,15 +14,31 @@ scripts/distribution/check --json
 
 This checks the distribution toolchain, the Xcode project shape, the supported arm64 packaging path, and whether credential-gated checks were skipped. It does not submit anything to Apple and does not require a local signing identity or notary profile.
 
-Then run a dry-run package into an ignored workspace:
+Then produce the required app verification evidence in ignored local workspaces. Run deterministic fixture verification first, then run live verification with a gitignored local config that contains only authorized operator-local streams:
 
 ```sh
-scripts/distribution/package --dry-run --json --output-dir shipping.local/dry-run
+swift run sounding app-verify fixture \
+  --json app-verify-fixture-evidence/latest.json
+
+swift run sounding app-verify live \
+  --config app-verify-live.local.json \
+  --json app-verify-live-evidence/latest.json
 ```
 
-Dry-run packaging builds a Release app, stages it locally, creates and verifies a disk image when local tools are available, and reports signing, notarization, stapling, and Gatekeeper phases as skipped. Treat a dry-run pass as proof that the local packaging path is healthy, not as proof that Apple accepted a release.
+If authorized live streams are unavailable on the machine, do not invent or synthesize live evidence for shipping. Treat the package gate failure as the correct result until real live evidence is produced locally.
 
-A safe synthetic JSON reference is tracked in [`Docs/shipping-diagnostics.example.json`](shipping-diagnostics.example.json). Use that file to understand the output shape; do not replace it with generated local output.
+Then run a dry-run package into an ignored workspace with both evidence files:
+
+```sh
+scripts/distribution/package --dry-run --json \
+  --output-dir shipping.local/dry-run \
+  --app-verify-fixture-evidence app-verify-fixture-evidence/latest.json \
+  --app-verify-live-evidence app-verify-live-evidence/latest.json
+```
+
+Dry-run packaging validates fixture and live `AppVerifyEvidence` before archive, build, or disk-image work, then builds a Release app, stages it locally, creates and verifies a disk image when local tools are available, and reports signing, notarization, stapling, and Gatekeeper phases as skipped. Treat a dry-run pass as proof that the local app-verify and packaging paths are healthy, not as proof that Apple accepted a release.
+
+A safe synthetic JSON reference is tracked in [`Docs/shipping-diagnostics.example.json`](shipping-diagnostics.example.json). Use that file to understand the output shape, including `phase: "appVerify"` rows; do not replace it with generated local output.
 
 ## Operator-local prerequisites for a real release
 
@@ -60,6 +76,8 @@ Run the real release only on a credentialed operator machine:
 ```sh
 scripts/distribution/package --real --json \
   --output-dir release.local/current \
+  --app-verify-fixture-evidence app-verify-fixture-evidence/latest.json \
+  --app-verify-live-evidence app-verify-live-evidence/latest.json \
   --developer-id-identity "[local-identity-selector]" \
   --notary-profile "[local-notary-profile-label]"
 ```
@@ -109,6 +127,7 @@ Every script summary uses a `phase`, `status`, `message`, and `guidance` field. 
 | --- | --- | --- |
 | `environment` | Xcode, distribution tools, project inspection, or supported architecture is not ready. | Install or select the required local tools and rerun the check. |
 | `signingIdentity` | A Developer ID identity selector was skipped, missing, or did not match a local certificate. | Install the local certificate or choose a non-secret selector label. |
+| `appVerify` | Fixture or live app verification evidence is missing, malformed, failed, or incomplete. | Produce fresh fixture and authorized live app-verify JSON evidence in ignored local workspaces, then rerun packaging with both evidence flags. |
 | `archive` | Release build or staging failed. | Inspect the local xcodebuild log in the ignored workspace. |
 | `export` | Export-style packaging failed if that phase is added to a local workflow. | Inspect local export logs only; copy no raw paths. |
 | `codesign` | Signing or signature verification failed. | Inspect local codesign output and rebuild after fixing the local identity or entitlements. |
@@ -127,13 +146,14 @@ Statuses are intentionally small: `ready`, `skipped`, `missingCredential`, `fail
 
 Before copying distribution evidence into tracked notes, scan candidate text and replace or remove:
 
+- App-verify JSON evidence files, app-verify configs, raw app-runtime diagnostics, and any evidence artifact contents. Keep only controlled `appVerify` phase/status facts in tracked notes.
 - Apple accounts, email-looking strings, team identifiers, submission identifiers, passwords, tokens, app-specific passwords, and keychain profile values.
 - Raw Developer ID certificate common names or any value beginning with a certificate prefix plus a colon.
 - Local machine paths, temporary paths, database paths, generated archive paths, generated disk image paths, and log paths.
 - URLs, query strings, fragments, private stream sources, screenshots, transcripts, app bundles, archives, disk images, and raw tool output.
-- Private workspace contents under `shipping.local/`, `release.local/`, or `notary-logs.local/`.
+- Private workspace contents under `shipping.local/`, `release.local/`, `notary-logs.local/`, `app-verify-fixture-evidence/`, `app-verify-live-evidence/`, or `app-verify-live-proof.local/`.
 
-Safe tracked evidence includes command shape, exit code, bounded run mode, dry-run versus real mode, schema version, overall status, redacted phase/status rows, aggregate counts, and generic guidance strings.
+Safe tracked evidence includes command shape, exit code, bounded run mode, dry-run versus real mode, schema version, overall status, redacted phase/status rows, aggregate counts, `appVerify` ready/failed gate outcomes, and generic guidance strings.
 
 ## Security review notes
 

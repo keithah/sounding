@@ -32,7 +32,7 @@
     },
     {
       "name": "packageDryRun",
-      "command": "scripts/distribution/package --dry-run --json --output-dir [ignored-output-workspace]",
+      "command": "scripts/distribution/package --dry-run --json --output-dir [ignored-output-workspace] --app-verify-fixture-evidence [fixture-app-verify-evidence-json] --app-verify-live-evidence [live-app-verify-evidence-json]",
       "output": {
         "schemaVersion": 1,
         "dryRun": true,
@@ -43,6 +43,12 @@
             "status": "ready",
             "message": "Distribution workspace is writable and raw logs are isolated locally.",
             "guidance": "Inspect ignored local logs only when private diagnostics are needed."
+          },
+          {
+            "phase": "appVerify",
+            "status": "ready",
+            "message": "App verification evidence is ready for packaging.",
+            "guidance": "Continue with archive and package creation."
           },
           {
             "phase": "archive",
@@ -84,8 +90,37 @@
       }
     },
     {
+      "name": "packageMissingAppVerifyEvidence",
+      "command": "scripts/distribution/package --dry-run --json --output-dir [ignored-output-workspace] --app-verify-fixture-evidence [missing-fixture-app-verify-evidence-json] --app-verify-live-evidence [missing-live-app-verify-evidence-json]",
+      "output": {
+        "schemaVersion": 1,
+        "dryRun": true,
+        "overallStatus": "failed",
+        "checks": [
+          {
+            "phase": "output",
+            "status": "ready",
+            "message": "Distribution workspace is writable and raw logs are isolated locally.",
+            "guidance": "Inspect ignored local logs only when private diagnostics are needed."
+          },
+          {
+            "phase": "appVerify",
+            "status": "failed",
+            "message": "Fixture App verification evidence is missing.",
+            "guidance": "Run fixture app verification locally and pass its redacted JSON evidence to packaging."
+          },
+          {
+            "phase": "appVerify",
+            "status": "failed",
+            "message": "Live App verification evidence is missing.",
+            "guidance": "Run authorized live app verification locally and pass its redacted JSON evidence to packaging."
+          }
+        ]
+      }
+    },
+    {
       "name": "realModeRejectedNotarization",
-      "command": "scripts/distribution/package --real --json --output-dir [ignored-output-workspace] --developer-id-identity [local-identity-selector] --notary-profile [local-profile-label]",
+      "command": "scripts/distribution/package --real --json --output-dir [ignored-output-workspace] --app-verify-fixture-evidence [fixture-app-verify-evidence-json] --app-verify-live-evidence [live-app-verify-evidence-json] --developer-id-identity [local-identity-selector] --notary-profile [local-profile-label]",
       "output": {
         "schemaVersion": 1,
         "dryRun": false,
@@ -96,6 +131,12 @@
             "status": "ready",
             "message": "Required package tools are available.",
             "guidance": "Continue with the package workflow."
+          },
+          {
+            "phase": "appVerify",
+            "status": "ready",
+            "message": "App verification evidence is ready for packaging.",
+            "guidance": "Continue with archive and package creation."
           },
           {
             "phase": "signingIdentity",

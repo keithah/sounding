@@ -231,14 +231,24 @@ For operator-local unattended proof with three or more authorized streams, follo
 
 ## Distribution and shipping
 
-M005 adds a script-backed Developer ID distribution path plus a cold-reader shipping runbook. Start with the no-credential readiness and dry-run packaging checks, then use operator-local credentials only when producing a real notarized release:
+M005 adds a script-backed Developer ID distribution path plus a cold-reader shipping runbook. Start with the no-credential readiness check, produce fixture and authorized live app-verify JSON evidence in ignored local workspaces, then run dry-run packaging with both evidence paths. Use operator-local credentials only when producing a real notarized release:
 
 ```sh
 scripts/distribution/check --json
-scripts/distribution/package --dry-run --json --output-dir shipping.local/dry-run
+swift run sounding app-verify fixture \
+  --json app-verify-fixture-evidence/latest.json
+swift run sounding app-verify live \
+  --config app-verify-live.local.json \
+  --json app-verify-live-evidence/latest.json
+scripts/distribution/package --dry-run --json \
+  --output-dir shipping.local/dry-run \
+  --app-verify-fixture-evidence app-verify-fixture-evidence/latest.json \
+  --app-verify-live-evidence app-verify-live-evidence/latest.json
 ```
 
-The full workflow is documented in [`Docs/shipping.md`](Docs/shipping.md). Its synthetic diagnostics example is [`Docs/shipping-diagnostics.example.json`](Docs/shipping-diagnostics.example.json). The dry-run path proves local packaging, redacted phase/status diagnostics, and generated-artifact hygiene without Apple credentials. A signed, notarized, stapled, Gatekeeper-checked release remains operator-local because it requires a locally installed Developer ID identity and notarytool keychain profile; do not commit Apple accounts, signing identities, notary profile values, raw logs, generated disk images, archives, or local output paths.
+Fixture and live `AppVerifyEvidence` JSON are required before local DMG packaging proceeds. Missing, malformed, failed, or incomplete evidence is reported as an `appVerify` package diagnostic before archive or DMG work starts.
+
+The full workflow is documented in [`Docs/shipping.md`](Docs/shipping.md). Its synthetic diagnostics example is [`Docs/shipping-diagnostics.example.json`](Docs/shipping-diagnostics.example.json). The dry-run path proves local app verification, redacted phase/status diagnostics, packaging, and generated-artifact hygiene without Apple credentials. A signed, notarized, stapled, Gatekeeper-checked release remains operator-local because it requires a locally installed Developer ID identity and notarytool keychain profile; do not commit Apple accounts, signing identities, notary profile values, app-verify configs, app-verify evidence JSON, raw logs, generated disk images, archives, or local output paths.
 
 ## Database health and recovery
 
