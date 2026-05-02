@@ -166,6 +166,109 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertTrue(issue.message.contains("[redacted-path]"), issue.message)
     }
 
+    func testRuntimeLifecycleStatusProjectsSuspendedRecoveringAndRecoveredDetails() throws {
+        let (first, _, viewModel) = try makeTwoStreamViewModel()
+        var model = viewModel
+        let secretReason =
+            "system sleep for https://user:pass@example.test/private/live.m3u8?token=secret#frag at /Users/example/private/sleep.raw"
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: first.id,
+                name: first.name,
+                streamType: "hls",
+                sourceDescription: first.sourceDescription,
+                phase: .suspended,
+                attempt: 0,
+                maxAttempts: 0,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:00Z",
+                recentFailure: nil,
+                lifecycleEvidence: AppStreamRuntimeLifecycleEvidence(
+                    reason: secretReason,
+                    suspendedAt: "2026-05-01T20:00:00Z"
+                )
+            )
+        )
+
+        var selected = try XCTUnwrap(model.selectedStream)
+        XCTAssertEqual(selected.item.status, .suspended)
+        XCTAssertEqual(selected.playerStateTitle, "Runtime suspended")
+        XCTAssertTrue(selected.runtimeStatusDetail.contains("suspended for system sleep"))
+        XCTAssertTrue(selected.runtimeStatusDetail.contains("reason:"), selected.runtimeStatusDetail)
+        XCTAssertTrue(selected.runtimeStatusDetail.contains("suspended at 2026-05-01T20:00:00Z"))
+        XCTAssertEqual(selected.runtimeIssue?.id, "runtime.suspended")
+        XCTAssertEqual(selected.runtimeIssue?.severity, .info)
+        XCTAssertEqual(selected.canStopRuntime, true)
+        XCTAssertEqual(selected.canStartRuntime, false)
+        assertNoRuntimeSecrets(String(describing: selected))
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: first.id,
+                name: first.name,
+                streamType: "hls",
+                sourceDescription: first.sourceDescription,
+                phase: .recovering,
+                attempt: 0,
+                maxAttempts: 0,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:03Z",
+                recentFailure: nil,
+                lifecycleEvidence: AppStreamRuntimeLifecycleEvidence(
+                    reason: secretReason,
+                    suspendedAt: "2026-05-01T20:00:00Z",
+                    recoveryStartedAt: "2026-05-01T20:00:03Z"
+                )
+            )
+        )
+
+        selected = try XCTUnwrap(model.selectedStream)
+        XCTAssertEqual(selected.item.status, .recovering)
+        XCTAssertEqual(selected.playerStateTitle, "Runtime recovering")
+        XCTAssertTrue(selected.runtimeStatusDetail.contains("recovering after system wake"))
+        XCTAssertTrue(
+            selected.runtimeStatusDetail.contains("recovery started at 2026-05-01T20:00:03Z"),
+            selected.runtimeStatusDetail)
+        XCTAssertEqual(selected.runtimeIssue?.id, "runtime.recovering")
+        XCTAssertEqual(selected.runtimeIssue?.severity, .warning)
+        assertNoRuntimeSecrets(String(describing: selected))
+
+        model.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: first.id,
+                name: first.name,
+                streamType: "hls",
+                sourceDescription: first.sourceDescription,
+                phase: .running,
+                attempt: 0,
+                maxAttempts: 0,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:05Z",
+                recentFailure: nil,
+                lifecycleEvidence: AppStreamRuntimeLifecycleEvidence(
+                    reason: secretReason,
+                    suspendedAt: "2026-05-01T20:00:00Z",
+                    recoveryStartedAt: "2026-05-01T20:00:03Z",
+                    recoveredAt: "2026-05-01T20:00:05Z",
+                    recoveryLatencySeconds: 2.25
+                )
+            )
+        )
+
+        selected = try XCTUnwrap(model.selectedStream)
+        XCTAssertEqual(selected.item.status, .running)
+        XCTAssertEqual(selected.playerStateTitle, "Runtime running")
+        XCTAssertTrue(selected.runtimeStatusDetail.contains("Live ingest and playback are active."))
+        XCTAssertTrue(selected.runtimeStatusDetail.contains("recovered at 2026-05-01T20:00:05Z"))
+        XCTAssertTrue(selected.runtimeStatusDetail.contains("recovery latency 2.250s"))
+        XCTAssertNil(selected.runtimeIssue)
+        assertNoRuntimeSecrets(String(describing: selected))
+    }
+
     func testPlayerAndBufferIssuesProjectRedactedVisibleWarnings() {
         let item = StreamAppListItem(
             record: StreamRecord(

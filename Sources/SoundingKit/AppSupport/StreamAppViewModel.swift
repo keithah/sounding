@@ -400,7 +400,7 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             canStopRuntime = true
         case .connecting, .reconnecting:
             playerStateTitle = "Runtime connecting"
-            playerStateDetail = item.status.detail
+            playerStateDetail = runtimeStatusDetail
             controlsEnabled = true
             canStartRuntime = false
             canPauseRuntime = false
@@ -408,7 +408,7 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             canStopRuntime = true
         case .suspended:
             playerStateTitle = "Runtime suspended"
-            playerStateDetail = item.status.detail
+            playerStateDetail = runtimeStatusDetail
             controlsEnabled = true
             canStartRuntime = false
             canPauseRuntime = false
@@ -416,7 +416,7 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
             canStopRuntime = true
         case .recovering:
             playerStateTitle = "Runtime recovering"
-            playerStateDetail = item.status.detail
+            playerStateDetail = runtimeStatusDetail
             controlsEnabled = true
             canStartRuntime = false
             canPauseRuntime = false
@@ -554,13 +554,25 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
         case .connecting:
             return "Opening the stream source."
         case .running:
-            return "Live ingest and playback are active."
+            return lifecycleDetail(
+                for: runtimeStatus.lifecycleEvidence,
+                base: "Live ingest and playback are active.",
+                includeReason: false
+            )
         case .paused:
             return "The stream is paused."
         case .suspended:
-            return "The stream is suspended for system sleep."
+            return lifecycleDetail(
+                for: runtimeStatus.lifecycleEvidence,
+                base: "The stream is suspended for system sleep.",
+                includeReason: true
+            )
         case .recovering:
-            return "The stream is recovering after system wake."
+            return lifecycleDetail(
+                for: runtimeStatus.lifecycleEvidence,
+                base: "The stream is recovering after system wake.",
+                includeReason: true
+            )
         case .reconnecting:
             var detail = "Retrying"
             if runtimeStatus.maxAttempts > 0 {
@@ -621,9 +633,53 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
                 message: eventMessage ?? status.detail,
                 actionLabel: "Wait for reconnect or stop the stream"
             )
-        case .ready, .connecting, .running, .paused, .suspended, .recovering, .stopped, .removed:
+        case .suspended:
+            return StreamAppVisibleIssue(
+                id: "runtime.suspended",
+                severity: .info,
+                message: eventMessage ?? status.detail,
+                actionLabel: "Wait for system wake or stop the stream"
+            )
+        case .recovering:
+            return StreamAppVisibleIssue(
+                id: "runtime.recovering",
+                severity: .warning,
+                message: eventMessage ?? status.detail,
+                actionLabel: "Wait for recovery or stop the stream"
+            )
+        case .ready, .connecting, .running, .paused, .stopped, .removed:
             return nil
         }
+    }
+
+    private static func lifecycleDetail(
+        for evidence: AppStreamRuntimeLifecycleEvidence?,
+        base: String,
+        includeReason: Bool
+    ) -> String {
+        guard let evidence else { return base }
+        var parts: [String] = []
+        if includeReason {
+            let reason = IngestRedaction.redact(evidence.reason)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !reason.isEmpty {
+                parts.append("reason: \(reason)")
+            }
+        }
+        if let suspendedAt = evidence.suspendedAt {
+            parts.append("suspended at \(IngestRedaction.redact(suspendedAt))")
+        }
+        if let recoveryStartedAt = evidence.recoveryStartedAt {
+            parts.append("recovery started at \(IngestRedaction.redact(recoveryStartedAt))")
+        }
+        if let recoveredAt = evidence.recoveredAt {
+            parts.append("recovered at \(IngestRedaction.redact(recoveredAt))")
+        }
+        if let latency = evidence.recoveryLatencySeconds {
+            parts.append(String(format: "recovery latency %.3fs", latency))
+        }
+        guard !parts.isEmpty else { return base }
+        return "\(base) \(parts.joined(separator: "; "))."
     }
 
     private static func playerIssue(for timeline: AppPlayerTimelineSnapshot)

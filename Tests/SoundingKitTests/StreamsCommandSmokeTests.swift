@@ -217,6 +217,59 @@ final class StreamsCommandSmokeTests: XCTestCase {
         assertStreamOutputSanitized(String(data: json.stdout, encoding: .utf8) ?? "", dbURL: dbURL)
     }
 
+    func testRuntimeStatusHumanAndJSONExposeLifecycleEvidenceRedacted() throws {
+        let dbURL = temporaryDatabaseURL(secretComponent: "wake-token=synthetic-secret")
+        defer { removeDatabaseFiles(dbURL) }
+        XCTAssertEqual(try addStream(dbURL: dbURL, name: "Wakeful").exitCode, 0)
+        let database = try SoundingDatabase(fileURL: dbURL)
+        let store = AppStreamRuntimeStatusStore(database: database)
+        let reason =
+            "wake recovery for https://user:pass@example.test/private/live.m3u8?token=synthetic-secret#frag at \(dbURL.path) reconnect=https://user:pass@example.test/raw.m3u8?api_key=synthetic-secret"
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: 1,
+                phase: .running,
+                updatedAt: "2026-05-01T10:03:04Z",
+                lifecycleEvidence: AppStreamRuntimeLifecycleEvidence(
+                    reason: reason,
+                    suspendedAt: "2026-05-01T10:03:00Z",
+                    recoveryStartedAt: "2026-05-01T10:03:02Z",
+                    recoveredAt: "2026-05-01T10:03:04Z",
+                    recoveryLatencySeconds: 1.5
+                )
+            )
+        )
+
+        let human = try runSounding(arguments: ["streams", "status", "--db", dbURL.path])
+        XCTAssertEqual(human.exitCode, 0, human.diagnosticSummary)
+        XCTAssertEqual(human.stderr.count, 0, human.diagnosticSummary)
+        let humanText = String(data: human.stdout, encoding: .utf8) ?? ""
+        XCTAssertTrue(humanText.contains("phase=running"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("lifecycle=reason="), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("suspended_at=2026-05-01T10:03:00Z"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("recovery_started_at=2026-05-01T10:03:02Z"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("recovered_at=2026-05-01T10:03:04Z"), human.diagnosticSummary)
+        XCTAssertTrue(humanText.contains("recovery_latency_seconds=1.5"), human.diagnosticSummary)
+        assertStreamOutputSanitized(humanText, dbURL: dbURL)
+
+        let json = try runSounding(arguments: [
+            "streams", "status", "--db", dbURL.path, "--json",
+        ])
+        XCTAssertEqual(json.exitCode, 0, json.diagnosticSummary)
+        XCTAssertEqual(json.stderr.count, 0, json.diagnosticSummary)
+        let jsonText = String(data: json.stdout, encoding: .utf8) ?? ""
+        let payload = try decodeJSON(
+            RuntimeStatusPayload.self, from: json.stdout, context: json.diagnosticSummary)
+        let stream = try XCTUnwrap(payload.streams.first, json.diagnosticSummary)
+        XCTAssertEqual(stream.phase, "running", json.diagnosticSummary)
+        XCTAssertEqual(stream.lifecycleEvidence?.suspendedAt, "2026-05-01T10:03:00Z")
+        XCTAssertEqual(stream.lifecycleEvidence?.recoveryStartedAt, "2026-05-01T10:03:02Z")
+        XCTAssertEqual(stream.lifecycleEvidence?.recoveredAt, "2026-05-01T10:03:04Z")
+        XCTAssertEqual(stream.lifecycleEvidence?.recoveryLatencySeconds, 1.5)
+        XCTAssertTrue(stream.lifecycleEvidence?.reason.contains("wake recovery") == true)
+        assertStreamOutputSanitized(jsonText, dbURL: dbURL)
+    }
+
     func testRuntimeStatusIncludeRemovedAndMalformedRowsAreActionableAndRedacted() throws {
         let dbURL = temporaryDatabaseURL(secretComponent: "malformed-token=synthetic-secret")
         defer { removeDatabaseFiles(dbURL) }
@@ -515,7 +568,16 @@ final class StreamsCommandSmokeTests: XCTestCase {
         var nextRetryAt: String?
         var updatedAt: String?
         var recentFailure: RecentFailure?
+        var lifecycleEvidence: LifecycleEvidence?
         var latestHLSDecision: HLSDecision?
+    }
+
+    private struct LifecycleEvidence: Decodable {
+        var reason: String
+        var suspendedAt: String?
+        var recoveryStartedAt: String?
+        var recoveredAt: String?
+        var recoveryLatencySeconds: Double?
     }
 
     private struct HLSDecision: Decodable {
