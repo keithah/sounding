@@ -99,6 +99,180 @@ public struct IngestPersistence {
         }
     }
 
+    public func lastPersistedHLSMediaSequence(streamID: Int64) throws -> Int? {
+        try database.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT MAX(media_sequence)
+                    FROM hls_ingest_segments
+                    WHERE stream_id = ?
+                    """,
+                arguments: [streamID]
+            )
+        }
+    }
+
+    public func claimHLSSegment(_ claim: HLSSegmentClaim?) throws -> HLSSegmentClaimResult {
+        guard let claim else { return .noClaim }
+        guard claim.streamID > 0, claim.mediaSequence >= 0 else { return .noClaim }
+
+        let segmentIdentity = sanitizedHLSIdentity(claim.segmentIdentity)
+        guard !segmentIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .noClaim
+        }
+        let segmentIdentityHash = stableHash(segmentIdentity)
+
+        return try database.write { db in
+            if let existing = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT segment_identity, segment_identity_hash, claimed_run_id, chunk_id
+                    FROM hls_ingest_segments
+                    WHERE stream_id = ? AND media_sequence = ?
+                    LIMIT 1
+                    """,
+                arguments: [claim.streamID, claim.mediaSequence]
+            ) {
+                let existingRunID = existing["claimed_run_id"] as Int64?
+                let existingChunkID = existing["chunk_id"] as Int64?
+                let existingIdentity = existing["segment_identity"] as String? ?? ""
+                let existingIdentityHash = existing["segment_identity_hash"] as String? ?? ""
+
+                let severity: IngestDiagnosticSeverity
+                let reason: String
+                let decision: String
+                if existingIdentity == segmentIdentity && existingIdentityHash == segmentIdentityHash {
+                    severity = .info
+                    reason = "hls-segment-duplicate"
+                    decision = "duplicate-skip"
+                } else {
+                    severity = .error
+                    reason = "hls-segment-identity-conflict"
+                    decision = "identity-conflict"
+                }
+
+                let diagnostic = HLSSegmentClaimDiagnostic(
+                    severity: severity,
+                    reason: reason,
+                    context: hlsDecisionContext(
+                        decision: decision,
+                        mediaSequence: claim.mediaSequence,
+                        segmentIdentity: segmentIdentity,
+                        segmentIdentityHash: segmentIdentityHash,
+                        existingSegmentIdentity: existingIdentity,
+                        existingSegmentIdentityHash: existingIdentityHash,
+                        currentRunID: claim.runID,
+                        existingRunID: existingRunID,
+                        existingChunkID: existingChunkID
+                    )
+                )
+                try insertHLSDecisionDiagnostic(
+                    diagnostic,
+                    streamID: claim.streamID,
+                    runID: claim.runID,
+                    chunkID: existingChunkID,
+                    createdAt: claim.claimedAt,
+                    db: db
+                )
+
+                if reason == "hls-segment-duplicate" {
+                    return .duplicate(
+                        existingRunID: existingRunID,
+                        existingChunkID: existingChunkID,
+                        diagnostic: diagnostic
+                    )
+                }
+                return .conflict(
+                    existingRunID: existingRunID,
+                    existingChunkID: existingChunkID,
+                    diagnostic: diagnostic
+                )
+            }
+
+            var diagnostics: [HLSSegmentClaimDiagnostic] = []
+            let previousMediaSequence = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT MAX(media_sequence)
+                    FROM hls_ingest_segments
+                    WHERE stream_id = ?
+                    """,
+                arguments: [claim.streamID]
+            )
+            if let previousMediaSequence, claim.mediaSequence > previousMediaSequence + 1 {
+                let diagnostic = HLSSegmentClaimDiagnostic(
+                    severity: .warning,
+                    reason: "hls-media-sequence-gap",
+                    context: hlsDecisionContext(
+                        decision: "sequence-gap",
+                        mediaSequence: claim.mediaSequence,
+                        segmentIdentity: segmentIdentity,
+                        segmentIdentityHash: segmentIdentityHash,
+                        previousMediaSequence: previousMediaSequence,
+                        expectedMediaSequence: previousMediaSequence + 1,
+                        observedMediaSequence: claim.mediaSequence,
+                        currentRunID: claim.runID
+                    )
+                )
+                try insertHLSDecisionDiagnostic(
+                    diagnostic,
+                    streamID: claim.streamID,
+                    runID: claim.runID,
+                    chunkID: nil,
+                    createdAt: claim.claimedAt,
+                    db: db
+                )
+                diagnostics.append(diagnostic)
+            }
+
+            try db.execute(
+                sql: """
+                    INSERT INTO hls_ingest_segments (
+                        stream_id, media_sequence, segment_identity, segment_identity_hash,
+                        claimed_run_id, chunk_id, claimed_at, finalized_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?)
+                    """,
+                arguments: [
+                    claim.streamID,
+                    claim.mediaSequence,
+                    segmentIdentity,
+                    segmentIdentityHash,
+                    claim.runID,
+                    claim.claimedAt,
+                    claim.claimedAt
+                ]
+            )
+            return .claimed(diagnostics: diagnostics)
+        }
+    }
+
+    public func finalizeHLSSegmentClaim(
+        streamID: Int64,
+        mediaSequence: Int,
+        runID: Int64,
+        chunkID: Int64,
+        finalizedAt: String
+    ) throws {
+        try database.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE hls_ingest_segments
+                    SET claimed_run_id = COALESCE(claimed_run_id, ?),
+                        chunk_id = ?,
+                        finalized_at = ?,
+                        updated_at = ?
+                    WHERE stream_id = ?
+                      AND media_sequence = ?
+                    """,
+                arguments: [runID, chunkID, finalizedAt, finalizedAt, streamID, mediaSequence]
+            )
+            guard db.changesCount > 0 else {
+                throw PersistenceError.missingHLSSegmentClaim(streamID: streamID, mediaSequence: mediaSequence)
+            }
+        }
+    }
+
     public func persistTimeline(_ timeline: IngestChunkTimeline) throws {
         try database.write { db in
             for segment in timeline.segments {
@@ -461,7 +635,106 @@ public struct IngestPersistence {
     private enum PersistenceError: Error, Equatable {
         case missingRun(Int64)
         case missingSong(String)
+        case missingHLSSegmentClaim(streamID: Int64, mediaSequence: Int)
         case invalidTimelineInterval
+    }
+
+    private func insertHLSDecisionDiagnostic(
+        _ diagnostic: HLSSegmentClaimDiagnostic,
+        streamID: Int64,
+        runID: Int64?,
+        chunkID: Int64?,
+        createdAt: String,
+        db: Database
+    ) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO ingest_diagnostics (
+                    stream_id, run_id, chunk_id, phase, severity, reason, source,
+                    source_class, stream_type, context_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+                """,
+            arguments: [
+                streamID,
+                runID,
+                chunkID,
+                IngestDiagnosticPhase.persist.rawValue,
+                diagnostic.severity.rawValue,
+                diagnostic.reason,
+                "hls_segment",
+                "hls",
+                try jsonString(IngestRedaction.context(diagnostic.context)),
+                createdAt
+            ]
+        )
+    }
+
+    private func hlsDecisionContext(
+        decision: String,
+        mediaSequence: Int,
+        segmentIdentity: String,
+        segmentIdentityHash: String,
+        existingSegmentIdentity: String? = nil,
+        existingSegmentIdentityHash: String? = nil,
+        previousMediaSequence: Int? = nil,
+        expectedMediaSequence: Int? = nil,
+        observedMediaSequence: Int? = nil,
+        currentRunID: Int64? = nil,
+        existingRunID: Int64? = nil,
+        existingChunkID: Int64? = nil
+    ) -> [String: JSONValue] {
+        var context: [String: JSONValue] = [
+            "decision": .string(decision),
+            "mediaSequence": .number(Double(mediaSequence)),
+            "segmentIdentity": .string(segmentIdentity),
+            "segmentIdentityHash": .string(segmentIdentityHash)
+        ]
+        if let existingSegmentIdentity {
+            context["existingSegmentIdentity"] = .string(existingSegmentIdentity)
+        }
+        if let existingSegmentIdentityHash {
+            context["existingSegmentIdentityHash"] = .string(existingSegmentIdentityHash)
+        }
+        if let previousMediaSequence {
+            context["previousMediaSequence"] = .number(Double(previousMediaSequence))
+        }
+        if let expectedMediaSequence {
+            context["expectedMediaSequence"] = .number(Double(expectedMediaSequence))
+        }
+        if let observedMediaSequence {
+            context["observedMediaSequence"] = .number(Double(observedMediaSequence))
+        }
+        if let currentRunID {
+            context["currentRunID"] = .number(Double(currentRunID))
+        }
+        if let existingRunID {
+            context["existingRunID"] = .number(Double(existingRunID))
+        }
+        if let existingChunkID {
+            context["existingChunkID"] = .number(Double(existingChunkID))
+        }
+        return IngestRedaction.context(context) ?? context
+    }
+
+    private func sanitizedHLSIdentity(_ identity: String) -> String {
+        let trimmed = identity.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.hasPrefix("/") || trimmed.hasPrefix("./") || trimmed.hasPrefix("../")
+            || trimmed.contains("://")
+        {
+            return IngestRedaction.sourceDescription(trimmed)
+        }
+        return IngestRedaction.redact(trimmed)
+    }
+
+    private func stableHash(_ value: String) -> String {
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        return String(format: "%016llx", hash)
     }
 
     private func jsonString<Value: Encodable>(_ value: Value?) throws -> String? {

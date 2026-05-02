@@ -47,6 +47,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "acoustid_lookup_cache",
                 "stream_app_speaker_overrides",
                 "stream_runtime_status",
+                "hls_ingest_segments",
                 "grdb_migrations"
             ]
         )
@@ -71,7 +72,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "song_plays": columnNames(in: "song_plays", db),
                 "acoustid_lookup_cache": columnNames(in: "acoustid_lookup_cache", db),
                 "stream_app_speaker_overrides": columnNames(in: "stream_app_speaker_overrides", db),
-                "stream_runtime_status": columnNames(in: "stream_runtime_status", db)
+                "stream_runtime_status": columnNames(in: "stream_runtime_status", db),
+                "hls_ingest_segments": columnNames(in: "hls_ingest_segments", db)
             ]
         }
 
@@ -243,6 +245,18 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "recent_failure_at",
             "updated_at"
         ])
+        XCTAssertEqual(columnsByTable["hls_ingest_segments"], [
+            "id",
+            "stream_id",
+            "media_sequence",
+            "segment_identity",
+            "segment_identity_hash",
+            "claimed_run_id",
+            "chunk_id",
+            "claimed_at",
+            "finalized_at",
+            "updated_at"
+        ])
     }
 
     func testTimelineAndStreamManagementMigrationsCreateIndexes() throws {
@@ -253,7 +267,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'index'
-                  AND tbl_name IN ('streams', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides', 'stream_runtime_status')
+                  AND tbl_name IN ('streams', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides', 'stream_runtime_status', 'hls_ingest_segments')
                 ORDER BY name
                 """))
         }
@@ -281,7 +295,11 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "acoustid_lookup_cache_on_identity",
             "acoustid_lookup_cache_on_acoustid_id",
             "acoustid_lookup_cache_on_recording_id",
-            "acoustid_lookup_cache_on_updated_at"
+            "acoustid_lookup_cache_on_updated_at",
+            "hls_ingest_segments_on_stream_sequence",
+            "hls_ingest_segments_on_claimed_run_id",
+            "hls_ingest_segments_on_chunk_id",
+            "hls_ingest_segments_on_updated_at"
         ]))
     }
 
@@ -333,7 +351,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
                 "acoustid_lookup_cache": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM acoustid_lookup_cache"),
                 "stream_app_speaker_overrides": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_app_speaker_overrides"),
-                "stream_runtime_status": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_runtime_status")
+                "stream_runtime_status": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_runtime_status"),
+                "hls_ingest_segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM hls_ingest_segments")
             ]
         }
 
@@ -352,7 +371,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "song_plays": 0,
             "acoustid_lookup_cache": 0,
             "stream_app_speaker_overrides": 0,
-            "stream_runtime_status": 0
+            "stream_runtime_status": 0,
+            "hls_ingest_segments": 0
         ])
     }
 
@@ -373,6 +393,41 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(firstURL).path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(secondURL).path))
+    }
+
+    func testHLSIngestSegmentMigrationEnforcesStreamScopedMediaSequenceUniquenessAndCascade() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(streamType: "hls", source: "https://example.test/live.m3u8", createdAt: "2026-05-01T10:00:00Z")
+        let runID = try writer.createRun(streamID: streamID, startedAt: "2026-05-01T10:00:01Z", status: .running)
+
+        try temporary.database.write { db in
+            try db.execute(sql: """
+                INSERT INTO hls_ingest_segments (
+                    stream_id, media_sequence, segment_identity, segment_identity_hash,
+                    claimed_run_id, chunk_id, claimed_at, finalized_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?)
+                """, arguments: [streamID, 42, "https://example.test/segment.ts", "hash-42", runID, "2026-05-01T10:00:02Z", "2026-05-01T10:00:02Z"])
+        }
+
+        XCTAssertThrowsError(
+            try temporary.database.write { db in
+                try db.execute(sql: """
+                    INSERT INTO hls_ingest_segments (
+                        stream_id, media_sequence, segment_identity, segment_identity_hash,
+                        claimed_run_id, chunk_id, claimed_at, finalized_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, ?)
+                    """, arguments: [streamID, 42, "https://example.test/other.ts", "hash-other", runID, "2026-05-01T10:00:03Z", "2026-05-01T10:00:03Z"])
+            }
+        )
+
+        try temporary.database.write { db in
+            try db.execute(sql: "DELETE FROM streams WHERE id = ?", arguments: [streamID])
+        }
+        let remaining = try temporary.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM hls_ingest_segments")
+        }
+        XCTAssertEqual(remaining, 0)
     }
 
     private func columnNames(in table: String, _ db: Database) throws -> [String] {

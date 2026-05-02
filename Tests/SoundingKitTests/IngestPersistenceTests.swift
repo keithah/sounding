@@ -195,4 +195,188 @@ final class IngestPersistenceTests: XCTestCase {
         }
         XCTAssertEqual(counts, ["segments": 0, "words": 0, "fts": 0])
     }
+
+    func testHLSSegmentClaimClaimsFirstSegmentAndFinalizesChunkLink() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(streamType: "hls", source: "https://example.test/live.m3u8", createdAt: "2026-05-01T10:00:00Z")
+        let runID = try writer.createRun(streamID: streamID, startedAt: "2026-05-01T10:00:01Z", status: .running)
+
+        let result = try writer.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: streamID,
+                runID: runID,
+                mediaSequence: 7,
+                segmentIdentity: "https://cdn.example.test/seg-7.ts?token=secret#frag",
+                claimedAt: "2026-05-01T10:00:02Z"
+            )
+        )
+        XCTAssertEqual(result, .claimed(diagnostics: []))
+        XCTAssertEqual(try writer.lastPersistedHLSMediaSequence(streamID: streamID), 7)
+
+        let chunkID = try writer.createChunk(runID: runID, sequence: 0, startedAt: "2026-05-01T10:00:03Z")
+        try writer.finalizeHLSSegmentClaim(
+            streamID: streamID,
+            mediaSequence: 7,
+            runID: runID,
+            chunkID: chunkID,
+            finalizedAt: "2026-05-01T10:00:04Z"
+        )
+
+        let row = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT segment_identity, segment_identity_hash, claimed_run_id, chunk_id, finalized_at
+                FROM hls_ingest_segments
+                WHERE stream_id = ? AND media_sequence = 7
+                """, arguments: [streamID])
+        }
+        XCTAssertEqual(row?["segment_identity"] as String?, "https://cdn.example.test/seg-7.ts")
+        XCTAssertNotNil(row?["segment_identity_hash"] as String?)
+        XCTAssertEqual(row?["claimed_run_id"] as Int64?, runID)
+        XCTAssertEqual(row?["chunk_id"] as Int64?, chunkID)
+        XCTAssertEqual(row?["finalized_at"] as String?, "2026-05-01T10:00:04Z")
+    }
+
+    func testHLSSegmentClaimClassifiesMalformedDuplicateGapAndConflictWithRedactedDiagnostics() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(streamType: "hls", source: "https://example.test/live.m3u8", createdAt: "2026-05-01T10:00:00Z")
+        let firstRunID = try writer.createRun(streamID: streamID, startedAt: "2026-05-01T10:00:01Z", status: .running)
+        let secondRunID = try writer.createRun(streamID: streamID, startedAt: "2026-05-01T10:01:01Z", status: .running)
+
+        XCTAssertEqual(try writer.claimHLSSegment(nil), .noClaim)
+        XCTAssertEqual(
+            try writer.claimHLSSegment(
+                HLSSegmentClaim(streamID: streamID, runID: firstRunID, mediaSequence: -1, segmentIdentity: "seg", claimedAt: "2026-05-01T10:00:01Z")
+            ),
+            .noClaim
+        )
+
+        _ = try writer.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: streamID,
+                runID: firstRunID,
+                mediaSequence: 7,
+                segmentIdentity: "https://cdn.example.test/seg-7.ts?token=first-secret#fragment",
+                claimedAt: "2026-05-01T10:00:02Z"
+            )
+        )
+        let chunkID = try writer.createChunk(runID: firstRunID, sequence: 0, startedAt: "2026-05-01T10:00:03Z")
+        try writer.finalizeHLSSegmentClaim(streamID: streamID, mediaSequence: 7, runID: firstRunID, chunkID: chunkID, finalizedAt: "2026-05-01T10:00:04Z")
+
+        let duplicate = try writer.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: streamID,
+                runID: secondRunID,
+                mediaSequence: 7,
+                segmentIdentity: "https://cdn.example.test/seg-7.ts?token=second-secret#other",
+                claimedAt: "2026-05-01T10:01:02Z"
+            )
+        )
+        guard case let .duplicate(existingRunID, existingChunkID, duplicateDiagnostic) = duplicate else {
+            return XCTFail("Expected duplicate skip classification, got \(duplicate)")
+        }
+        XCTAssertEqual(existingRunID, firstRunID)
+        XCTAssertEqual(existingChunkID, chunkID)
+        XCTAssertEqual(duplicateDiagnostic.severity, .info)
+        XCTAssertEqual(duplicateDiagnostic.reason, "hls-segment-duplicate")
+
+        let gap = try writer.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: streamID,
+                runID: secondRunID,
+                mediaSequence: 10,
+                segmentIdentity: "https://cdn.example.test/seg-10.ts?api_key=gap-secret",
+                claimedAt: "2026-05-01T10:01:03Z"
+            )
+        )
+        guard case let .claimed(gapDiagnostics) = gap else {
+            return XCTFail("Expected gap claim classification, got \(gap)")
+        }
+        XCTAssertEqual(gapDiagnostics.map(\.reason), ["hls-media-sequence-gap"])
+        XCTAssertEqual(gapDiagnostics.first?.severity, .warning)
+
+        let conflict = try writer.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: streamID,
+                runID: secondRunID,
+                mediaSequence: 7,
+                segmentIdentity: "https://cdn.example.test/changed-7.ts?password=conflict-secret",
+                claimedAt: "2026-05-01T10:01:04Z"
+            )
+        )
+        guard case let .conflict(conflictRunID, conflictChunkID, conflictDiagnostic) = conflict else {
+            return XCTFail("Expected conflict classification, got \(conflict)")
+        }
+        XCTAssertEqual(conflictRunID, firstRunID)
+        XCTAssertEqual(conflictChunkID, chunkID)
+        XCTAssertEqual(conflictDiagnostic.severity, .error)
+        XCTAssertEqual(conflictDiagnostic.reason, "hls-segment-identity-conflict")
+
+        let diagnostics = try temporary.database.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT severity, reason, context_json
+                FROM ingest_diagnostics
+                WHERE reason LIKE 'hls-%'
+                ORDER BY id
+                """)
+        }
+        XCTAssertEqual(diagnostics.map { $0["reason"] as String? }, [
+            "hls-segment-duplicate",
+            "hls-media-sequence-gap",
+            "hls-segment-identity-conflict"
+        ])
+        XCTAssertEqual(diagnostics.map { $0["severity"] as String? }, ["info", "warning", "error"])
+        let contexts = diagnostics.compactMap { $0["context_json"] as String? }.joined(separator: "\n")
+        XCTAssertTrue(contexts.contains("mediaSequence"))
+        XCTAssertTrue(contexts.contains("expectedMediaSequence"))
+        XCTAssertTrue(contexts.contains("existingChunkID"))
+        XCTAssertFalse(contexts.contains("first-secret"))
+        XCTAssertFalse(contexts.contains("second-secret"))
+        XCTAssertFalse(contexts.contains("gap-secret"))
+        XCTAssertFalse(contexts.contains("conflict-secret"))
+        XCTAssertFalse(contexts.contains("token="))
+        XCTAssertFalse(contexts.contains("api_key="))
+        XCTAssertFalse(contexts.contains("password="))
+    }
+
+    func testHLSSegmentFinalizeFailureDoesNotLeavePartialChunkLink() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(streamType: "hls", source: "https://example.test/live.m3u8", createdAt: "2026-05-01T10:00:00Z")
+        let runID = try writer.createRun(streamID: streamID, startedAt: "2026-05-01T10:00:01Z", status: .running)
+        _ = try writer.claimHLSSegment(
+            HLSSegmentClaim(streamID: streamID, runID: runID, mediaSequence: 1, segmentIdentity: "seg-1.ts", claimedAt: "2026-05-01T10:00:02Z")
+        )
+
+        XCTAssertThrowsError(
+            try writer.finalizeHLSSegmentClaim(
+                streamID: streamID,
+                mediaSequence: 1,
+                runID: runID,
+                chunkID: 99_999,
+                finalizedAt: "2026-05-01T10:00:03Z"
+            )
+        )
+        XCTAssertThrowsError(
+            try writer.finalizeHLSSegmentClaim(
+                streamID: streamID,
+                mediaSequence: 99,
+                runID: runID,
+                chunkID: 99_999,
+                finalizedAt: "2026-05-01T10:00:04Z"
+            )
+        )
+
+        let row = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT chunk_id, finalized_at
+                FROM hls_ingest_segments
+                WHERE stream_id = ? AND media_sequence = 1
+                """, arguments: [streamID])
+        }
+        XCTAssertNil(row?["chunk_id"] as Int64?)
+        XCTAssertNil(row?["finalized_at"] as String?)
+    }
+
 }

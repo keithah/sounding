@@ -353,6 +353,49 @@ enum SoundingDatabaseMigrator {
             )
         }
 
+        migrator.registerMigration("addHLSSegmentState") { db in
+            try db.create(table: "hls_ingest_segments") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("stream_id", .integer)
+                    .notNull()
+                    .references("streams", onDelete: .cascade)
+                table.column("media_sequence", .integer).notNull()
+                    .check(sql: "media_sequence >= 0")
+                table.column("segment_identity", .text).notNull()
+                    .check(sql: "length(trim(segment_identity)) > 0")
+                table.column("segment_identity_hash", .text).notNull()
+                    .check(sql: "length(trim(segment_identity_hash)) > 0")
+                table.column("claimed_run_id", .integer)
+                    .references("ingest_runs", onDelete: .setNull)
+                table.column("chunk_id", .integer)
+                    .references("ingest_chunks", onDelete: .setNull)
+                table.column("claimed_at", .text).notNull()
+                table.column("finalized_at", .text)
+                table.column("updated_at", .text).notNull()
+                table.uniqueKey(["stream_id", "media_sequence"])
+            }
+            try db.create(
+                index: "hls_ingest_segments_on_stream_sequence",
+                on: "hls_ingest_segments",
+                columns: ["stream_id", "media_sequence"]
+            )
+            try db.create(
+                index: "hls_ingest_segments_on_claimed_run_id",
+                on: "hls_ingest_segments",
+                columns: ["claimed_run_id"]
+            )
+            try db.create(
+                index: "hls_ingest_segments_on_chunk_id",
+                on: "hls_ingest_segments",
+                columns: ["chunk_id"]
+            )
+            try db.create(
+                index: "hls_ingest_segments_on_updated_at",
+                on: "hls_ingest_segments",
+                columns: ["updated_at"]
+            )
+        }
+
         try migrator.migrate(writer)
     }
 }

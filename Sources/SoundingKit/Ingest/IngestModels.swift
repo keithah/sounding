@@ -221,6 +221,51 @@ public struct SongPlayDraft: Equatable, Sendable {
     }
 }
 
+public struct HLSSegmentClaim: Equatable, Sendable {
+    public var streamID: Int64
+    public var runID: Int64?
+    public var mediaSequence: Int
+    public var segmentIdentity: String
+    public var claimedAt: String
+
+    public init(
+        streamID: Int64,
+        runID: Int64? = nil,
+        mediaSequence: Int,
+        segmentIdentity: String,
+        claimedAt: String
+    ) {
+        self.streamID = streamID
+        self.runID = runID
+        self.mediaSequence = mediaSequence
+        self.segmentIdentity = segmentIdentity
+        self.claimedAt = claimedAt
+    }
+}
+
+public struct HLSSegmentClaimDiagnostic: Equatable, Sendable {
+    public var severity: IngestDiagnosticSeverity
+    public var reason: String
+    public var context: [String: JSONValue]
+
+    public init(
+        severity: IngestDiagnosticSeverity,
+        reason: String,
+        context: [String: JSONValue]
+    ) {
+        self.severity = severity
+        self.reason = reason
+        self.context = context
+    }
+}
+
+public enum HLSSegmentClaimResult: Equatable, Sendable {
+    case noClaim
+    case claimed(diagnostics: [HLSSegmentClaimDiagnostic])
+    case duplicate(existingRunID: Int64?, existingChunkID: Int64?, diagnostic: HLSSegmentClaimDiagnostic)
+    case conflict(existingRunID: Int64?, existingChunkID: Int64?, diagnostic: HLSSegmentClaimDiagnostic)
+}
+
 public struct IngestChunkTimeline: Equatable, Sendable {
     public var runID: Int64
     public var chunkID: Int64
