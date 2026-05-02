@@ -144,10 +144,10 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
         assertSanitized(line, forbiddenLiteral: "private-fragment")
     }
 
-    /// Manual real-device proof for S02: run
-    /// `swift run sounding app-verify fixture --json /tmp/sounding-app-verify-s02.json`
+    /// Manual real-device proof for S03: run
+    /// `swift run sounding app-verify fixture --json /tmp/sounding-app-verify-s03.json`
     /// on a macOS host with a usable AVFoundation output device; failed evidence should still be written
-    /// and should identify the failing runtime/playback/control/diagnostics phase without leaking raw sources.
+    /// and should identify the failing runtime/playback/control/diagnostics/projection phase without leaking raw sources.
 
     private static func passingEvidence() -> AppVerifyEvidence {
         AppVerifyEvidence(

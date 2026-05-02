@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import XCTest
 
 @testable import SoundingKit
@@ -28,16 +29,27 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         let transcriptPersistence = try projectionCheck(evidence, .transcriptPersistence, .pass)
         XCTAssertGreaterThan(transcriptPersistence.projectionFacts?.rowCount ?? 0, 0)
         XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["segments"], "1")
+        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["words"], "3")
+        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["ftsRows"], "1")
         let transcriptTimeline = try projectionCheck(evidence, .transcriptTimelineProjection, .pass)
         XCTAssertGreaterThan(transcriptTimeline.projectionFacts?.projectionCount ?? 0, 0)
+        XCTAssertEqual(transcriptTimeline.projectionFacts?.sampleFields["paragraphs"], "1")
+        XCTAssertEqual(transcriptTimeline.projectionFacts?.sampleFields["timelineTranscriptItems"], "1")
         let transcriptSearch = try projectionCheck(evidence, .transcriptSearchProjection, .pass)
         XCTAssertGreaterThan(transcriptSearch.projectionFacts?.projectionCount ?? 0, 0)
         XCTAssertEqual(
             transcriptSearch.projectionFacts?.sampleFields["phrase"], "app verify fixture")
+        XCTAssertEqual(transcriptSearch.projectionFacts?.sampleFields["results"], "1")
         let songMetadata = try projectionCheck(evidence, .songMetadataProjection, .pass)
         XCTAssertGreaterThan(songMetadata.projectionFacts?.metadataCount ?? 0, 0)
+        XCTAssertEqual(songMetadata.projectionFacts?.sampleFields["songRows"], "1")
+        XCTAssertEqual(songMetadata.projectionFacts?.sampleFields["songPlays"], "1")
+        XCTAssertEqual(songMetadata.projectionFacts?.sampleFields["timelineSongItems"], "1")
         let adMetadata = try projectionCheck(evidence, .adMetadataProjection, .pass)
         XCTAssertGreaterThan(adMetadata.projectionFacts?.metadataCount ?? 0, 0)
+        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["adEvents"], "1")
+        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["adEventsWithPTS"], "1")
+        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["timelineAdItems"], "1")
         XCTAssertGreaterThan(evidence.runtimeFacts?.processedChunks ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.decodedChunks ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.scheduledBuffers ?? 0, 0)
@@ -159,6 +171,136 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         }
     }
 
+    func testMissingTranscriptPersistenceFailsNamedS03CheckWithSanitizedFacts() async throws {
+        let root = temporaryRoot("missing-transcript-persistence")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let player = DiagnosticsRecordingPlayer()
+        let runner = makeRunner(
+            root: root,
+            player: player,
+            ingesterFactory: mutatingIngesterFactory { database, streamID in
+                try database.write { db in
+                    try db.execute(
+                        sql: """
+                            DELETE FROM transcript_segments
+                            WHERE run_id IN (SELECT id FROM ingest_runs WHERE stream_id = ?)
+                            """,
+                        arguments: [streamID]
+                    )
+                }
+            }
+        )
+
+        let evidence = await runner.run()
+
+        XCTAssertEqual(evidence.summary.status, .fail)
+        let check = try projectionCheck(evidence, .transcriptPersistence, .fail)
+        XCTAssertEqual(check.phase, .transcriptPersistence)
+        XCTAssertEqual(check.projectionFacts?.rowCount, 0)
+        XCTAssertEqual(check.projectionFacts?.sampleFields["segments"], "0")
+        XCTAssertEqual(check.projectionFacts?.sampleFields["words"], "0")
+        XCTAssertEqual(check.projectionFacts?.sampleFields["ftsRows"], "0")
+        assertS03FailureIsSanitized(check)
+    }
+
+    func testMissingTranscriptSearchPhraseFailsNamedS03CheckWithSanitizedFacts() async throws {
+        let root = temporaryRoot("missing-transcript-search")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let player = DiagnosticsRecordingPlayer()
+        let runner = makeRunner(
+            root: root,
+            player: player,
+            ingesterFactory: mutatingIngesterFactory { database, streamID in
+                try database.write { db in
+                    try db.execute(
+                        sql: """
+                            UPDATE transcript_segments
+                            SET text = 'unrelated deterministic words'
+                            WHERE run_id IN (SELECT id FROM ingest_runs WHERE stream_id = ?)
+                            """,
+                        arguments: [streamID]
+                    )
+                    try db.execute(sql: "INSERT INTO transcript_segments_fts(transcript_segments_fts) VALUES('rebuild')")
+                }
+            }
+        )
+
+        let evidence = await runner.run()
+
+        XCTAssertEqual(evidence.summary.status, .fail)
+        _ = try projectionCheck(evidence, .transcriptPersistence, .pass)
+        let check = try projectionCheck(evidence, .transcriptSearchProjection, .fail)
+        XCTAssertEqual(check.phase, .transcriptSearchProjection)
+        XCTAssertGreaterThan(check.projectionFacts?.rowCount ?? 0, 0)
+        XCTAssertEqual(check.projectionFacts?.projectionCount, 0)
+        XCTAssertEqual(check.projectionFacts?.sampleFields["phrase"], "app verify fixture")
+        XCTAssertEqual(check.projectionFacts?.sampleFields["results"], "0")
+        assertS03FailureIsSanitized(check)
+    }
+
+    func testMissingSongMetadataProjectionFailsNamedS03CheckWithSanitizedFacts() async throws {
+        let root = temporaryRoot("missing-song-metadata")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let player = DiagnosticsRecordingPlayer()
+        let runner = makeRunner(
+            root: root,
+            player: player,
+            ingesterFactory: mutatingIngesterFactory { database, streamID in
+                try database.write { db in
+                    try db.execute(
+                        sql: "DELETE FROM song_plays WHERE stream_id = ?",
+                        arguments: [streamID]
+                    )
+                }
+            }
+        )
+
+        let evidence = await runner.run()
+
+        XCTAssertEqual(evidence.summary.status, .fail)
+        let check = try projectionCheck(evidence, .songMetadataProjection, .fail)
+        XCTAssertEqual(check.phase, .songMetadataProjection)
+        XCTAssertEqual(check.projectionFacts?.metadataCount, 0)
+        XCTAssertEqual(check.projectionFacts?.sampleFields["songRows"], "0")
+        XCTAssertEqual(check.projectionFacts?.sampleFields["songPlays"], "0")
+        assertS03FailureIsSanitized(check)
+    }
+
+    func testMissingAdMetadataProjectionFailsNamedS03CheckWithSanitizedFacts() async throws {
+        let root = temporaryRoot("missing-ad-metadata")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let player = DiagnosticsRecordingPlayer()
+        let runner = makeRunner(
+            root: root,
+            player: player,
+            ingesterFactory: mutatingIngesterFactory { database, streamID in
+                try database.write { db in
+                    try db.execute(
+                        sql: """
+                            DELETE FROM ad_events
+                            WHERE run_id IN (SELECT id FROM ingest_runs WHERE stream_id = ?)
+                            """,
+                        arguments: [streamID]
+                    )
+                }
+            }
+        )
+
+        let evidence = await runner.run()
+
+        XCTAssertEqual(evidence.summary.status, .fail)
+        let check = try projectionCheck(evidence, .adMetadataProjection, .fail)
+        XCTAssertEqual(check.phase, .adMetadataProjection)
+        XCTAssertEqual(check.projectionFacts?.metadataCount, 0)
+        XCTAssertEqual(check.projectionFacts?.sampleFields["adEvents"], "0")
+        XCTAssertEqual(check.projectionFacts?.sampleFields["adEventsWithPTS"], "0")
+        assertS03FailureIsSanitized(check)
+    }
+
     func testMissingVolumeAppliedDiagnosticFailsControlProof() async throws {
         let root = temporaryRoot("missing-volume")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -270,6 +412,66 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         XCTAssertNotNil(
             check.projectionFacts, "Missing projection facts for \(name)", file: file, line: line)
         return check
+    }
+
+    private func mutatingIngesterFactory(
+        _ mutate: @escaping @Sendable (_ database: SoundingDatabase, _ streamID: Int64) throws -> Void
+    ) -> AppVerifyFixtureRunner.IngesterFactory {
+        { database, decoder, transcriber, diarizer, fingerprinter, fingerprintEnricher,
+          player, timeline, rollingBuffer, diagnosticsLog, now in
+            MutatingProjectionIngester(
+                base: StreamIngestAppRuntimeRunner(
+                    database: database,
+                    decoder: decoder,
+                    transcriber: transcriber,
+                    diarizer: diarizer,
+                    fingerprinter: fingerprinter,
+                    fingerprintEnricher: fingerprintEnricher,
+                    player: player,
+                    timeline: timeline,
+                    rollingBuffer: rollingBuffer,
+                    diagnosticsLog: diagnosticsLog,
+                    keepPlaybackRunningAfterIngestCompletes: false,
+                    now: now
+                ),
+                database: database,
+                mutate: mutate
+            )
+        }
+    }
+
+    private func assertS03FailureIsSanitized(
+        _ check: AppVerifyCheckRecord,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(check.required, file: file, line: line)
+        XCTAssertTrue(
+            check.reason?.contains("non-zero sanitized count") == true,
+            check.reason ?? "",
+            file: file,
+            line: line
+        )
+        let json = String(decoding: (try? AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "token=synthetic-secret",
+            checks: [check]
+        ).jsonData()) ?? Data(), as: UTF8.self)
+        XCTAssertFalse(json.contains("synthetic-secret"), json, file: file, line: line)
+        XCTAssertFalse(json.contains("/tmp/"), json, file: file, line: line)
+        XCTAssertFalse(json.contains("user:pass"), json, file: file, line: line)
+    }
+}
+
+private struct MutatingProjectionIngester: AppStreamRuntimeIngesting {
+    var base: any AppStreamRuntimeIngesting
+    var database: SoundingDatabase
+    var mutate: @Sendable (_ database: SoundingDatabase, _ streamID: Int64) throws -> Void
+
+    func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        let result = try await base.run(request)
+        try mutate(database, request.streamID)
+        return result
     }
 }
 
