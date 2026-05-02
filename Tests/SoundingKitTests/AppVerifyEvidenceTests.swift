@@ -135,8 +135,75 @@ final class AppVerifyEvidenceTests: XCTestCase {
             .runtimeStopObserved,
             .runtimeRestartObserved,
         ])
-        XCTAssertEqual(AppVerifyCheckName.fixtureRequired, AppVerifyCheckName.s01Required + AppVerifyCheckName.s02ControlRequired)
+        XCTAssertEqual(AppVerifyCheckName.s03ProjectionRequired, [
+            .transcriptPersistence,
+            .transcriptTimelineProjection,
+            .transcriptSearchProjection,
+            .songMetadataProjection,
+            .adMetadataProjection,
+        ])
+        XCTAssertEqual(
+            AppVerifyCheckName.fixtureRequired,
+            AppVerifyCheckName.s01Required + AppVerifyCheckName.s02ControlRequired + AppVerifyCheckName.s03ProjectionRequired
+        )
         XCTAssertEqual(Set(AppVerifyCheckName.fixtureRequired).count, AppVerifyCheckName.fixtureRequired.count)
+    }
+
+    func testProjectionFactsRoundTripAreBoundedAndSanitized() throws {
+        let secret = "https://user:pass@example.test/live.wav?token=synthetic-secret#private-fragment"
+        let check = AppVerifyCheckEvaluator.projectionPopulated(
+            .transcriptTimelineProjection,
+            surface: "timeline \(secret)",
+            projectionCount: 3,
+            sampleFields: Dictionary(uniqueKeysWithValues: (0..<20).map { index in
+                ("field\(index)", index == 0 ? secret : "value-\(index)")
+            }),
+            diagnosticEvents: (0..<20).map { index in
+                index == 0 ? "projection.event?token=synthetic-secret" : "projection.event.\(index)"
+            }
+        )
+        let evidence = AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "fixture-run-1",
+            checks: [check]
+        )
+
+        let json = try XCTUnwrap(String(data: try evidence.jsonData(), encoding: .utf8))
+        XCTAssertTrue(json.contains(#""transcript_timeline_projection""#), json)
+        XCTAssertTrue(json.contains(#""projectionFacts""#), json)
+        XCTAssertTrue(json.contains(#""projectionCount":3"#), json)
+        XCTAssertFalse(json.contains("user:pass"), json)
+        XCTAssertFalse(json.contains("synthetic-secret"), json)
+        XCTAssertFalse(json.contains("private-fragment"), json)
+        XCTAssertFalse(json.contains("?token"), json)
+
+        let decoded = try JSONDecoder().decode(AppVerifyEvidence.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.checks.first?.status, .pass)
+        XCTAssertEqual(decoded.checks.first?.phase, .transcriptTimelineProjection)
+        XCTAssertEqual(decoded.checks.first?.projectionFacts?.projectionCount, 3)
+        XCTAssertEqual(decoded.checks.first?.projectionFacts?.sampleFields.count, 12)
+        XCTAssertEqual(decoded.checks.first?.projectionFacts?.recentDiagnosticEvents.count, 16)
+    }
+
+    func testMissingProjectionCountFailsRequiredCheckWithNamedPhase() {
+        let check = AppVerifyCheckEvaluator.projectionPopulated(
+            .adMetadataProjection,
+            surface: "ad metadata /tmp/sounding-token=synthetic-secret",
+            metadataCount: 0
+        )
+        XCTAssertEqual(check.status, .fail)
+        XCTAssertTrue(check.required)
+        XCTAssertEqual(check.phase, .adMetadataProjection)
+        XCTAssertEqual(check.projectionFacts?.metadataCount, 0)
+        XCTAssertTrue(check.reason?.contains("Projection proof") == true, check.reason ?? "")
+        XCTAssertFalse(check.reason?.contains("synthetic-secret") ?? true, check.reason ?? "")
+    }
+
+    func testLegacyCheckRecordsDecodeWithoutProjectionFacts() throws {
+        let legacy = Data(#"{"name":"fixture_source_created","status":"pass","required":true,"phase":"fixture","artifacts":[]}"#.utf8)
+        let decoded = try JSONDecoder().decode(AppVerifyCheckRecord.self, from: legacy)
+        XCTAssertEqual(decoded.name, .fixtureSourceCreated)
+        XCTAssertNil(decoded.projectionFacts)
     }
 
     func testControlObservationFactsRoundTripAndSanitizeDiagnostics() throws {

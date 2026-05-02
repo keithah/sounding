@@ -59,6 +59,8 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
         let evidenceText = try String(contentsOf: evidenceURL)
         XCTAssertTrue(evidenceText.contains("\n  \"artifacts\""), evidenceText)
         XCTAssertTrue(evidenceText.contains("\"fixture_source_created\""), evidenceText)
+        XCTAssertTrue(evidenceText.contains("\"transcript_persistence\""), evidenceText)
+        XCTAssertTrue(evidenceText.contains("\"projectionFacts\""), evidenceText)
         let decoded = try JSONDecoder().decode(AppVerifyEvidence.self, from: Data(evidenceText.utf8))
         XCTAssertEqual(decoded.summary.status, .pass)
         XCTAssertEqual(Set(decoded.checks.map(\.name)), Set(AppVerifyCheckName.fixtureRequired))
@@ -286,6 +288,36 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
                     AppVerifyParsedDiagnosticEntry(event: "playback.play.scheduled", phase: "playback.play", streamID: 1),
                 ],
                 requiredDiagnosticEvents: ["runtime.start.requested", "playback.play.scheduled"]
+            ),
+            AppVerifyCheckEvaluator.projectionPopulated(
+                .transcriptPersistence,
+                surface: "transcript persistence",
+                rowCount: 2,
+                sampleFields: ["persistedRows": "2"]
+            ),
+            AppVerifyCheckEvaluator.projectionPopulated(
+                .transcriptTimelineProjection,
+                surface: "transcript timeline",
+                projectionCount: 2,
+                sampleFields: ["timelineItems": "2"]
+            ),
+            AppVerifyCheckEvaluator.projectionPopulated(
+                .transcriptSearchProjection,
+                surface: "transcript search",
+                projectionCount: 1,
+                sampleFields: ["searchResults": "1"]
+            ),
+            AppVerifyCheckEvaluator.projectionPopulated(
+                .songMetadataProjection,
+                surface: "song metadata",
+                metadataCount: 1,
+                sampleFields: ["titlePresent": "true", "artistPresent": "true"]
+            ),
+            AppVerifyCheckEvaluator.projectionPopulated(
+                .adMetadataProjection,
+                surface: "ad metadata",
+                metadataCount: 1,
+                sampleFields: ["adMarkers": "1"]
             ),
         ]
     }

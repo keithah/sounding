@@ -31,6 +31,11 @@ public enum AppVerifyRuntimePhase: String, Codable, Equatable, Sendable, CaseIte
     case runtimeStop = "runtime_stop"
     case runtimeRestart = "runtime_restart"
     case diagnostics
+    case transcriptPersistence = "transcript_persistence"
+    case transcriptTimelineProjection = "transcript_timeline_projection"
+    case transcriptSearchProjection = "transcript_search_projection"
+    case songMetadataProjection = "song_metadata_projection"
+    case adMetadataProjection = "ad_metadata_projection"
     case output
 }
 
@@ -48,6 +53,11 @@ public enum AppVerifyCheckName: String, Codable, Equatable, Sendable, CaseIterab
     case playbackVolumeChanged = "playback_volume_changed"
     case runtimeStopObserved = "runtime_stop_observed"
     case runtimeRestartObserved = "runtime_restart_observed"
+    case transcriptPersistence = "transcript_persistence"
+    case transcriptTimelineProjection = "transcript_timeline_projection"
+    case transcriptSearchProjection = "transcript_search_projection"
+    case songMetadataProjection = "song_metadata_projection"
+    case adMetadataProjection = "ad_metadata_projection"
 
     public static let s01Required: [AppVerifyCheckName] = [
         .fixtureSourceCreated,
@@ -68,7 +78,15 @@ public enum AppVerifyCheckName: String, Codable, Equatable, Sendable, CaseIterab
         .runtimeRestartObserved,
     ]
 
-    public static let fixtureRequired: [AppVerifyCheckName] = s01Required + s02ControlRequired
+    public static let s03ProjectionRequired: [AppVerifyCheckName] = [
+        .transcriptPersistence,
+        .transcriptTimelineProjection,
+        .transcriptSearchProjection,
+        .songMetadataProjection,
+        .adMetadataProjection,
+    ]
+
+    public static let fixtureRequired: [AppVerifyCheckName] = s01Required + s02ControlRequired + s03ProjectionRequired
 }
 
 public struct AppVerifyRedactedArtifact: Codable, Equatable, Sendable {
@@ -179,6 +197,34 @@ public struct AppVerifyControlObservationFacts: Codable, Equatable, Sendable {
     }
 }
 
+
+public struct AppVerifyProjectionFacts: Codable, Equatable, Sendable {
+    public var surface: String
+    public var rowCount: Int
+    public var projectionCount: Int
+    public var metadataCount: Int
+    public var sampleFields: [String: String]
+    public var recentDiagnosticEvents: [String]
+
+    public init(
+        surface: String,
+        rowCount: Int = 0,
+        projectionCount: Int = 0,
+        metadataCount: Int = 0,
+        sampleFields: [String: String] = [:],
+        recentDiagnosticEvents: [String] = []
+    ) {
+        self.surface = AppVerifyEvidenceSanitizer.redact(surface)
+        self.rowCount = max(0, rowCount)
+        self.projectionCount = max(0, projectionCount)
+        self.metadataCount = max(0, metadataCount)
+        self.sampleFields = sampleFields.prefix(12).reduce(into: [:]) { partial, pair in
+            partial[AppVerifyEvidenceSanitizer.redact(pair.key)] = AppVerifyEvidenceSanitizer.redact(pair.value)
+        }
+        self.recentDiagnosticEvents = Array(recentDiagnosticEvents.prefix(16)).map(AppVerifyEvidenceSanitizer.redact)
+    }
+}
+
 public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
     public var name: AppVerifyCheckName
     public var status: AppVerifyEvidenceStatus
@@ -187,6 +233,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
     public var reason: String?
     public var facts: AppVerifyRuntimeFacts?
     public var controlFacts: AppVerifyControlObservationFacts?
+    public var projectionFacts: AppVerifyProjectionFacts?
     public var artifacts: [AppVerifyRedactedArtifact]
 
     public init(
@@ -197,6 +244,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         reason: String? = nil,
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
+        projectionFacts: AppVerifyProjectionFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) {
         self.name = name
@@ -206,6 +254,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         self.reason = reason.map(AppVerifyEvidenceSanitizer.redact)
         self.facts = facts
         self.controlFacts = controlFacts
+        self.projectionFacts = projectionFacts
         self.artifacts = Array(artifacts.prefix(16))
     }
 
@@ -216,6 +265,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         reason: String? = nil,
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
+        projectionFacts: AppVerifyProjectionFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -226,6 +276,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             reason: reason,
             facts: facts,
             controlFacts: controlFacts,
+            projectionFacts: projectionFacts,
             artifacts: artifacts
         )
     }
@@ -237,6 +288,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         reason: String,
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
+        projectionFacts: AppVerifyProjectionFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -247,6 +299,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             reason: reason,
             facts: facts,
             controlFacts: controlFacts,
+            projectionFacts: projectionFacts,
             artifacts: artifacts
         )
     }
@@ -258,6 +311,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
         reason: String,
         facts: AppVerifyRuntimeFacts? = nil,
         controlFacts: AppVerifyControlObservationFacts? = nil,
+        projectionFacts: AppVerifyProjectionFacts? = nil,
         artifacts: [AppVerifyRedactedArtifact] = []
     ) -> AppVerifyCheckRecord {
         AppVerifyCheckRecord(
@@ -268,6 +322,7 @@ public struct AppVerifyCheckRecord: Codable, Equatable, Sendable {
             reason: reason,
             facts: facts,
             controlFacts: controlFacts,
+            projectionFacts: projectionFacts,
             artifacts: artifacts
         )
     }
@@ -469,6 +524,48 @@ public enum AppVerifyCheckEvaluator {
         return .pass(name, phase: phase, controlFacts: controlFacts, artifacts: artifacts)
     }
 
+
+
+    public static func projectionPopulated(
+        _ name: AppVerifyCheckName,
+        surface: String,
+        rowCount: Int = 0,
+        projectionCount: Int = 0,
+        metadataCount: Int = 0,
+        sampleFields: [String: String] = [:],
+        diagnosticEvents: [String] = []
+    ) -> AppVerifyCheckRecord {
+        let facts = AppVerifyProjectionFacts(
+            surface: surface,
+            rowCount: rowCount,
+            projectionCount: projectionCount,
+            metadataCount: metadataCount,
+            sampleFields: sampleFields,
+            recentDiagnosticEvents: diagnosticEvents
+        )
+        let phase = projectionPhase(for: name)
+        let hasEvidence: Bool
+        switch name {
+        case .transcriptPersistence:
+            hasEvidence = rowCount > 0
+        case .transcriptTimelineProjection, .transcriptSearchProjection:
+            hasEvidence = projectionCount > 0
+        case .songMetadataProjection, .adMetadataProjection:
+            hasEvidence = metadataCount > 0
+        default:
+            hasEvidence = rowCount > 0 || projectionCount > 0 || metadataCount > 0
+        }
+        guard hasEvidence else {
+            return .fail(
+                name,
+                phase: phase,
+                reason: "Projection proof for \(surface) requires a non-zero sanitized count.",
+                projectionFacts: facts
+            )
+        }
+        return .pass(name, phase: phase, projectionFacts: facts)
+    }
+
     private static func controlPhase(for name: AppVerifyCheckName) -> AppVerifyRuntimePhase {
         switch name {
         case .runtimeStopObserved:
@@ -477,6 +574,23 @@ public enum AppVerifyCheckEvaluator {
             return .runtimeRestart
         default:
             return .playbackControl
+        }
+    }
+
+    private static func projectionPhase(for name: AppVerifyCheckName) -> AppVerifyRuntimePhase {
+        switch name {
+        case .transcriptPersistence:
+            return .transcriptPersistence
+        case .transcriptTimelineProjection:
+            return .transcriptTimelineProjection
+        case .transcriptSearchProjection:
+            return .transcriptSearchProjection
+        case .songMetadataProjection:
+            return .songMetadataProjection
+        case .adMetadataProjection:
+            return .adMetadataProjection
+        default:
+            return .output
         }
     }
 }
