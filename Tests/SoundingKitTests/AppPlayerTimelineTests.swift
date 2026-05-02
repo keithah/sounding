@@ -22,6 +22,7 @@ final class AppPlayerTimelineTests: XCTestCase {
                 sequence: 0,
                 segmentURI: "https://user:pass@example.test/segment-0.ts?token=secret",
                 audio: Data([0x01, 0x02, 0x03]),
+                audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16),
                 startSeconds: 0,
                 endSeconds: 2,
                 startedAt: "2026-05-01T00:00:00Z",
@@ -31,6 +32,7 @@ final class AppPlayerTimelineTests: XCTestCase {
                 sequence: 1,
                 segmentURI: "https://user:pass@example.test/segment-1.ts?token=secret",
                 audio: Data([0x04, 0x05]),
+                audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16),
                 startSeconds: 2,
                 endSeconds: 4,
                 startedAt: "2026-05-01T00:00:02Z",
@@ -98,6 +100,7 @@ final class AppPlayerTimelineTests: XCTestCase {
             DecodedAudioChunk(
                 sequence: 0,
                 audio: Data([0x01]),
+                audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16),
                 startSeconds: 0,
                 endSeconds: 1,
                 startedAt: "2026-05-01T00:00:00Z"
@@ -129,7 +132,7 @@ final class AppPlayerTimelineTests: XCTestCase {
         let snapshot = await timeline.snapshot()
         XCTAssertEqual(
             snapshot.state,
-            .failed(message: "Playback adapter failed: device exploded token=[redacted]."))
+            .failed(message: "Playback adapter failed: device exploded token=[redacted]"))
         XCTAssertFalse(snapshot.lastMessage.contains("secret"), snapshot.lastMessage)
     }
 
@@ -294,10 +297,12 @@ final class AppPlayerTimelineTests: XCTestCase {
                 try await adapter.play([validFrame], timeline: timeline)
                 XCTFail("Expected scheduler failure")
             } catch let error as AppPlayerAdapterError {
-                XCTAssertEqual(
-                    error,
-                    .schedulingFailed("leaked [redacted]")
-                )
+                guard case .schedulingFailed(let message) = error else {
+                    return XCTFail("Expected schedulingFailed, got \(error)")
+                }
+                XCTAssertTrue(message.contains("https://example.test/live.m3u8"), message)
+                XCTAssertFalse(message.contains("user:pass"), message)
+                XCTAssertFalse(message.contains("token=secret"), message)
             }
 
             let snapshot = await timeline.snapshot()
@@ -306,7 +311,7 @@ final class AppPlayerTimelineTests: XCTestCase {
             }
             XCTAssertFalse(message.contains("token=secret"), message)
             XCTAssertFalse(snapshot.lastMessage.contains("user:pass"), snapshot.lastMessage)
-            XCTAssertTrue(snapshot.lastMessage.contains("[redacted]"), snapshot.lastMessage)
+            XCTAssertTrue(snapshot.lastMessage.contains("https://example.test/live.m3u8"), snapshot.lastMessage)
         #endif
     }
 

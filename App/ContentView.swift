@@ -8,9 +8,12 @@ struct ContentView: View {
     private let timelineStore: StreamAppTimelineStore?
     private let searchStore: StreamAppSearchStore?
     private let statusStore: AppStreamRuntimeStatusStore?
+    private let diagnosticsLog = AppRuntimeDiagnosticsLog()
     @State private var viewModel: StreamAppViewModel
     @State private var persistenceError: String?
     @State private var timelineActionMessage: String?
+    @State private var streamVolumes: [Int64: Double] = [:]
+    @State private var mutedStreamIDs: Set<Int64> = []
 
     init(preferences: SoundingAppPreferences? = nil) {
         let initial = Self.makeInitialState(preferences: preferences)
@@ -70,6 +73,11 @@ struct ContentView: View {
                     ForEach(viewModel.streams) { stream in
                         StreamRow(item: stream)
                             .tag(stream.id)
+                            .contextMenu {
+                                Button("Remove Stream", systemImage: "trash", role: .destructive) {
+                                    removeStream(stream.id)
+                                }
+                            }
                     }
                 }
             }
@@ -173,6 +181,14 @@ struct ContentView: View {
                 seekUnavailable: { seconds in
                     reportSeekUnavailable(seconds: seconds, selected: selected)
                 },
+                volume: Binding(
+                    get: { streamVolumes[selected.item.id] ?? 1.0 },
+                    set: { updateVolume(for: selected.item.id, volume: $0) }
+                ),
+                isMuted: Binding(
+                    get: { mutedStreamIDs.contains(selected.item.id) },
+                    set: { updateMuted(for: selected.item.id, isMuted: $0) }
+                ),
                 refreshTimeline: { refreshSelectedTimeline() },
                 searchDraft: Binding(
                     get: { viewModel.searchDraft },
@@ -205,7 +221,15 @@ struct ContentView: View {
         }
 
         do {
-            _ = try viewModel.addStream(using: registry)
+            let added = try viewModel.addStream(using: registry)
+            diagnosticsLog.recordEvent(
+                "ui.stream.added",
+                streamID: added.id,
+                streamName: added.name,
+                sourceDescription: added.sourceDescription,
+                phase: "ui.addStream",
+                fields: ["transport": added.transportLabel]
+            )
             persistenceError = nil
             timelineActionMessage = nil
             refreshRuntimeStatuses()
@@ -221,6 +245,11 @@ struct ContentView: View {
             return
         }
         Task {
+            diagnosticsLog.recordEvent(
+                "ui.start.clicked",
+                streamID: streamID,
+                phase: "ui.control"
+            )
             do {
                 try await runtime.start(streamID: streamID)
                 persistenceError = nil
@@ -232,17 +261,53 @@ struct ContentView: View {
 
     private func pauseRuntime(for streamID: Int64) {
         guard let runtime else { return }
-        Task { await runtime.pause(streamID: streamID) }
+        Task {
+            diagnosticsLog.recordEvent("ui.pause.clicked", streamID: streamID, phase: "ui.control")
+            await runtime.pause(streamID: streamID)
+        }
     }
 
     private func resumeRuntime(for streamID: Int64) {
         guard let runtime else { return }
-        Task { await runtime.resume(streamID: streamID) }
+        Task {
+            diagnosticsLog.recordEvent("ui.resume.clicked", streamID: streamID, phase: "ui.control")
+            await runtime.resume(streamID: streamID)
+        }
     }
 
     private func stopRuntime(for streamID: Int64) {
         guard let runtime else { return }
-        Task { await runtime.stop(streamID: streamID) }
+        Task {
+            diagnosticsLog.recordEvent("ui.stop.clicked", streamID: streamID, phase: "ui.control")
+            await runtime.stop(streamID: streamID)
+        }
+    }
+
+    private func removeStream(_ streamID: Int64) {
+        guard let registry else {
+            persistenceError = "Sounding database unavailable."
+            return
+        }
+        Task {
+            diagnosticsLog.recordEvent("ui.remove.clicked", streamID: streamID, phase: "ui.remove")
+            await runtime?.stop(streamID: streamID)
+            do {
+                _ = try registry.remove(id: streamID)
+                diagnosticsLog.recordEvent("ui.stream.removed", streamID: streamID, phase: "ui.remove")
+                if viewModel.selectedStreamID == streamID {
+                    viewModel.selectedStreamID = nil
+                }
+                try viewModel.reload(from: registry)
+                mutedStreamIDs.remove(streamID)
+                streamVolumes[streamID] = nil
+                persistenceError = nil
+                timelineActionMessage = "Removed stream."
+                refreshRuntimeStatuses()
+                refreshSelectedTimeline()
+            } catch {
+                persistenceError = IngestRedaction.redact(String(describing: error))
+            }
+        }
     }
 
     private func handleSystemSleepNotification() {
@@ -280,6 +345,33 @@ struct ContentView: View {
         Task { await runtime.seek(to: seconds) }
     }
 
+    private func updateVolume(for streamID: Int64, volume: Double) {
+        let clamped = min(max(volume, 0), 1)
+        streamVolumes[streamID] = clamped
+        diagnosticsLog.recordEvent(
+            "ui.volume.changed",
+            streamID: streamID,
+            phase: "ui.volume",
+            fields: ["volume": String(format: "%.3f", clamped)]
+        )
+        Task { await runtime?.setVolume(streamID: streamID, volume: clamped) }
+    }
+
+    private func updateMuted(for streamID: Int64, isMuted: Bool) {
+        if isMuted {
+            mutedStreamIDs.insert(streamID)
+        } else {
+            mutedStreamIDs.remove(streamID)
+        }
+        diagnosticsLog.recordEvent(
+            "ui.mute.changed",
+            streamID: streamID,
+            phase: "ui.volume",
+            fields: ["isMuted": String(isMuted)]
+        )
+        Task { await runtime?.setMuted(streamID: streamID, isMuted: isMuted) }
+    }
+
     private func reportSeekUnavailable(seconds: Double, selected: StreamAppSelectedStream) {
         timelineActionMessage =
             selected.bufferedSeekUnavailableMessage
@@ -293,6 +385,13 @@ struct ContentView: View {
     private func observeRuntime() async {
         guard let runtime else { return }
         for await event in await runtime.events() {
+            diagnosticsLog.recordEvent(
+                "ui.runtime.event.received",
+                streamID: event.streamID,
+                phase: event.phase.statusPhase.rawValue,
+                message: event.message,
+                fields: ["hasResult": String(event.result != nil)]
+            )
             viewModel.applyRuntimeEvent(event)
             refreshRuntimeStatus(streamID: event.streamID)
             if event.streamID == viewModel.selectedStreamID {
@@ -496,6 +595,9 @@ private struct StreamRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
+            Text("Control-click to remove")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
@@ -513,6 +615,8 @@ private struct StreamDetail: View {
     var scrubBackward: () -> Void
     var seekToSeconds: (Double) -> Void
     var seekUnavailable: (Double) -> Void
+    @Binding var volume: Double
+    @Binding var isMuted: Bool
     var refreshTimeline: () -> Void
     @Binding var searchDraft: StreamAppSearchDraft
     var runSearch: () -> Void
@@ -537,7 +641,9 @@ private struct StreamDetail: View {
                         startRuntime: startRuntime,
                         pauseRuntime: pauseRuntime,
                         resumeRuntime: resumeRuntime,
-                        stopRuntime: stopRuntime
+                        stopRuntime: stopRuntime,
+                        volume: $volume,
+                        isMuted: $isMuted
                     )
                     TimelineDiagnosticsCard(
                         selected: selected,
@@ -676,6 +782,8 @@ private struct PlayerCard: View {
     var pauseRuntime: () -> Void
     var resumeRuntime: () -> Void
     var stopRuntime: () -> Void
+    @Binding var volume: Double
+    @Binding var isMuted: Bool
 
     var body: some View {
         GroupBox("Player") {
@@ -696,6 +804,8 @@ private struct PlayerCard: View {
                 HStack(spacing: 12) {
                     Button("Start", systemImage: "play.fill", action: startRuntime)
                         .disabled(!selected.canStartRuntime)
+                    Button("Restart", systemImage: "arrow.clockwise", action: startRuntime)
+                        .disabled(!selected.canStopRuntime)
                     Button("Pause", systemImage: "pause.fill", action: pauseRuntime)
                         .disabled(!selected.canPauseRuntime)
                     Button("Resume", systemImage: "playpause.fill", action: resumeRuntime)
@@ -708,6 +818,28 @@ private struct PlayerCard: View {
                         .disabled(!selected.canSeekToLive)
                 }
                 .disabled(!selected.controlsEnabled)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label(isMuted ? "Muted" : "Volume", systemImage: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Text("\(Int((volume * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 10) {
+                        Toggle("Mute", isOn: $isMuted)
+                            .toggleStyle(.switch)
+                            .accessibilityLabel("Mute stream")
+                        Slider(value: $volume, in: 0...1)
+                            .disabled(isMuted)
+                            .accessibilityLabel("Stream volume")
+                            .accessibilityValue("\(Int((volume * 100).rounded())) percent")
+                    }
+                }
+                .padding(10)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(selected.bufferedRangeTitle)

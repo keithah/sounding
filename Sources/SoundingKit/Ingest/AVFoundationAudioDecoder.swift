@@ -30,9 +30,14 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         }
     }
 
+    private struct ResolvedHLSManifest: Sendable {
+        var text: String
+        var source: String
+    }
+
     private func decodeHLS(_ request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
-        let manifest = try await loadManifestText(from: request.source)
-        let segments = HLSManifestParser.parseMediaSegments(manifest)
+        let resolvedManifest = try await loadMediaManifest(from: request.source)
+        let segments = HLSManifestParser.parseMediaSegments(resolvedManifest.text)
         guard !segments.isEmpty else {
             throw AVFoundationAudioDecoderError.unsupportedMedia("HLS manifest has no media segments.")
         }
@@ -40,10 +45,10 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         var chunks: [DecodedAudioChunk] = []
         let limitedSegments = Array(segments.prefix(max(0, request.maxChunks ?? segments.count)))
         for (index, segment) in limitedSegments.enumerated() {
-            let markers = try markersForSegment(segment, source: request.source)
+            let markers = try markersForSegment(segment, source: resolvedManifest.source)
             let data: Data
             do {
-                data = try await segmentLoader.loadSegment(uri: segment.uri, relativeTo: request.source)
+                data = try await segmentLoader.loadSegment(uri: segment.uri, relativeTo: resolvedManifest.source)
             } catch {
                 throw AVFoundationAudioDecoderError.decodeFailed("HLS segment decode failed: \(sanitized(error)).")
             }
@@ -51,7 +56,15 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
             let start = Double(index) * chunkDurationSeconds
             let duration = Double(segment.duration ?? "") ?? chunkDurationSeconds
             let end = start + max(duration, 0.001)
-            let segmentDescription = resolvedSegmentDescription(segment.uri, relativeTo: request.source)
+            let segmentDescription = resolvedSegmentDescription(segment.uri, relativeTo: resolvedManifest.source)
+            let temporarySegmentURL = try writeTemporarySegment(data, sourceDescription: segmentDescription)
+            defer { try? FileManager.default.removeItem(at: temporarySegmentURL) }
+            let decoded: (audio: Data, format: DecodedAudioFormat)
+            do {
+                decoded = try decodeLinearPCM(from: temporarySegmentURL, fallbackDuration: end - start)
+            } catch {
+                decoded = (data, .containerBytes)
+            }
             chunks.append(DecodedAudioChunk(
                 sequence: index,
                 segmentURI: segmentDescription,
@@ -60,8 +73,9 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
                     segmentIdentity: segmentDescription,
                     manifestPosition: index
                 ),
-                audio: data,
-                byteCount: data.count,
+                audio: decoded.audio,
+                audioFormat: decoded.format,
+                byteCount: decoded.audio.count,
                 startSeconds: start,
                 endSeconds: end,
                 startedAt: now(),
@@ -74,7 +88,22 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
 
     private func decodeAsset(_ request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
 #if canImport(AVFoundation)
-        let url = try mediaURL(from: request.source)
+        let originalURL = try mediaURL(from: request.source)
+        let url: URL
+        var temporaryURL: URL?
+        if originalURL.isFileURL {
+            url = originalURL
+        } else {
+            let downloaded = try await downloadRemoteAudioSample(from: originalURL)
+            url = downloaded
+            temporaryURL = downloaded
+        }
+        defer {
+            if let temporaryURL {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
+        }
+
         let asset = AVURLAsset(url: url)
         let tracks: [AVAssetTrack]
         do {
@@ -86,22 +115,11 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
             throw AVFoundationAudioDecoderError.unsupportedMedia("Audio source has no audio tracks.")
         }
 
-        let duration: Double
-        do {
-            duration = try await asset.load(.duration).seconds
-        } catch {
-            throw AVFoundationAudioDecoderError.decodeFailed("Audio duration decode failed: \(sanitized(error)).")
-        }
-        guard duration.isFinite, duration > 0 else {
-            throw AVFoundationAudioDecoderError.unsupportedMedia("Audio source has unsupported duration.")
-        }
+        let loadedDuration = (try? await asset.load(.duration).seconds) ?? 0
+        let duration = loadedDuration.isFinite && loadedDuration > 0 ? loadedDuration : max(request.durationSeconds ?? chunkDurationSeconds, chunkDurationSeconds)
 
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw AVFoundationAudioDecoderError.sourceOpenFailed("Audio source read failed: \(sanitized(error)).")
-        }
+        let decoded = try decodeLinearPCM(from: url, fallbackDuration: duration)
+        let data = decoded.audio
 
         let effectiveDuration = min(duration, request.durationSeconds ?? duration)
         let chunkCount = max(1, Int(ceil(effectiveDuration / chunkDurationSeconds)))
@@ -115,6 +133,7 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
                 sequence: index,
                 segmentURI: IngestRedaction.sourceDescription(request.source),
                 audio: data,
+                audioFormat: decoded.format,
                 byteCount: data.count,
                 startSeconds: start,
                 endSeconds: max(end, start),
@@ -128,13 +147,61 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
 #endif
     }
 
+    private func loadMediaManifest(from source: String) async throws -> ResolvedHLSManifest {
+        try await loadMediaManifest(from: source, visited: [])
+    }
+
+    private func loadMediaManifest(from source: String, visited: Set<String>) async throws -> ResolvedHLSManifest {
+        guard visited.count < 4 else {
+            throw AVFoundationAudioDecoderError.unsupportedMedia("HLS manifest resolution exceeded variant playlist depth.")
+        }
+        let manifest = try await loadManifestText(from: source)
+        let variants = HLSManifestParser.parseVariantPlaylists(manifest)
+        guard let selected = selectVariant(from: variants) else {
+            return ResolvedHLSManifest(text: manifest, source: source)
+        }
+        let nextSource = try resolveHLSURI(selected.uri, relativeTo: source)
+        guard !visited.contains(nextSource) else {
+            throw AVFoundationAudioDecoderError.unsupportedMedia("HLS manifest resolution encountered a variant playlist loop.")
+        }
+        var nextVisited = visited
+        nextVisited.insert(source)
+        return try await loadMediaManifest(from: nextSource, visited: nextVisited)
+    }
+
+    private func selectVariant(from variants: [HLSManifestVariantPlaylist]) -> HLSManifestVariantPlaylist? {
+        variants.sorted { lhs, rhs in
+            (lhs.bandwidth ?? Int.max) < (rhs.bandwidth ?? Int.max)
+        }.first
+    }
+
+    private func resolveHLSURI(_ uri: String, relativeTo source: String) throws -> String {
+        if let absolute = URL(string: uri), absolute.scheme != nil {
+            return absolute.absoluteString
+        }
+        if let base = URL(string: source), base.scheme != nil,
+           let resolved = URL(string: uri, relativeTo: base.deletingLastPathComponent())?.absoluteURL {
+            return resolved.absoluteString
+        }
+        let base = URL(fileURLWithPath: source).deletingLastPathComponent()
+        let pathOnly = uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first
+            .map(String.init) ?? uri
+        return base.appendingPathComponent(pathOnly).path
+    }
+
     private func loadManifestText(from source: String) async throws -> String {
         let data: Data
         do {
             if let url = URL(string: source), url.scheme == "http" || url.scheme == "https" {
                 let (remoteData, response) = try await HLSURLSessionDataLoader.data(from: url, using: .shared)
-                guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-                    throw AVFoundationAudioDecoderError.sourceOpenFailed("HLS manifest open failed: non-success HTTP response.")
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw AVFoundationAudioDecoderError.sourceOpenFailed("HLS manifest open failed: missing HTTP response.")
+                }
+                guard (200..<300).contains(httpResponse.statusCode) else {
+                    let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "unknown"
+                    throw AVFoundationAudioDecoderError.sourceOpenFailed(
+                        "HLS manifest open failed: HTTP \(httpResponse.statusCode), content-type \(contentType)."
+                    )
                 }
                 data = remoteData
             } else if let url = URL(string: source), url.scheme != nil {
@@ -184,6 +251,54 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         return URL(fileURLWithPath: source)
     }
 
+#if canImport(FoundationNetworking)
+#endif
+
+    private func downloadRemoteAudioSample(from url: URL) async throws -> URL {
+        var request = URLRequest(url: url)
+        request.setValue("bytes=0-2097151", forHTTPHeaderField: "Range")
+        request.timeoutInterval = 12
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (response, data) = try await readRemoteAudioPrefix(for: request, byteLimit: 2_097_152)
+        } catch {
+            throw AVFoundationAudioDecoderError.sourceOpenFailed("Audio source open failed: \(sanitized(error)).")
+        }
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            throw AVFoundationAudioDecoderError.sourceOpenFailed("Audio source open failed: non-success HTTP response.")
+        }
+        guard !data.isEmpty else {
+            throw AVFoundationAudioDecoderError.unsupportedMedia("Audio source produced no bytes.")
+        }
+
+        let fileExtension = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sounding-remote-audio-\(UUID().uuidString)")
+            .appendingPathExtension(fileExtension)
+        do {
+            try data.write(to: temporaryURL, options: .atomic)
+            return temporaryURL
+        } catch {
+            throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: temporary audio staging failed.")
+        }
+    }
+
+    private func readRemoteAudioPrefix(for request: URLRequest, byteLimit: Int) async throws -> (URLResponse, Data) {
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        var data = Data()
+        data.reserveCapacity(min(byteLimit, 256 * 1024))
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count >= byteLimit || data.count >= 256 * 1024 {
+                break
+            }
+        }
+        return (response, data)
+    }
+
     private func resolvedSegmentDescription(_ uri: String, relativeTo manifestSource: String) -> String {
         if let absoluteURL = URL(string: uri), absoluteURL.scheme != nil {
             return IngestRedaction.sourceDescription(absoluteURL.absoluteString)
@@ -195,6 +310,85 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         let manifestURL = URL(fileURLWithPath: manifestSource)
         return IngestRedaction.sourceDescription(manifestURL.deletingLastPathComponent().appendingPathComponent(uri).path)
     }
+
+    private func writeTemporarySegment(_ data: Data, sourceDescription: String) throws -> URL {
+        let extensionHint = URL(string: sourceDescription)?.pathExtension
+        let fileExtension = (extensionHint?.isEmpty == false ? extensionHint : "aac") ?? "aac"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sounding-segment-\(UUID().uuidString)")
+            .appendingPathExtension(fileExtension)
+        do {
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            throw AVFoundationAudioDecoderError.decodeFailed("HLS segment decode failed: temporary segment staging failed.")
+        }
+    }
+
+#if canImport(AVFoundation)
+    private func decodeLinearPCM(from url: URL, fallbackDuration: Double) throws -> (audio: Data, format: DecodedAudioFormat) {
+        let asset = AVURLAsset(url: url)
+        let reader: AVAssetReader
+        do {
+            reader = try AVAssetReader(asset: asset)
+        } catch {
+            throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: \(sanitized(error)).")
+        }
+        guard let track = asset.tracks(withMediaType: .audio).first else {
+            throw AVFoundationAudioDecoderError.unsupportedMedia("Audio source has no audio tracks.")
+        }
+
+        let sampleRate = 44_100.0
+        let channelCount = 2
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channelCount,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else {
+            throw AVFoundationAudioDecoderError.unsupportedMedia("Audio source cannot be converted to PCM.")
+        }
+        reader.add(output)
+        guard reader.startReading() else {
+            throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: reader could not start.")
+        }
+
+        var pcm = Data()
+        while let sampleBuffer = output.copyNextSampleBuffer() {
+            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+            let length = CMBlockBufferGetDataLength(blockBuffer)
+            guard length > 0 else { continue }
+            var chunk = Data(count: length)
+            let status = chunk.withUnsafeMutableBytes { destination -> OSStatus in
+                guard let baseAddress = destination.baseAddress else { return kCMBlockBufferBadPointerParameterErr }
+                return CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: baseAddress)
+            }
+            guard status == kCMBlockBufferNoErr else {
+                throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: PCM copy failed.")
+            }
+            pcm.append(chunk)
+        }
+
+        guard reader.status == .completed else {
+            let message = reader.error.map { sanitized($0) } ?? "reader did not complete"
+            throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: \(message).")
+        }
+        guard !pcm.isEmpty else {
+            throw AVFoundationAudioDecoderError.unsupportedMedia("Audio source produced no PCM samples.")
+        }
+
+        return (
+            pcm,
+            .linearPCM(sampleRate: sampleRate, channelCount: channelCount, bitDepth: 16)
+        )
+    }
+#endif
 
     private func sanitized(_ error: Error) -> String {
         IngestRedaction.redact(String(describing: error))

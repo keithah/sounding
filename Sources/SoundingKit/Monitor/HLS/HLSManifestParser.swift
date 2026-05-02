@@ -24,7 +24,45 @@ public struct HLSManifestMediaSegment: Equatable, Sendable {
     }
 }
 
+public struct HLSManifestVariantPlaylist: Equatable, Sendable {
+    public let uri: String
+    public let bandwidth: Int?
+
+    public init(uri: String, bandwidth: Int? = nil) {
+        self.uri = uri
+        self.bandwidth = bandwidth
+    }
+}
+
 public enum HLSManifestParser {
+    public static func parseVariantPlaylists(_ manifest: String) -> [HLSManifestVariantPlaylist] {
+        var variants = [HLSManifestVariantPlaylist]()
+        var pendingBandwidth: Int?
+        var expectsVariantURI = false
+
+        for rawLine in manifest.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            if line.hasPrefix("#EXT-X-STREAM-INF:") {
+                let (_, rawBody) = splitTagNameAndBody(line)
+                pendingBandwidth = rawBody.flatMap { parseAttributes($0)["BANDWIDTH"] }.flatMap(Int.init)
+                expectsVariantURI = true
+                continue
+            }
+
+            if line.hasPrefix("#") { continue }
+
+            if expectsVariantURI {
+                variants.append(HLSManifestVariantPlaylist(uri: line, bandwidth: pendingBandwidth))
+                pendingBandwidth = nil
+                expectsVariantURI = false
+            }
+        }
+
+        return variants
+    }
+
     public static func parseMediaSegments(_ manifest: String) -> [HLSManifestMediaSegment] {
         var mediaSequence = 0
         var pendingTags = [HLSManifestSCTE35Tag]()

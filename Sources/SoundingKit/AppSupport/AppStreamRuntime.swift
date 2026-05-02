@@ -59,6 +59,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     private let player: (any AppPCMPlaybackAdapting)?
     private let timeline: AppPlayerTimelineClock
     private let rollingBuffer: RollingPCMBuffer?
+    private let diagnosticsLog: AppRuntimeDiagnosticsLog
+    private let keepPlaybackRunningAfterIngestCompletes: Bool
 
     public init(
         database: SoundingDatabase,
@@ -70,6 +72,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         player: (any AppPCMPlaybackAdapting)? = nil,
         timeline: AppPlayerTimelineClock = AppPlayerTimelineClock(),
         rollingBuffer: RollingPCMBuffer? = nil,
+        diagnosticsLog: AppRuntimeDiagnosticsLog = AppRuntimeDiagnosticsLog(),
+        keepPlaybackRunningAfterIngestCompletes: Bool = false,
         now: @escaping StreamIngestPipeline.TimestampProvider = {
             ISO8601DateFormatter().string(from: Date())
         }
@@ -83,10 +87,25 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         self.player = player
         self.timeline = timeline
         self.rollingBuffer = rollingBuffer
+        self.diagnosticsLog = diagnosticsLog
+        self.keepPlaybackRunningAfterIngestCompletes = keepPlaybackRunningAfterIngestCompletes
         self.now = now
     }
 
     public func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        diagnosticsLog.recordEvent(
+            "runner.run.started",
+            streamID: request.streamID,
+            streamName: request.name,
+            source: request.source,
+            sourceDescription: request.sourceDescription,
+            phase: "runner.start",
+            fields: [
+                "streamType": request.streamType.rawValue,
+                "hasPlayer": String(player != nil),
+                "keepPlaybackRunningAfterIngestCompletes": String(keepPlaybackRunningAfterIngestCompletes),
+            ]
+        )
         let runtimeDecoder: any AudioDecoding
         if let player {
             if let rollingBuffer {
@@ -97,6 +116,14 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 streamID: request.streamID,
                 sourceDescription: request.sourceDescription,
                 timeline: timeline
+            )
+            diagnosticsLog.recordEvent(
+                "runner.playback.prepared",
+                streamID: request.streamID,
+                streamName: request.name,
+                source: request.source,
+                sourceDescription: request.sourceDescription,
+                phase: "runner.playback"
             )
             runtimeDecoder = SinglePathPCMDecoder(
                 streamID: request.streamID,
@@ -123,8 +150,41 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 source: request.source,
                 streamType: request.streamType
             )
+            diagnosticsLog.recordEvent(
+                "runner.ingest.completed",
+                streamID: request.streamID,
+                streamName: request.name,
+                source: request.source,
+                sourceDescription: request.sourceDescription,
+                phase: "runner.ingest",
+                fields: [
+                    "runID": String(result.runID),
+                    "processedChunks": String(result.processedChunks),
+                    "diagnosticCount": String(result.diagnostics.count),
+                ]
+            )
             if let player {
-                await player.stop(timeline: timeline)
+                if keepPlaybackRunningAfterIngestCompletes {
+                    diagnosticsLog.recordEvent(
+                        "runner.playback.keepalive.started",
+                        streamID: request.streamID,
+                        streamName: request.name,
+                        source: request.source,
+                        sourceDescription: request.sourceDescription,
+                        phase: "runner.keepalive"
+                    )
+                    try await waitUntilCancelled()
+                } else {
+                    diagnosticsLog.recordEvent(
+                        "runner.playback.auto-stop",
+                        streamID: request.streamID,
+                        streamName: request.name,
+                        source: request.source,
+                        sourceDescription: request.sourceDescription,
+                        phase: "runner.stop"
+                    )
+                    await player.stop(timeline: timeline)
+                }
             }
             let playerTimeline = await timeline.snapshot()
             if let rollingBuffer {
@@ -137,7 +197,31 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 diagnosticCount: result.diagnostics.count,
                 playerTimeline: playerTimeline
             )
+        } catch is CancellationError {
+            diagnosticsLog.recordEvent(
+                "runner.cancelled",
+                streamID: request.streamID,
+                streamName: request.name,
+                source: request.source,
+                sourceDescription: request.sourceDescription,
+                phase: "runner.cancel"
+            )
+            if let player {
+                await player.stop(timeline: timeline)
+            }
+            if let rollingBuffer {
+                await timeline.updateRollingBuffer(await rollingBuffer.cleanup())
+            }
+            throw CancellationError()
         } catch {
+            diagnosticsLog.recordFailure(
+                streamID: request.streamID,
+                name: request.name,
+                source: request.source,
+                sourceDescription: request.sourceDescription,
+                phase: diagnosticPhase(for: error),
+                error: error
+            )
             if let player {
                 await player.stop(timeline: timeline)
                 await timeline.updatePlayerState(
@@ -149,6 +233,23 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
             }
             throw error
         }
+    }
+
+    private func waitUntilCancelled() async throws {
+        while !Task.isCancelled {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        throw CancellationError()
+    }
+
+    private func diagnosticPhase(for error: any Error) -> String {
+        if let diagnostic = error as? IngestDiagnosticError {
+            return diagnostic.ingestDiagnosticPhase.rawValue
+        }
+        if error is AppPlayerAdapterError {
+            return "playback"
+        }
+        return "runtime"
     }
 }
 
@@ -391,6 +492,8 @@ public protocol AppStreamRuntimeControlling: Sendable {
     func stopAll() async
     func suspendForSystemSleep(reason: String) async
     func recoverFromSystemWake(reason: String) async
+    func setVolume(streamID: Int64, volume: Double) async
+    func setMuted(streamID: Int64, isMuted: Bool) async
     func seek(to seconds: Double) async
     func seekToLive() async
     func scrubBackward(seconds: Double) async
@@ -412,6 +515,9 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     private let playbackTimeline: AppPlayerTimelineClock?
     private let rollingBuffer: RollingPCMBuffer?
     private let statusStore: AppStreamRuntimeStatusStore?
+    private let volumeStore: AppPlaybackVolumeStore?
+    private let playbackController: (any AppPCMPlaybackAdapting)?
+    private let diagnosticsLog: AppRuntimeDiagnosticsLog
     private let now: @Sendable () -> Date
     private let timestampFormatter: ISO8601DateFormatter
 
@@ -427,8 +533,11 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         ingester: any AppStreamRuntimeIngesting,
         retryPolicy: AppStreamRuntimeRetryPolicy = AppStreamRuntimeRetryPolicy(),
         statusStore: AppStreamRuntimeStatusStore? = nil,
+        volumeStore: AppPlaybackVolumeStore? = nil,
         playbackTimeline: AppPlayerTimelineClock? = nil,
         rollingBuffer: RollingPCMBuffer? = nil,
+        playbackController: (any AppPCMPlaybackAdapting)? = nil,
+        diagnosticsLog: AppRuntimeDiagnosticsLog = AppRuntimeDiagnosticsLog(),
         now: @escaping @Sendable () -> Date = { Date() },
         retrySleep: @escaping @Sendable (Int) async throws -> Void = { seconds in
             try await Task.sleep(nanoseconds: UInt64(max(0, seconds)) * 1_000_000_000)
@@ -438,8 +547,11 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         self.ingester = ingester
         self.retryPolicy = retryPolicy
         self.statusStore = statusStore
+        self.volumeStore = volumeStore
         self.playbackTimeline = playbackTimeline
         self.rollingBuffer = rollingBuffer
+        self.playbackController = playbackController
+        self.diagnosticsLog = diagnosticsLog
         self.now = now
         self.retrySleep = retrySleep
         self.timestampFormatter = ISO8601DateFormatter()
@@ -460,6 +572,12 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     }
 
     public func start(streamID: Int64) async throws {
+        diagnosticsLog.recordEvent(
+            "runtime.start.requested",
+            streamID: streamID,
+            phase: "runtime.start",
+            fields: ["existingRunCount": String(streamRuns.count)]
+        )
         suspendedStreams[streamID] = nil
         await stop(streamID: streamID)
         try beginRun(streamID: streamID, connectionMessagePrefix: "Connecting")
@@ -507,6 +625,19 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             streamType: streamType
         )
         let token = UUID()
+        diagnosticsLog.recordEvent(
+            "runtime.run.created",
+            streamID: streamID,
+            streamName: reconnect.name,
+            source: reconnect.source,
+            sourceDescription: reconnect.sourceDescription,
+            phase: "runtime.beginRun",
+            fields: [
+                "streamType": streamType.rawValue,
+                "token": token.uuidString,
+                "connectionMessagePrefix": connectionMessagePrefix,
+            ]
+        )
         currentStreamID = streamID
         streamRuns[streamID] = StreamRunState(task: nil, token: token)
         publish(
@@ -636,6 +767,14 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
 
     public func pause(streamID: Int64) async {
         guard streamRuns[streamID] != nil else { return }
+        diagnosticsLog.recordEvent(
+            "runtime.pause.requested",
+            streamID: streamID,
+            phase: "runtime.pause"
+        )
+        if let playbackController, let playbackTimeline {
+            await playbackController.pause(timeline: playbackTimeline)
+        }
         publish(
             AppStreamRuntimeEvent(
                 streamID: streamID,
@@ -653,6 +792,14 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
 
     public func resume(streamID: Int64) async {
         guard streamRuns[streamID] != nil else { return }
+        diagnosticsLog.recordEvent(
+            "runtime.resume.requested",
+            streamID: streamID,
+            phase: "runtime.resume"
+        )
+        if let playbackController, let playbackTimeline {
+            await playbackController.resume(timeline: playbackTimeline)
+        }
         publish(
             AppStreamRuntimeEvent(
                 streamID: streamID,
@@ -669,8 +816,17 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     }
 
     public func stop(streamID: Int64) async {
+        diagnosticsLog.recordEvent(
+            "runtime.stop.requested",
+            streamID: streamID,
+            phase: "runtime.stop",
+            fields: ["hadRun": String(streamRuns[streamID] != nil)]
+        )
         let state = streamRuns.removeValue(forKey: streamID)
         state?.task?.cancel()
+        if let playbackController, let playbackTimeline {
+            await playbackController.stop(timeline: playbackTimeline)
+        }
         if currentStreamID == streamID {
             currentStreamID = streamRuns.keys.sorted().first
         }
@@ -764,6 +920,51 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         }
     }
 
+    public func setVolume(streamID: Int64, volume: Double) async {
+        diagnosticsLog.recordEvent(
+            "runtime.volume.requested",
+            streamID: streamID,
+            phase: "runtime.volume",
+            fields: ["volume": String(format: "%.3f", min(max(volume, 0), 1))]
+        )
+        await volumeStore?.setVolume(streamID: streamID, volume: volume)
+        let percent = Int((min(max(volume, 0), 1) * 100).rounded())
+        if let existing = latestEvents[streamID] {
+            publish(
+                AppStreamRuntimeEvent(
+                    streamID: streamID,
+                    phase: existing.phase,
+                    message: "Volume for stream \(streamID) set to \(percent)%.",
+                    result: existing.result,
+                    lifecycleEvidence: existing.lifecycleEvidence
+                ),
+                attempt: latestAttempt(streamID: streamID)
+            )
+        }
+    }
+
+    public func setMuted(streamID: Int64, isMuted: Bool) async {
+        diagnosticsLog.recordEvent(
+            "runtime.mute.requested",
+            streamID: streamID,
+            phase: "runtime.volume",
+            fields: ["isMuted": String(isMuted)]
+        )
+        await volumeStore?.setMuted(streamID: streamID, isMuted: isMuted)
+        if let existing = latestEvents[streamID] {
+            publish(
+                AppStreamRuntimeEvent(
+                    streamID: streamID,
+                    phase: existing.phase,
+                    message: isMuted ? "Stream \(streamID) muted." : "Stream \(streamID) unmuted.",
+                    result: existing.result,
+                    lifecycleEvidence: existing.lifecycleEvidence
+                ),
+                attempt: latestAttempt(streamID: streamID)
+            )
+        }
+    }
+
     public func seek(to seconds: Double) async {
         guard let streamID = currentStreamID, let rollingBuffer, let playbackTimeline else {
             return
@@ -833,6 +1034,18 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         nextRetrySeconds: Int? = nil,
         failureMessage: String? = nil
     ) {
+        diagnosticsLog.recordEvent(
+            "runtime.event.published",
+            streamID: event.streamID,
+            phase: event.phase.statusPhase.rawValue,
+            message: event.message,
+            fields: [
+                "attempt": String(attempt),
+                "nextRetrySeconds": nextRetrySeconds.map(String.init) ?? "nil",
+                "hasFailureMessage": String(failureMessage != nil),
+                "hasResult": String(event.result != nil),
+            ]
+        )
         latestEvents[event.streamID] = event
         latestEvent = event
         persistStatus(

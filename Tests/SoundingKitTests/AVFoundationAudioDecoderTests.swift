@@ -168,6 +168,44 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         XCTAssertEqual(chunks, [])
     }
 
+    func testHLSMasterManifestFollowsLowestBandwidthVariantAndPreservesRequiredQuery() async throws {
+        let masterURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS=\"mp4a.40.2\"
+                high/manifest.m3u8?suid=abc&playlist-id=high
+                #EXT-X-STREAM-INF:BANDWIDTH=165000,CODECS=\"mp4a.40.2\"
+                low/manifest.m3u8?suid=abc&playlist-id=low
+                """
+        )
+        let lowDirectory = masterURL.deletingLastPathComponent().appendingPathComponent("low", isDirectory: true)
+        try FileManager.default.createDirectory(at: lowDirectory, withIntermediateDirectories: true)
+        let variantURL = lowDirectory.appendingPathComponent("manifest.m3u8")
+        try """
+            #EXTM3U
+            #EXT-X-MEDIA-SEQUENCE:42
+            #EXTINF:6.0,
+            segment42.aac?session=kept
+            """.data(using: .utf8)!.write(to: variantURL)
+        defer { try? FileManager.default.removeItem(at: masterURL.deletingLastPathComponent()) }
+
+        let loader = RecordingSegmentLoader(payload: Data([0x01, 0x02, 0x03]))
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: loader,
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(source: masterURL.path, streamType: .hls, maxChunks: 1))
+
+        XCTAssertEqual(chunks.map(\.sequence), [0])
+        XCTAssertEqual(chunks.first?.hlsIdentity?.mediaSequence, 42)
+        let requested = await loader.requests()
+        XCTAssertEqual(requested.map(\.uri), ["segment42.aac?session=kept"])
+        XCTAssertEqual(requested.map(\.relativeTo), [variantURL.path])
+    }
+
     private func temporaryManifestURL(contents: String) -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "sounding-hls-\(UUID().uuidString)", isDirectory: true)
@@ -178,6 +216,27 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         try! contents.data(using: .utf8)!.write(to: manifest)
         return manifest
     }
+}
+
+private actor RecordingSegmentLoader: HLSSegmentLoading {
+    struct Request: Equatable {
+        var uri: String
+        var relativeTo: String
+    }
+
+    var payload: Data
+    private var recordedRequests: [Request] = []
+
+    init(payload: Data) {
+        self.payload = payload
+    }
+
+    func loadSegment(uri: String, relativeTo manifestSource: String) async throws -> Data {
+        recordedRequests.append(Request(uri: uri, relativeTo: manifestSource))
+        return payload
+    }
+
+    func requests() -> [Request] { recordedRequests }
 }
 
 private struct FailingSegmentLoader: HLSSegmentLoading {

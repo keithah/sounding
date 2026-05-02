@@ -57,10 +57,14 @@ final class AppStreamRuntimeTests: XCTestCase {
             source: "http://user:pass@example.test/live?token=secret"
         )
         let gate = RuntimeGate()
+        let player = RecordingRuntimePlaybackAdapter()
+        let timeline = AppPlayerTimelineClock()
         let runtime = AppStreamRuntimeService(
             registry: registry,
             ingester: BlockingAppRuntimeIngester(gate: gate),
-            retryPolicy: .noRetry
+            retryPolicy: .noRetry,
+            playbackTimeline: timeline,
+            playbackController: player
         )
         let events = await runtime.events()
         var iterator = events.makeAsyncIterator()
@@ -80,6 +84,8 @@ final class AppStreamRuntimeTests: XCTestCase {
         await runtime.stop()
         let stopped = try await nextEvent(from: &iterator)
         XCTAssertEqual(stopped.phase, .stopped)
+        let playbackActions = await player.actions()
+        XCTAssertEqual(playbackActions, ["stop", "pause", "resume", "stop"])
 
         await gate.release()
     }
@@ -931,18 +937,20 @@ final class AppStreamRuntimeTests: XCTestCase {
         )
         let recorder = RuntimeFactoryRecorder()
         let factory = SoundingAppRuntimeFactory(
-            ingesterFactory: { _, configuration, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             },
-            runtimeFactory: { registry, ingester, timeline, rollingBuffer, _ in
+            runtimeFactory: { registry, ingester, timeline, rollingBuffer, _, volumeStore, player in
                 recorder.recordRuntimeConstructed()
                 return AppStreamRuntimeService(
                     registry: registry,
                     ingester: ingester,
                     retryPolicy: .noRetry,
+                    volumeStore: volumeStore,
                     playbackTimeline: timeline,
-                    rollingBuffer: rollingBuffer
+                    rollingBuffer: rollingBuffer,
+                    playbackController: player
                 )
             }
         )
@@ -978,7 +986,7 @@ final class AppStreamRuntimeTests: XCTestCase {
                     message: "open failed at \(rawPath) for https://user:pass@example.test/db?token=secret#frag"
                 )
             },
-            ingesterFactory: { _, configuration, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             }
@@ -1011,7 +1019,7 @@ final class AppStreamRuntimeTests: XCTestCase {
                 recorder.recordDatabaseOpen()
                 return try SoundingDatabase(fileURL: url)
             },
-            ingesterFactory: { _, configuration, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             }
@@ -1042,7 +1050,7 @@ final class AppStreamRuntimeTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let rawPath = directory.appendingPathComponent("cache/private-model").path
         let factory = SoundingAppRuntimeFactory(
-            ingesterFactory: { _, _, _, _ in
+            ingesterFactory: { _, _, _, _, _, _ in
                 throw ModelCacheError.setupFailed(
                     provider: "whisperkit",
                     model: "tiny",
@@ -1075,7 +1083,7 @@ final class AppStreamRuntimeTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let recorder = RuntimeFactoryRecorder()
         let factory = SoundingAppRuntimeFactory(
-            ingesterFactory: { _, configuration, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             }
@@ -1190,6 +1198,29 @@ private struct BlockingAppRuntimeIngester: AppStreamRuntimeIngesting {
         await gate.wait()
         try Task.checkCancellation()
         return AppStreamRuntimeResult(streamID: request.streamID)
+    }
+}
+
+private actor RecordingRuntimePlaybackAdapter: AppPCMPlaybackAdapting {
+    private var recordedActions: [String] = []
+
+    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock) async throws {}
+    func play(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws {}
+
+    func pause(timeline: AppPlayerTimelineClock) async {
+        recordedActions.append("pause")
+    }
+
+    func resume(timeline: AppPlayerTimelineClock) async {
+        recordedActions.append("resume")
+    }
+
+    func stop(timeline: AppPlayerTimelineClock) async {
+        recordedActions.append("stop")
+    }
+
+    func actions() -> [String] {
+        recordedActions
     }
 }
 

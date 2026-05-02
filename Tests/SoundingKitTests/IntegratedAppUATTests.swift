@@ -20,7 +20,7 @@ final class IntegratedAppUATTests: XCTestCase {
                 XCTAssertEqual(url, temporary.fileURL)
                 return temporary.database
             },
-            ingesterFactory: { database, configuration, timeline, rollingBuffer in
+            ingesterFactory: { database, configuration, timeline, rollingBuffer, _, _ in
                 awaitOrRecord(configuration.issues, recorder: recorder)
                 return IntegratedUATIngester(
                     database: database,
@@ -30,14 +30,16 @@ final class IntegratedAppUATTests: XCTestCase {
                     recorder: recorder
                 )
             },
-            runtimeFactory: { registry, ingester, timeline, rollingBuffer, statusStore in
+            runtimeFactory: { registry, ingester, timeline, rollingBuffer, statusStore, volumeStore, player in
                 AppStreamRuntimeService(
                     registry: registry,
                     ingester: ingester,
                     retryPolicy: .noRetry,
                     statusStore: statusStore,
+                    volumeStore: volumeStore,
                     playbackTimeline: timeline,
-                    rollingBuffer: rollingBuffer
+                    rollingBuffer: rollingBuffer,
+                    playbackController: player
                 )
             }
         )

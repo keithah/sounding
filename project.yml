@@ -24,9 +24,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.sounding.Sounding
         PRODUCT_NAME: Sounding
         SWIFT_VERSION: "5.9"
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Sounding
-        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: App/Info.plist
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
         ENABLE_HARDENED_RUNTIME: YES

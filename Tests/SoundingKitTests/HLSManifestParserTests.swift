@@ -121,6 +121,23 @@ final class HLSManifestParserTests: XCTestCase {
         XCTAssertEqual(tag.sanitizedTagIdentity, "#EXT-X-CUE-IN")
     }
 
+    func testParsesVariantPlaylistsFromMasterManifest() {
+        let manifest = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=165000,CODECS=\"mp4a.40.2\"
+            low/manifest.m3u8?suid=abc&playlist-id=low
+            #EXT-X-STREAM-INF:BANDWIDTH=320000,CODECS=\"mp4a.40.2\"
+            high/manifest.m3u8?suid=abc&playlist-id=high
+            """
+
+        let variants = HLSManifestParser.parseVariantPlaylists(manifest)
+
+        XCTAssertEqual(variants, [
+            HLSManifestVariantPlaylist(uri: "low/manifest.m3u8?suid=abc&playlist-id=low", bandwidth: 165000),
+            HLSManifestVariantPlaylist(uri: "high/manifest.m3u8?suid=abc&playlist-id=high", bandwidth: 320000),
+        ])
+    }
+
     func testIgnoresUnsupportedAndEmptyMarkerLines() {
         XCTAssertNil(HLSManifestParser.parseTagLine(""))
         XCTAssertNil(HLSManifestParser.parseTagLine("#EXTINF:6.0,"))

@@ -39,12 +39,71 @@ public struct HLSDecodedAudioChunkIdentity: Equatable, Sendable {
     }
 }
 
+public enum DecodedAudioPayloadKind: String, Equatable, Sendable {
+    case unknown
+    case linearPCM
+    case containerBytes
+}
+
+/// Format metadata for decoded audio bytes. This lives at the ingest boundary so app playback
+/// can tell truly decoded PCM from validated container/segment bytes without guessing.
+public struct DecodedAudioFormat: Equatable, Sendable {
+    public var sampleRate: Double?
+    public var channelCount: Int?
+    public var bitDepth: Int?
+    public var payloadKind: DecodedAudioPayloadKind
+    public var isFloat: Bool
+    public var isInterleaved: Bool
+    public var isBigEndian: Bool
+
+    public init(
+        sampleRate: Double? = nil,
+        channelCount: Int? = nil,
+        bitDepth: Int? = nil,
+        payloadKind: DecodedAudioPayloadKind = .unknown,
+        isFloat: Bool = false,
+        isInterleaved: Bool = true,
+        isBigEndian: Bool = false
+    ) {
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+        self.bitDepth = bitDepth
+        self.payloadKind = payloadKind
+        self.isFloat = isFloat
+        self.isInterleaved = isInterleaved
+        self.isBigEndian = isBigEndian
+    }
+
+    public static let unknown = DecodedAudioFormat()
+    public static let containerBytes = DecodedAudioFormat(payloadKind: .containerBytes)
+
+    public static func linearPCM(
+        sampleRate: Double,
+        channelCount: Int,
+        bitDepth: Int = 16,
+        isFloat: Bool = false,
+        isInterleaved: Bool = true,
+        isBigEndian: Bool = false
+    ) -> DecodedAudioFormat {
+        DecodedAudioFormat(
+            sampleRate: sampleRate,
+            channelCount: channelCount,
+            bitDepth: bitDepth,
+            payloadKind: .linearPCM,
+            isFloat: isFloat,
+            isInterleaved: isInterleaved,
+            isBigEndian: isBigEndian
+        )
+    }
+}
+
 /// One decoded audio unit ready for transcription, diarization, and marker persistence.
 public struct DecodedAudioChunk: Equatable, Sendable {
     public var sequence: Int
     public var segmentURI: String?
     public var hlsIdentity: HLSDecodedAudioChunkIdentity?
     public var audio: Data
+    public var audioFormat: DecodedAudioFormat
     public var byteCount: Int
     public var startSeconds: Double
     public var endSeconds: Double
@@ -57,6 +116,7 @@ public struct DecodedAudioChunk: Equatable, Sendable {
         segmentURI: String? = nil,
         hlsIdentity: HLSDecodedAudioChunkIdentity? = nil,
         audio: Data,
+        audioFormat: DecodedAudioFormat = .containerBytes,
         byteCount: Int? = nil,
         startSeconds: Double,
         endSeconds: Double,
@@ -68,6 +128,7 @@ public struct DecodedAudioChunk: Equatable, Sendable {
         self.segmentURI = segmentURI
         self.hlsIdentity = hlsIdentity
         self.audio = audio
+        self.audioFormat = audioFormat
         self.byteCount = byteCount ?? audio.count
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds

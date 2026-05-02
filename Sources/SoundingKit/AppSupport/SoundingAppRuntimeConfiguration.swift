@@ -38,7 +38,9 @@ public struct SoundingAppRuntimeFactory {
             SoundingDatabase,
             SoundingAppConfiguration,
             AppPlayerTimelineClock,
-            RollingPCMBuffer
+            RollingPCMBuffer,
+            AppPlaybackVolumeStore,
+            any AppPCMPlaybackAdapting
         ) throws -> any AppStreamRuntimeIngesting
     public typealias RuntimeFactory =
         @Sendable (
@@ -46,7 +48,9 @@ public struct SoundingAppRuntimeFactory {
             any AppStreamRuntimeIngesting,
             AppPlayerTimelineClock,
             RollingPCMBuffer,
-            AppStreamRuntimeStatusStore
+            AppStreamRuntimeStatusStore,
+            AppPlaybackVolumeStore,
+            any AppPCMPlaybackAdapting
         ) -> any AppStreamRuntimeControlling
 
     private let fileManager: FileManager
@@ -58,22 +62,26 @@ public struct SoundingAppRuntimeFactory {
         fileManager: FileManager = .default,
         databaseFactory: @escaping DatabaseFactory = { try SoundingDatabase(fileURL: $0) },
         ingesterFactory: @escaping IngesterFactory = {
-            database, configuration, timeline, rollingBuffer in
+            database, configuration, timeline, rollingBuffer, volumeStore, player in
             try SoundingAppRuntimeFactory.defaultIngesterFactory(
                 database: database,
                 configuration: configuration,
                 timeline: timeline,
-                rollingBuffer: rollingBuffer
+                rollingBuffer: rollingBuffer,
+                volumeStore: volumeStore,
+                player: player
             )
         },
         runtimeFactory: @escaping RuntimeFactory = {
-            registry, ingester, timeline, rollingBuffer, statusStore in
+            registry, ingester, timeline, rollingBuffer, statusStore, volumeStore, player in
             AppStreamRuntimeService(
                 registry: registry,
                 ingester: ingester,
                 statusStore: statusStore,
+                volumeStore: volumeStore,
                 playbackTimeline: timeline,
-                rollingBuffer: rollingBuffer
+                rollingBuffer: rollingBuffer,
+                playbackController: player
             )
         }
     ) {
@@ -154,10 +162,17 @@ public struct SoundingAppRuntimeFactory {
         let statusStore = AppStreamRuntimeStatusStore(database: database)
         let timeline = AppPlayerTimelineClock()
         let rollingBuffer = RollingPCMBuffer(configuration: configuration.rollingBuffer)
+        let volumeStore = AppPlaybackVolumeStore()
+        let diagnosticsLog = AppRuntimeDiagnosticsLog()
+        let player = AVFoundationAppPCMPlayerAdapter(
+            volumeStore: volumeStore,
+            diagnosticsLog: diagnosticsLog
+        )
 
         let ingester: any AppStreamRuntimeIngesting
         do {
-            ingester = try ingesterFactory(database, configuration, timeline, rollingBuffer)
+            ingester = try ingesterFactory(
+                database, configuration, timeline, rollingBuffer, volumeStore, player)
         } catch {
             configuration.issues.append(Self.modelSetupIssue(error: error))
             var viewModel = StreamAppViewModel()
@@ -174,7 +189,8 @@ public struct SoundingAppRuntimeFactory {
             )
         }
 
-        let runtime = runtimeFactory(registry, ingester, timeline, rollingBuffer, statusStore)
+        let runtime = runtimeFactory(
+            registry, ingester, timeline, rollingBuffer, statusStore, volumeStore, player)
         var viewModel = StreamAppViewModel(configurationIssues: configuration.issues)
         do {
             try viewModel.reload(from: registry)
@@ -212,7 +228,9 @@ public struct SoundingAppRuntimeFactory {
         database: SoundingDatabase,
         configuration: SoundingAppConfiguration,
         timeline: AppPlayerTimelineClock,
-        rollingBuffer: RollingPCMBuffer
+        rollingBuffer: RollingPCMBuffer,
+        volumeStore: AppPlaybackVolumeStore,
+        player: any AppPCMPlaybackAdapting
     ) throws -> any AppStreamRuntimeIngesting {
         let queue = InferenceQueue()
         let cache = ModelCache()
@@ -229,9 +247,10 @@ public struct SoundingAppRuntimeFactory {
             ),
             fingerprinter: NoOpAudioFingerprinter(),
             fingerprintEnricher: NoOpAudioFingerprintEnricher(),
-            player: AVFoundationAppPCMPlayerAdapter(),
+            player: player,
             timeline: timeline,
-            rollingBuffer: rollingBuffer
+            rollingBuffer: rollingBuffer,
+            keepPlaybackRunningAfterIngestCompletes: true
         )
     }
 
