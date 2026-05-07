@@ -95,6 +95,7 @@ public struct SharedPCMFrame: Equatable, Sendable {
     public var startSeconds: Double
     public var endSeconds: Double
     public var format: SharedPCMFormat
+    public var hlsIdentity: HLSDecodedAudioChunkIdentity?
 
     public init(
         streamID: Int64,
@@ -103,7 +104,8 @@ public struct SharedPCMFrame: Equatable, Sendable {
         byteCount: Int? = nil,
         startSeconds: Double,
         endSeconds: Double,
-        format: SharedPCMFormat = .unknown
+        format: SharedPCMFormat = .unknown,
+        hlsIdentity: HLSDecodedAudioChunkIdentity? = nil
     ) {
         self.streamID = streamID
         self.sequence = sequence
@@ -112,6 +114,7 @@ public struct SharedPCMFrame: Equatable, Sendable {
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
         self.format = format
+        self.hlsIdentity = hlsIdentity
     }
 
     public init(
@@ -124,7 +127,8 @@ public struct SharedPCMFrame: Equatable, Sendable {
             byteCount: chunk.byteCount,
             startSeconds: chunk.startSeconds,
             endSeconds: chunk.endSeconds,
-            format: format ?? SharedPCMFormat(decodedAudioFormat: chunk.audioFormat)
+            format: format ?? SharedPCMFormat(decodedAudioFormat: chunk.audioFormat),
+            hlsIdentity: chunk.hlsIdentity
         )
     }
 }
@@ -415,9 +419,22 @@ public protocol AppPCMPlaybackAdapting: Sendable {
     func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock)
         async throws
     func play(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws
+    func playReplacingScheduledBuffers(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock)
+        async throws
     func pause(timeline: AppPlayerTimelineClock) async
     func resume(timeline: AppPlayerTimelineClock) async
     func stop(timeline: AppPlayerTimelineClock) async
+    func applyPlaybackVolume(streamID: Int64) async
+}
+
+public extension AppPCMPlaybackAdapting {
+    func applyPlaybackVolume(streamID: Int64) async {}
+
+    func playReplacingScheduledBuffers(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock)
+        async throws
+    {
+        try await play(frames, timeline: timeline)
+    }
 }
 
 /// Minimal AVFoundation-backed app adapter. It owns the audio-device boundary and
@@ -427,6 +444,7 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
     #if canImport(AVFoundation)
         private let engine = AVAudioEngine()
         private let playerNode = AVAudioPlayerNode()
+        private let volumeMixerNode = AVAudioMixerNode()
         private var didAttachPlayerNode = false
         private let engineStarter: (@Sendable () throws -> Void)?
         private let bufferScheduler: (@Sendable ([AVAudioPCMBuffer]) throws -> Void)?
@@ -456,6 +474,27 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
         #endif
     }
 
+    public static func verificationAdapter(
+        volumeStore: AppPlaybackVolumeStore = AppPlaybackVolumeStore(),
+        diagnosticsLog: AppRuntimeDiagnosticsLog = AppRuntimeDiagnosticsLog()
+    ) -> AVFoundationAppPCMPlayerAdapter {
+        #if canImport(AVFoundation)
+            AVFoundationAppPCMPlayerAdapter(
+                engineStarter: {},
+                bufferScheduler: { _ in },
+                playerStarter: {},
+                engineStopper: {},
+                volumeStore: volumeStore,
+                diagnosticsLog: diagnosticsLog
+            )
+        #else
+            AVFoundationAppPCMPlayerAdapter(
+                volumeStore: volumeStore,
+                diagnosticsLog: diagnosticsLog
+            )
+        #endif
+    }
+
     #if canImport(AVFoundation)
         init(
             engineStarter: (@Sendable () throws -> Void)?,
@@ -480,6 +519,8 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
     ) async throws {
         #if canImport(AVFoundation)
             setCurrentStreamID(streamID)
+            playerNode.stop()
+            clearScheduledBuffers()
             diagnosticsLog.recordEvent(
                 "playback.prepare.requested",
                 streamID: streamID,
@@ -511,6 +552,21 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
     }
 
     public func play(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws {
+        try await play(frames, timeline: timeline, replacingScheduledBuffers: false)
+    }
+
+    public func playReplacingScheduledBuffers(
+        _ frames: [SharedPCMFrame],
+        timeline: AppPlayerTimelineClock
+    ) async throws {
+        try await play(frames, timeline: timeline, replacingScheduledBuffers: true)
+    }
+
+    private func play(
+        _ frames: [SharedPCMFrame],
+        timeline: AppPlayerTimelineClock,
+        replacingScheduledBuffers: Bool
+    ) async throws {
         guard !frames.isEmpty else { return }
 
         do {
@@ -530,10 +586,20 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                     setCurrentStreamID(streamID)
                     await applyVolume(streamID: streamID)
                 }
+                if replacingScheduledBuffers {
+                    playerNode.stop()
+                    clearScheduledBuffers()
+                    diagnosticsLog.recordEvent(
+                        "playback.queue.flushed",
+                        streamID: streamID,
+                        phase: "playback.seek",
+                        fields: ["reason": "seek"]
+                    )
+                }
                 let buffers = try frames.map(makePCMBuffer)
                 try startAudioEngineIfNeeded()
                 if bufferScheduler != nil {
-                    try schedule(buffers)
+                    try schedule(buffers, timeline: timeline, streamID: streamID)
                 } else {
                     let playbackBuffers = try buffers.map(convertToPlaybackFormat)
                     diagnosticsLog.recordEvent(
@@ -547,7 +613,7 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                             "outputChannels": String(engine.outputNode.inputFormat(forBus: 0).channelCount),
                         ]
                     )
-                    try schedule(playbackBuffers)
+                    try schedule(playbackBuffers, timeline: timeline, streamID: streamID)
                 }
                 startPlayerNodeIfNeeded()
                 diagnosticsLog.recordEvent(
@@ -557,6 +623,7 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                     fields: [
                         "engineRunning": String(engine.isRunning),
                         "playerIsPlaying": String(playerNode.isPlaying),
+                        "retainedBufferCount": String(scheduledBufferCount()),
                     ]
                 )
             #else
@@ -638,6 +705,13 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
         await timeline.updatePlayerState(.stopped, message: "Playback stopped.")
     }
 
+    public func applyPlaybackVolume(streamID: Int64) async {
+        #if canImport(AVFoundation)
+            setCurrentStreamID(streamID)
+            await applyVolume(streamID: streamID, source: "control")
+        #endif
+    }
+
     private func publishFailure(_ message: String, timeline: AppPlayerTimelineClock) async {
         await timeline.updatePlayerState(
             .failed(message: message),
@@ -659,8 +733,10 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
             }
             if !didAttachPlayerNode {
                 engine.attach(playerNode)
+                engine.attach(volumeMixerNode)
                 let outputFormat = engine.outputNode.inputFormat(forBus: 0)
-                engine.connect(playerNode, to: engine.outputNode, format: outputFormat)
+                engine.connect(playerNode, to: volumeMixerNode, format: outputFormat)
+                engine.connect(volumeMixerNode, to: engine.outputNode, format: outputFormat)
                 didAttachPlayerNode = true
             }
             if !engine.isRunning {
@@ -668,7 +744,11 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
             }
         }
 
-        private func schedule(_ buffers: [AVAudioPCMBuffer]) throws {
+        private func schedule(
+            _ buffers: [AVAudioPCMBuffer],
+            timeline: AppPlayerTimelineClock,
+            streamID: Int64?
+        ) throws {
             if let bufferScheduler {
                 retainScheduledBuffers(buffers)
                 do {
@@ -684,9 +764,28 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 playerNode.scheduleBuffer(
                     buffer,
                     completionCallbackType: .dataRendered
-                ) { [weak self, weak buffer] _ in
+                ) { [weak self, weak buffer, timeline] _ in
                     guard let buffer else { return }
-                    self?.releaseScheduledBuffer(buffer)
+                    guard let self else { return }
+                    let remaining = self.releaseScheduledBuffer(buffer)
+                    guard remaining == 0 else { return }
+                    let currentStreamID = self.currentStreamIDValue()
+                    guard currentStreamID == streamID else { return }
+                    self.diagnosticsLog.recordEvent(
+                        "playback.queue.drained",
+                        streamID: currentStreamID,
+                        phase: "playback.play",
+                        fields: [
+                            "engineRunning": String(self.engine.isRunning),
+                            "playerIsPlaying": String(self.playerNode.isPlaying),
+                        ]
+                    )
+                    Task {
+                        await timeline.updatePlayerState(
+                            .buffering,
+                            message: "Playback queue drained; waiting for fresh live audio."
+                        )
+                    }
                 }
             }
         }
@@ -756,7 +855,7 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 for await snapshot in changes {
                     guard let self else { return }
                     if self.currentStreamIDValue() == snapshot.streamID {
-                        self.playerNode.volume = snapshot.effectiveVolume
+                        self.applyEffectiveVolume(snapshot.effectiveVolume)
                         self.diagnosticsLog.recordEvent(
                             "playback.volume.applied",
                             streamID: snapshot.streamID,
@@ -797,12 +896,14 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
             scheduledBuffersLock.unlock()
         }
 
-        private func releaseScheduledBuffer(_ buffer: AVAudioPCMBuffer) {
+        private func releaseScheduledBuffer(_ buffer: AVAudioPCMBuffer) -> Int {
             scheduledBuffersLock.lock()
             if let index = scheduledBuffers.firstIndex(where: { $0 === buffer }) {
                 scheduledBuffers.remove(at: index)
             }
+            let remaining = scheduledBuffers.count
             scheduledBuffersLock.unlock()
+            return remaining
         }
 
         private func clearScheduledBuffers() {
@@ -817,9 +918,9 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
             return scheduledBuffers.count
         }
 
-        private func applyVolume(streamID: Int64) async {
+        private func applyVolume(streamID: Int64, source: String = "direct") async {
             let snapshot = await volumeStore.snapshot(streamID: streamID)
-            playerNode.volume = snapshot.effectiveVolume
+            applyEffectiveVolume(snapshot.effectiveVolume)
             diagnosticsLog.recordEvent(
                 "playback.volume.applied",
                 streamID: streamID,
@@ -828,8 +929,14 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                     "volume": String(format: "%.3f", snapshot.volume),
                     "isMuted": String(snapshot.isMuted),
                     "effectiveVolume": String(format: "%.3f", snapshot.effectiveVolume),
+                    "source": source,
                 ]
             )
+        }
+
+        private func applyEffectiveVolume(_ effectiveVolume: Float) {
+            playerNode.volume = effectiveVolume
+            volumeMixerNode.outputVolume = effectiveVolume
         }
 
         private func makePCMBuffer(from frame: SharedPCMFrame) throws -> AVAudioPCMBuffer {
@@ -970,35 +1077,41 @@ public struct SinglePathPCMDecoder: AudioDecoding {
     private let player: any AppPCMPlaybackAdapting
     private let timeline: AppPlayerTimelineClock
     private let rollingBuffer: RollingPCMBuffer?
+    private let hlsPlaybackDeduplicator: HLSPlaybackDeduplicator?
 
     public init(
         streamID: Int64,
         upstream: any AudioDecoding,
         player: any AppPCMPlaybackAdapting,
         timeline: AppPlayerTimelineClock,
-        rollingBuffer: RollingPCMBuffer? = nil
+        rollingBuffer: RollingPCMBuffer? = nil,
+        database: SoundingDatabase? = nil
     ) {
         self.streamID = streamID
         self.upstream = upstream
         self.player = player
         self.timeline = timeline
         self.rollingBuffer = rollingBuffer
+        self.hlsPlaybackDeduplicator = database.map {
+            HLSPlaybackDeduplicator(streamID: streamID, database: $0)
+        }
     }
 
     public func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
         let chunks = try await upstream.decodedChunks(for: request)
         let frames = chunks.map { SharedPCMFrame(streamID: streamID, chunk: $0) }
         if let rollingBuffer {
-            let snapshot = await rollingBuffer.append(frames)
+            let bufferedFrames = frames.filter { $0.format.payloadKind == .linearPCM }
+            let snapshot = await rollingBuffer.append(bufferedFrames)
             await timeline.updateRollingBuffer(snapshot)
         }
+        let playableFrames = await playableFrames(from: frames)
 
-        let playableFrames = frames.filter { $0.format.payloadKind == .linearPCM }
         guard !playableFrames.isEmpty else {
             await timeline.recordDecodedFrames(frames)
             await timeline.updatePlayerState(
                 .buffering,
-                message: "Decoded audio is not yet playable PCM; ingest continues without app playback for this chunk."
+                message: "No new playable PCM was decoded; ingest continues without rescheduling duplicate audio."
             )
             return chunks
         }
@@ -1013,5 +1126,46 @@ public struct SinglePathPCMDecoder: AudioDecoding {
             throw AppPlayerAdapterError.decodeFailed(failureMessage)
         }
         return chunks
+    }
+
+    private func playableFrames(from frames: [SharedPCMFrame]) async -> [SharedPCMFrame] {
+        var playableFrames: [SharedPCMFrame] = []
+        playableFrames.reserveCapacity(frames.count)
+
+        for frame in frames where frame.format.payloadKind == .linearPCM {
+            guard let hlsPlaybackDeduplicator else {
+                playableFrames.append(frame)
+                continue
+            }
+            if await hlsPlaybackDeduplicator.shouldPlay(frame) {
+                playableFrames.append(frame)
+            }
+        }
+
+        return playableFrames
+    }
+}
+
+private actor HLSPlaybackDeduplicator {
+    private let streamID: Int64
+    private let persistence: IngestPersistence
+    private var acceptedMediaSequences: Set<Int> = []
+
+    init(streamID: Int64, database: SoundingDatabase) {
+        self.streamID = streamID
+        self.persistence = IngestPersistence(database: database)
+    }
+
+    func shouldPlay(_ frame: SharedPCMFrame) -> Bool {
+        guard let mediaSequence = frame.hlsIdentity?.mediaSequence else { return true }
+        guard !acceptedMediaSequences.contains(mediaSequence) else { return false }
+        if (try? persistence.hasPersistedHLSSegment(
+            streamID: streamID,
+            mediaSequence: mediaSequence
+        )) == true {
+            return false
+        }
+        acceptedMediaSequences.insert(mediaSequence)
+        return true
     }
 }

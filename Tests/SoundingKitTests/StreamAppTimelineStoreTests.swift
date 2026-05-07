@@ -64,19 +64,303 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            snapshot.timelineItems.map { "\($0.kind.rawValue):\($0.startSeconds):\($0.title):\($0.isSeekable)" },
+            snapshot.timelineItems.map {
+                "\($0.kind.rawValue):\($0.startSeconds):\($0.title):\($0.speakerDisplay?.displayLabel ?? "-"):\($0.isSeekable)"
+            },
             [
-                "transcript:0.0:host: false",
-                "song:5.0:Fixture Artist — Fixture Song: false",
-                "event:9.0:ad_start: false",
-                "transcript:10.0:guest: true",
-                "transcript:20.0:host: true",
-                "event:21.0:ad_end: true"
+                "transcript:0.0:Fixture Artist:Fixture Artist:false",
+                "song:5.0:Fixture Song:Fixture Artist:false",
+                "event:9.0:AD_START:-:false",
+                "event:21.0:AD_END:-:true"
             ]
         )
-        XCTAssertEqual(snapshot.currentMetadata?.title, "Fixture Artist — Fixture Song")
-        XCTAssertEqual(snapshot.recentMetadata.map(\.title), ["Fixture Artist — Fixture Song"])
+        XCTAssertEqual(snapshot.currentMetadata?.title, "Fixture Song")
+        XCTAssertEqual(snapshot.currentMetadata?.artist, "Fixture Artist")
+        XCTAssertEqual(snapshot.recentMetadata.map(\.title), ["Fixture Song"])
         XCTAssertEqual(snapshot.diagnostics.bufferedSeekUnavailableMessage, "Requested 40s is unavailable (available range 10-30s).")
+    }
+
+    func testTimelineFallsBackToSpeakerTurnsWhenTranscriptRowsHaveNoSpeakerLabel() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Diarized Stream",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T15:00:00Z"
+        )
+        let writer = IngestPersistence(database: temporary.database)
+        let runID = try writer.createRun(
+            streamID: stream.id,
+            startedAt: "2026-05-01T15:00:01Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 0,
+            startedAt: "2026-05-01T15:00:02Z",
+            endedAt: "2026-05-01T15:00:12Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    TranscriptSegmentDraft(sequence: 0, speakerLabel: nil, startSeconds: 0, endSeconds: 2, text: "first speaker text"),
+                    TranscriptSegmentDraft(sequence: 1, speakerLabel: nil, startSeconds: 2, endSeconds: 4, text: "second speaker text"),
+                    TranscriptSegmentDraft(sequence: 2, speakerLabel: nil, startSeconds: 4, endSeconds: 6, text: "first speaker returns"),
+                ],
+                speakerTurns: [
+                    SpeakerTurnDraft(speakerLabel: "speaker-S1", startSeconds: 0, endSeconds: 2, confidence: 0.9),
+                    SpeakerTurnDraft(speakerLabel: "speaker-S2", startSeconds: 2, endSeconds: 4, confidence: 0.9),
+                    SpeakerTurnDraft(speakerLabel: "speaker-S1", startSeconds: 4, endSeconds: 6, confidence: 0.9),
+                ],
+                createdAt: "2026-05-01T15:00:03Z"
+            )
+        )
+        let store = StreamAppTimelineStore(database: temporary.database)
+
+        let snapshot = try store.snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: stream.id,
+                paragraphLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:00Z"
+            )
+        )
+
+        XCTAssertEqual(
+            snapshot.timelineItems.filter { $0.kind == .transcript }.map { "\($0.title):\($0.subtitle ?? "")" },
+            [
+                "speaker-S1:first speaker text",
+                "speaker-S2:second speaker text",
+                "speaker-S1:first speaker returns",
+            ]
+        )
+    }
+
+    func testClearTimelineDeletesSelectedStreamTranscriptAndMetadataRowsOnly() throws {
+        let fixture = try makeFixture()
+        let store = StreamAppTimelineStore(database: fixture.temporary.database)
+
+        let deletedCount = try store.clearTimeline(streamID: fixture.mainStreamID)
+
+        XCTAssertGreaterThan(deletedCount, 3)
+        let counts = try fixture.temporary.database.read { db in
+            try (
+                mainSegments: Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM transcript_segments
+                        JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                        WHERE ingest_runs.stream_id = ?
+                        """,
+                    arguments: [fixture.mainStreamID]
+                ),
+                mainWords: Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM transcript_words
+                        JOIN ingest_chunks ON ingest_chunks.id = transcript_words.chunk_id
+                        JOIN ingest_runs ON ingest_runs.id = ingest_chunks.run_id
+                        WHERE ingest_runs.stream_id = ?
+                        """,
+                    arguments: [fixture.mainStreamID]
+                ),
+                mainFts: Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM transcript_segments_fts
+                        JOIN transcript_segments ON transcript_segments.id = transcript_segments_fts.rowid
+                        JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                        WHERE ingest_runs.stream_id = ?
+                    """,
+                    arguments: [fixture.mainStreamID]
+                ),
+                mainEvents: Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM ad_events
+                        JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
+                        WHERE ingest_runs.stream_id = ?
+                        """,
+                    arguments: [fixture.mainStreamID]
+                ),
+                mainSongPlays: Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM song_plays WHERE stream_id = ?",
+                    arguments: [fixture.mainStreamID]
+                ),
+                mainSpeakerTurns: Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM speaker_turns
+                        JOIN ingest_runs ON ingest_runs.id = speaker_turns.run_id
+                        WHERE ingest_runs.stream_id = ?
+                    """,
+                    arguments: [fixture.mainStreamID]
+                ),
+                mainHLSSegments: Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM hls_ingest_segments WHERE stream_id = ?",
+                    arguments: [fixture.mainStreamID]
+                ),
+                otherSegments: Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(*)
+                        FROM transcript_segments
+                        JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
+                        WHERE ingest_runs.stream_id = ?
+                        """,
+                    arguments: [fixture.otherStreamID]
+                ),
+                otherHLSSegments: Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM hls_ingest_segments WHERE stream_id = ?",
+                    arguments: [fixture.otherStreamID]
+                )
+            )
+        }
+
+        XCTAssertEqual(counts.mainSegments, 0)
+        XCTAssertEqual(counts.mainWords, 0)
+        XCTAssertEqual(counts.mainFts, 0)
+        XCTAssertEqual(counts.mainEvents, 0)
+        XCTAssertEqual(counts.mainSongPlays, 0)
+        XCTAssertEqual(counts.mainSpeakerTurns, 0)
+        XCTAssertEqual(counts.mainHLSSegments, 0)
+        XCTAssertEqual(counts.otherSegments, 2)
+        XCTAssertEqual(counts.otherHLSSegments, 1)
+        let snapshot = try store.snapshot(request: StreamAppTimelineRequest(streamID: fixture.mainStreamID))
+        XCTAssertEqual(snapshot.transcriptParagraphs, [])
+        XCTAssertEqual(snapshot.timelineItems, [])
+        XCTAssertEqual(snapshot.recentMetadata, [])
+    }
+
+    func testTimelineDoesNotSurfaceDeterministicUnknownSongsAsMetadata() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:10:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 7,
+            segmentURI: "main-007.ts",
+            startedAt: "2026-05-01T15:10:01Z",
+            endedAt: "2026-05-01T15:10:07Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                songPlays: [
+                    SongPlayDraft(
+                        song: UnresolvedSongDraft(
+                            songKey: "fingerprint:abc123",
+                            title: nil,
+                            artist: nil,
+                            displayName: "Unknown song (abc123)",
+                            isUnknown: true
+                        ),
+                        startSeconds: 31,
+                        endSeconds: 37,
+                        source: "deterministic_fingerprint"
+                    )
+                ],
+                createdAt: "2026-05-01T15:10:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 35,
+                    liveEdgeSeconds: 40
+                ),
+                paragraphLimit: 5,
+                wordLimitPerParagraph: 5,
+                metadataLimit: 5,
+                timelineLimit: 10,
+                lookbackSeconds: 60,
+                hideDeterministicUnknownSongs: true,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        XCTAssertFalse(snapshot.recentMetadata.contains { $0.title.hasPrefix("Unknown song") })
+        XCTAssertFalse(snapshot.timelineItems.contains { $0.title.hasPrefix("Unknown song") })
+    }
+
+    func testTimelineCollapsesConsecutiveSongMetadataToLatestVisibleChange() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:20:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 20,
+            segmentURI: "main-020.ts",
+            startedAt: "2026-05-01T15:20:01Z",
+            endedAt: "2026-05-01T15:20:07Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                songPlays: [
+                    SongPlayDraft(
+                        song: song(title: "First stale", artist: "Artist A"),
+                        startSeconds: 40,
+                        endSeconds: 50,
+                        source: "timed_id3"
+                    ),
+                    SongPlayDraft(
+                        song: song(title: "Second stale", artist: "Artist B"),
+                        startSeconds: 50,
+                        endSeconds: 60,
+                        source: "timed_id3"
+                    ),
+                    SongPlayDraft(
+                        song: song(title: "Current chunk song", artist: "Artist C"),
+                        startSeconds: 60,
+                        endSeconds: 70,
+                        source: "timed_id3"
+                    ),
+                ],
+                createdAt: "2026-05-01T15:20:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                paragraphLimit: 5,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        XCTAssertEqual(
+            snapshot.timelineItems.filter { $0.kind == .song }.map(\.title),
+            ["Fixture Song", "Current chunk song"]
+        )
     }
 
     func testSpeakerDisplayOverridesPersistAndDoNotMutateProviderRowsOrFts() throws {
@@ -340,6 +624,22 @@ final class StreamAppTimelineStoreTests: XCTestCase {
                 createdAt: "2026-05-01T15:00:13Z"
             )
         )
+        try insertHLSIngestSegment(
+            database: temporary.database,
+            streamID: main.id,
+            mediaSequence: 7,
+            segmentIdentity: "main-000.ts",
+            runID: mainRunID,
+            chunkID: mainChunk0ID
+        )
+        try insertHLSIngestSegment(
+            database: temporary.database,
+            streamID: main.id,
+            mediaSequence: 8,
+            segmentIdentity: "main-001.ts",
+            runID: mainRunID,
+            chunkID: mainChunk1ID
+        )
 
         let otherRunID = try writer.createRun(streamID: other.id, startedAt: "2026-05-01T15:30:01Z", status: .running)
         let otherChunkID = try writer.createChunk(runID: otherRunID, sequence: 0, segmentURI: "other-000", startedAt: "2026-05-01T15:30:02Z", endedAt: "2026-05-01T15:30:12Z")
@@ -358,8 +658,47 @@ final class StreamAppTimelineStoreTests: XCTestCase {
                 createdAt: "2026-05-01T15:30:03Z"
             )
         )
+        try insertHLSIngestSegment(
+            database: temporary.database,
+            streamID: other.id,
+            mediaSequence: 1,
+            segmentIdentity: "other-000",
+            runID: otherRunID,
+            chunkID: otherChunkID
+        )
 
         return Fixture(temporary: temporary, mainStreamID: main.id, otherStreamID: other.id)
+    }
+
+    private func insertHLSIngestSegment(
+        database: SoundingDatabase,
+        streamID: Int64,
+        mediaSequence: Int,
+        segmentIdentity: String,
+        runID: Int64,
+        chunkID: Int64
+    ) throws {
+        try database.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO hls_ingest_segments (
+                        stream_id, media_sequence, segment_identity, segment_identity_hash,
+                        claimed_run_id, chunk_id, claimed_at, finalized_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: [
+                    streamID,
+                    mediaSequence,
+                    segmentIdentity,
+                    "fixture-\(mediaSequence)",
+                    runID,
+                    chunkID,
+                    "2026-05-01T15:00:00Z",
+                    "2026-05-01T15:00:01Z",
+                    "2026-05-01T15:00:01Z"
+                ]
+            )
+        }
     }
 
     private var knownSong: UnresolvedSongDraft {
@@ -370,6 +709,16 @@ final class StreamAppTimelineStoreTests: XCTestCase {
             album: "Timeline Proofs",
             isrc: "US-S02-26-00001",
             displayName: "Fixture Artist — Fixture Song"
+        )
+    }
+
+    private func song(title: String, artist: String) -> UnresolvedSongDraft {
+        UnresolvedSongDraft(
+            songKey: "fixture:\(artist):\(title)",
+            title: title,
+            artist: artist,
+            album: "Metadata Fixture",
+            displayName: "\(artist) — \(title)"
         )
     }
 

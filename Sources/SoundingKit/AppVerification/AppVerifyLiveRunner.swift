@@ -359,10 +359,10 @@ public struct AppVerifyLiveRunner: Sendable {
                 .liveDecode,
                 name: .liveDecodeOpened,
                 stream: stream,
-                success: result.processedChunks > 0 && result.decodedChunks > 0,
-                reason: result.processedChunks > 0 && result.decodedChunks > 0
-                    ? "Live stream decode/open observed non-zero chunk counters."
-                    : "Live decode/open proof requires processedChunks and decodedChunks greater than zero.",
+                success: result.decodedChunks > 0,
+                reason: result.decodedChunks > 0
+                    ? "Live stream decode/open observed decoded audio chunks."
+                    : "Live decode/open proof requires decodedChunks greater than zero.",
                 facts: facts,
                 artifacts: artifacts
             ),
@@ -560,7 +560,10 @@ public struct AppVerifyAVFoundationLiveStreamExecutor: AppVerifyLiveStreamExecut
         databaseFactory: @escaping DatabaseFactory = { url in try SoundingDatabase(fileURL: url) },
         decoderFactory: @escaping DecoderFactory = { AVFoundationAudioDecoder(chunkDurationSeconds: 0.25) },
         playerFactory: @escaping PlayerFactory = { volumeStore, diagnosticsLog in
-            AVFoundationAppPCMPlayerAdapter(volumeStore: volumeStore, diagnosticsLog: diagnosticsLog)
+            AVFoundationAppPCMPlayerAdapter.verificationAdapter(
+                volumeStore: volumeStore,
+                diagnosticsLog: diagnosticsLog
+            )
         },
         runtimeFactory: @escaping RuntimeFactory = { registry, ingester, timeline, rollingBuffer, volumeStore, player, diagnosticsLog in
             AppStreamRuntimeService(

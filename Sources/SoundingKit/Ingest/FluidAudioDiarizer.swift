@@ -3,7 +3,7 @@ import Foundation
 import FluidAudio
 #endif
 
-public protocol FluidDiarizationEngine: Sendable {
+public protocol FluidDiarizationEngine {
     func diarizeAudio(at url: URL, chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft]) async throws -> [SpeakerTurnDraft]
 }
 
@@ -19,23 +19,23 @@ public actor FluidAudioDiarizer: SpeakerDiarization {
     public init(
         modelName: String = "offline-diarizer",
         cache: ModelCache = ModelCache(),
-        setup: @escaping ModelCache.Downloader = { targetDirectory, progress in
-            try await FluidAudioDiarizer.defaultSetup(targetDirectory: targetDirectory, progress: progress)
-        },
-        engineFactory: @escaping EngineFactory = { modelName, modelDirectory in
-            try await FluidAudioDiarizer.defaultEngineFactory(modelName: modelName, modelDirectory: modelDirectory)
-        }
+        setup: ModelCache.Downloader? = nil,
+        engineFactory: EngineFactory? = nil
     ) {
         self.modelName = modelName
         self.cache = cache
-        self.setup = setup
-        self.engineFactory = engineFactory
+        self.setup = setup ?? { targetDirectory, progress in
+            try await FluidAudioDiarizer.defaultSetup(targetDirectory: targetDirectory, progress: progress)
+        }
+        self.engineFactory = engineFactory ?? { modelName, modelDirectory in
+            try await FluidAudioDiarizer.defaultEngineFactory(modelName: modelName, modelDirectory: modelDirectory)
+        }
     }
 
     public func diarize(_ chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft]) async throws -> [SpeakerTurnDraft] {
         guard !chunk.audio.isEmpty else { throw MLProviderError.emptyAudio(provider: "fluidaudio") }
         let engine = try await ensureEngine()
-        let url = try writeTemporaryAudio(chunk.audio, provider: "fluidaudio", segmentURI: chunk.segmentURI)
+        let url = try writeTemporaryAudio(chunk, provider: "fluidaudio")
         defer { try? FileManager.default.removeItem(at: url) }
         return try await engine.diarizeAudio(at: url, chunk: chunk, transcriptSegments: transcriptSegments)
     }
@@ -51,9 +51,8 @@ public actor FluidAudioDiarizer: SpeakerDiarization {
     public nonisolated static func defaultSetup(targetDirectory: URL, progress: @escaping ModelCache.DownloadProgressHandler) async throws -> URL {
 #if canImport(FluidAudio)
         if #available(macOS 14.0, iOS 17.0, *) {
-            let manager = OfflineDiarizerManager()
             progress(0)
-            try await manager.prepareModels(directory: targetDirectory)
+            _ = try await OfflineDiarizerModels.load(from: targetDirectory)
             progress(1)
             return targetDirectory
         }
@@ -77,12 +76,13 @@ public actor FluidAudioDiarizer: SpeakerDiarization {
 
 #if canImport(FluidAudio)
 @available(macOS 14.0, iOS 17.0, *)
-private final class LiveFluidAudioEngine: FluidDiarizationEngine, @unchecked Sendable {
+private final class LiveFluidAudioEngine: FluidDiarizationEngine {
     private let manager: OfflineDiarizerManager
 
     init(modelDirectory: URL) async throws {
         self.manager = OfflineDiarizerManager()
-        try await manager.prepareModels(directory: modelDirectory)
+        let models = try await OfflineDiarizerModels.load(from: modelDirectory)
+        manager.initialize(models: models)
     }
 
     func diarizeAudio(at url: URL, chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft]) async throws -> [SpeakerTurnDraft] {

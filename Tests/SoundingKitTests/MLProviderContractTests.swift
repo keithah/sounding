@@ -49,6 +49,43 @@ final class MLProviderContractTests: XCTestCase {
         XCTAssertEqual(turns, [SpeakerTurnDraft(speakerLabel: "speaker-1", startSeconds: 0.1, endSeconds: 1.3, confidence: 0.8)])
     }
 
+    func testLinearPCMChunksAreStagedAsWAVFilesForProviders() async throws {
+        let cache = ModelCache(rootDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true))
+        let transcriber = WhisperKitTranscriber(
+            modelName: "tiny",
+            cache: cache,
+            setup: { target, progress in
+                progress(1)
+                try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+                return target
+            },
+            engineFactory: { _, _ in WAVAssertingWhisperEngine() }
+        )
+
+        let linearPCMChunk = Self.chunk(
+            audio: Data([0x01, 0x00, 0x02, 0x00]),
+            audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16)
+        )
+        let segments = try await transcriber.transcribe(linearPCMChunk)
+
+        XCTAssertEqual(segments.first?.text, "wav ok")
+
+        let diarizer = FluidAudioDiarizer(
+            modelName: "offline-diarizer",
+            cache: cache,
+            setup: { target, progress in
+                progress(1)
+                try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+                return target
+            },
+            engineFactory: { _, _ in WAVAssertingFluidEngine() }
+        )
+
+        let turns = try await diarizer.diarize(linearPCMChunk, transcriptSegments: segments)
+
+        XCTAssertEqual(turns.first?.speakerLabel, "speaker-wav")
+    }
+
     func testModelSetupFailurePersistsModelSetupDiagnosticInPipeline() async throws {
         let temporary = try TemporarySoundingDatabase()
         let transcriber = WhisperKitTranscriber(
@@ -130,16 +167,58 @@ final class MLProviderContractTests: XCTestCase {
         }
     }
 
-    private static func chunk(audio: Data = Data("fake audio bytes".utf8)) -> DecodedAudioChunk {
+    private static func chunk(
+        audio: Data = Data("fake audio bytes".utf8),
+        audioFormat: DecodedAudioFormat = .containerBytes
+    ) -> DecodedAudioChunk {
         DecodedAudioChunk(
             sequence: 0,
             segmentURI: "https://user:pass@example.test/segment.ts?token=secret",
             audio: audio,
+            audioFormat: audioFormat,
             startSeconds: 0,
             endSeconds: 2,
             startedAt: "2026-04-30T12:00:00Z",
             endedAt: "2026-04-30T12:00:02Z"
         )
+    }
+}
+
+private struct WAVAssertingWhisperEngine: WhisperTranscriptionEngine {
+    func transcribeAudio(at url: URL, chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
+        let data = try Data(contentsOf: url)
+        XCTAssertEqual(url.pathExtension, "wav")
+        XCTAssertEqual(String(data: data.prefix(4), encoding: .ascii), "RIFF")
+        XCTAssertEqual(String(data: data.dropFirst(8).prefix(4), encoding: .ascii), "WAVE")
+        XCTAssertEqual(String(data: data.dropFirst(36).prefix(4), encoding: .ascii), "data")
+        XCTAssertEqual(data.suffix(chunk.audio.count), chunk.audio)
+        return [
+            TranscriptSegmentDraft(
+                sequence: 0,
+                startSeconds: chunk.startSeconds,
+                endSeconds: chunk.endSeconds,
+                text: "wav ok"
+            )
+        ]
+    }
+}
+
+private struct WAVAssertingFluidEngine: FluidDiarizationEngine {
+    func diarizeAudio(at url: URL, chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft]) async throws -> [SpeakerTurnDraft] {
+        let data = try Data(contentsOf: url)
+        XCTAssertEqual(url.pathExtension, "wav")
+        XCTAssertEqual(String(data: data.prefix(4), encoding: .ascii), "RIFF")
+        XCTAssertEqual(String(data: data.dropFirst(8).prefix(4), encoding: .ascii), "WAVE")
+        XCTAssertEqual(String(data: data.dropFirst(36).prefix(4), encoding: .ascii), "data")
+        XCTAssertEqual(data.suffix(chunk.audio.count), chunk.audio)
+        return [
+            SpeakerTurnDraft(
+                speakerLabel: "speaker-wav",
+                startSeconds: chunk.startSeconds,
+                endSeconds: chunk.endSeconds,
+                confidence: 0.9
+            )
+        ]
     }
 }
 

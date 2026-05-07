@@ -5,6 +5,7 @@ public struct SoundingAppPreferencesStorage {
         public static let databasePath = "sounding.preferences.databasePath"
         public static let whisperModelName = "sounding.preferences.whisperModelName"
         public static let rollingBufferTargetSeconds = "sounding.preferences.rollingBufferTargetSeconds"
+        public static let isDiarizationEnabled = "sounding.preferences.isDiarizationEnabled"
     }
 
     private let defaults: UserDefaults
@@ -29,6 +30,7 @@ public struct SoundingAppPreferencesStorage {
                 databaseURL: databaseURL,
                 whisperModelName: modelName,
                 rollingBufferTargetSeconds: clampedRollingBufferSeconds(rawRollingBufferSeconds),
+                isDiarizationEnabled: defaults.bool(forKey: Key.isDiarizationEnabled),
                 secretStore: secretStore,
                 fileManager: fileManager
             )
@@ -38,6 +40,7 @@ public struct SoundingAppPreferencesStorage {
             databaseURL: databaseURL,
             whisperModelName: modelName,
             rollingBufferTargetSeconds: clampedRollingBufferSeconds(rawRollingBufferSeconds),
+            isDiarizationEnabled: defaults.bool(forKey: Key.isDiarizationEnabled),
             fileManager: fileManager
         )
     }
@@ -45,17 +48,20 @@ public struct SoundingAppPreferencesStorage {
     public func saveNonSecretPreferences(
         databaseURL: URL,
         whisperModelName: String,
-        rollingBufferTargetSeconds: Double
+        rollingBufferTargetSeconds: Double,
+        isDiarizationEnabled: Bool = false
     ) {
         defaults.set(databaseURL.path, forKey: Key.databasePath)
         defaults.set(whisperModelName.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.whisperModelName)
         defaults.set(clampedRollingBufferSeconds(rollingBufferTargetSeconds), forKey: Key.rollingBufferTargetSeconds)
+        defaults.set(isDiarizationEnabled, forKey: Key.isDiarizationEnabled)
     }
 
     public func resetNonSecretPreferences() {
         defaults.removeObject(forKey: Key.databasePath)
         defaults.removeObject(forKey: Key.whisperModelName)
         defaults.removeObject(forKey: Key.rollingBufferTargetSeconds)
+        defaults.removeObject(forKey: Key.isDiarizationEnabled)
     }
 
     public static func clampedRollingBufferSeconds(_ value: Double) -> Double {

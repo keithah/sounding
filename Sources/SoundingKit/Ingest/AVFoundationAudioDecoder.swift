@@ -9,15 +9,21 @@ import AVFoundation
 public struct AVFoundationAudioDecoder: AudioDecoding {
     public var chunkDurationSeconds: Double
     public var segmentLoader: any HLSSegmentLoading
+    public var segmentID3Extractor: any HLSSegmentID3Extracting
+    public var segmentSCTE35Extractor: any HLSSegmentSCTE35Extracting
     public var now: @Sendable () -> String
 
     public init(
         chunkDurationSeconds: Double = 10,
         segmentLoader: any HLSSegmentLoading = HLSSegmentLoader(),
+        segmentID3Extractor: any HLSSegmentID3Extracting = HLSSegmentID3Extractor(),
+        segmentSCTE35Extractor: any HLSSegmentSCTE35Extracting = HLSSegmentSCTE35Extractor(),
         now: @escaping @Sendable () -> String = { ISO8601DateFormatter().string(from: Date()) }
     ) {
         self.chunkDurationSeconds = max(chunkDurationSeconds, 0.001)
         self.segmentLoader = segmentLoader
+        self.segmentID3Extractor = segmentID3Extractor
+        self.segmentSCTE35Extractor = segmentSCTE35Extractor
         self.now = now
     }
 
@@ -43,9 +49,14 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         }
 
         var chunks: [DecodedAudioChunk] = []
-        let limitedSegments = Array(segments.prefix(max(0, request.maxChunks ?? segments.count)))
+        let playableSegments = playableHLSSegments(
+            segments,
+            minimumMediaSequence: request.minimumHLSMediaSequence
+        )
+        let limitedSegments = Array(playableSegments.prefix(max(0, request.maxChunks ?? playableSegments.count)))
+        var timelineCursor = max(0, request.hlsTimelineStartSeconds ?? 0)
         for (index, segment) in limitedSegments.enumerated() {
-            let markers = try markersForSegment(segment, source: resolvedManifest.source)
+            var markers = try markersForSegment(segment, source: resolvedManifest.source)
             let data: Data
             do {
                 data = try await segmentLoader.loadSegment(uri: segment.uri, relativeTo: resolvedManifest.source)
@@ -53,10 +64,18 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
                 throw AVFoundationAudioDecoderError.decodeFailed("HLS segment decode failed: \(sanitized(error)).")
             }
 
-            let start = Double(index) * chunkDurationSeconds
             let duration = Double(segment.duration ?? "") ?? chunkDurationSeconds
+            let start = timelineCursor
             let end = start + max(duration, 0.001)
+            timelineCursor = end
             let segmentDescription = resolvedSegmentDescription(segment.uri, relativeTo: resolvedManifest.source)
+            markers.append(
+                contentsOf: markersForSegmentBytes(
+                    data,
+                    mediaSequence: segment.mediaSequence,
+                    segmentURI: segmentDescription
+                )
+            )
             let temporarySegmentURL = try writeTemporarySegment(data, sourceDescription: segmentDescription)
             defer { try? FileManager.default.removeItem(at: temporarySegmentURL) }
             let decoded: (audio: Data, format: DecodedAudioFormat)
@@ -84,6 +103,26 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
             ))
         }
         return applyDurationBound(chunks, durationSeconds: request.durationSeconds)
+    }
+
+    private func playableHLSSegments(
+        _ segments: [HLSManifestMediaSegment],
+        minimumMediaSequence: Int?
+    ) -> [HLSManifestMediaSegment] {
+        guard let minimumMediaSequence else { return segments }
+        let segmentsAtOrAboveMinimum = segments.filter { segment in
+            (Int(segment.mediaSequence) ?? 0) >= minimumMediaSequence
+        }
+        if !segmentsAtOrAboveMinimum.isEmpty {
+            return segmentsAtOrAboveMinimum
+        }
+
+        let mediaSequences = segments.compactMap { Int($0.mediaSequence) }
+        guard let latestPlaylistSequence = mediaSequences.max() else { return segments }
+        if latestPlaylistSequence < minimumMediaSequence {
+            return segments
+        }
+        return []
     }
 
     private func decodeAsset(_ request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
@@ -227,6 +266,24 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         } catch {
             throw AVFoundationAudioDecoderError.decodeFailed("HLS marker extraction failed: \(sanitized(error)).")
         }
+    }
+
+    private func markersForSegmentBytes(
+        _ data: Data,
+        mediaSequence: String,
+        segmentURI: String
+    ) -> [AdMarker] {
+        let id3Markers = (try? segmentID3Extractor.extractMarkers(
+            from: data,
+            mediaSequence: mediaSequence,
+            segmentURI: segmentURI
+        )) ?? []
+        let scte35Markers = (try? segmentSCTE35Extractor.extractMarkers(
+            from: data,
+            mediaSequence: mediaSequence,
+            segmentURI: segmentURI
+        )) ?? []
+        return id3Markers + scte35Markers
     }
 
     private func applyDurationBound(_ chunks: [DecodedAudioChunk], durationSeconds: Double?) -> [DecodedAudioChunk] {

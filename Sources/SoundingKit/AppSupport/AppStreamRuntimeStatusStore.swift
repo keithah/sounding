@@ -228,6 +228,46 @@ public struct AppStreamRuntimeStatusStore: Sendable {
         }
     }
 
+    public func resetTransientStatuses(updatedAt: String) throws {
+        do {
+            try database.write { db in
+                try db.execute(
+                    sql: """
+                    UPDATE stream_runtime_status
+                    SET phase = ?,
+                        attempt = 0,
+                        max_attempts = 0,
+                        next_retry_seconds = NULL,
+                        next_retry_at = NULL,
+                        recent_failure_message = NULL,
+                        recent_failure_at = NULL,
+                        updated_at = ?,
+                        lifecycle_reason = NULL,
+                        suspended_at = NULL,
+                        recovery_started_at = NULL,
+                        recovered_at = NULL,
+                        recovery_latency_ms = NULL
+                    WHERE phase IN (?, ?, ?, ?, ?, ?)
+                    """,
+                    arguments: [
+                        AppStreamRuntimeStatusPhase.stopped.rawValue,
+                        IngestRedaction.redact(updatedAt),
+                        AppStreamRuntimeStatusPhase.connecting.rawValue,
+                        AppStreamRuntimeStatusPhase.running.rawValue,
+                        AppStreamRuntimeStatusPhase.paused.rawValue,
+                        AppStreamRuntimeStatusPhase.suspended.rawValue,
+                        AppStreamRuntimeStatusPhase.recovering.rawValue,
+                        AppStreamRuntimeStatusPhase.reconnecting.rawValue
+                    ]
+                )
+            }
+        } catch {
+            throw AppStreamRuntimeStatusStoreError.databaseWriteFailed(
+                message: Self.redactedDatabaseMessage(error)
+            )
+        }
+    }
+
     public func status(streamID: Int64) throws -> AppStreamRuntimeStatusSnapshot? {
         guard streamID > 0 else { throw AppStreamRuntimeStatusStoreError.invalidStreamID }
 

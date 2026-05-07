@@ -7,3 +7,14 @@ public protocol MLTranscription: Sendable {
 public protocol SpeakerDiarization: Sendable {
     func diarize(_ chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft]) async throws -> [SpeakerTurnDraft]
 }
+
+public struct NoOpSpeakerDiarizer: SpeakerDiarization {
+    public init() {}
+
+    public func diarize(
+        _ chunk: DecodedAudioChunk,
+        transcriptSegments: [TranscriptSegmentDraft]
+    ) async throws -> [SpeakerTurnDraft] {
+        []
+    }
+}

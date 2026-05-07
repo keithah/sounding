@@ -5,7 +5,7 @@ import Foundation
 /// This is intentionally a narrow S04 seam: it recognizes fixture-capable MPEG-TS packet
 /// payload-unit-start sections and raw deterministic section bytes, then delegates all SCTE-35
 /// semantics to the shared decoder. S07 can harden broader transport handling behind this API.
-public protocol HLSSegmentSCTE35Extracting {
+public protocol HLSSegmentSCTE35Extracting: Sendable {
     func extractMarkers(
         from data: Data,
         mediaSequence: String,
@@ -34,8 +34,10 @@ public struct HLSSegmentSCTE35Extractor: HLSSegmentSCTE35Extracting {
 
         var markers = [AdMarker]()
         var sawCandidate = false
+        var sawTransportPackets = false
 
         for packetOffset in packetOffsets(in: data) {
+            sawTransportPackets = true
             guard let payloadOffset = payloadOffset(in: data, packetOffset: packetOffset) else { continue }
             let payloadUnitStart = (data[packetOffset + 1] & 0x40) != 0
             guard payloadUnitStart, payloadOffset < packetOffset + Self.packetSize else { continue }
@@ -50,7 +52,7 @@ public struct HLSSegmentSCTE35Extractor: HLSSegmentSCTE35Extracting {
             markers.append(try marker(from: section, mediaSequence: mediaSequence, segmentURI: segmentURI))
         }
 
-        if markers.isEmpty, !sawCandidate, let candidateOffset = data.firstIndex(of: Self.scte35TableID) {
+        if markers.isEmpty, !sawTransportPackets, !sawCandidate, let candidateOffset = data.firstIndex(of: Self.scte35TableID) {
             sawCandidate = true
             let section = try sectionData(from: data, startingAt: candidateOffset)
             markers.append(try marker(from: section, mediaSequence: mediaSequence, segmentURI: segmentURI))

@@ -103,18 +103,21 @@ public struct SoundingAppPreferences: Equatable, Sendable {
     public var databaseURL: URL
     public var whisperModelName: String
     public var rollingBufferTargetSeconds: Double
+    public var isDiarizationEnabled: Bool
     public var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
 
     public init(
         databaseURL: URL? = nil,
         whisperModelName: String = Self.defaultWhisperModelName,
         rollingBufferTargetSeconds: Double = RollingBufferConfiguration.appDefault().targetDurationSeconds,
+        isDiarizationEnabled: Bool = false,
         acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus = .missing,
         fileManager: FileManager = .default
     ) {
         self.databaseURL = databaseURL ?? Self.defaultDatabaseURL(fileManager: fileManager)
         self.whisperModelName = whisperModelName
         self.rollingBufferTargetSeconds = rollingBufferTargetSeconds
+        self.isDiarizationEnabled = isDiarizationEnabled
         self.acoustIDKeyStatus = acoustIDKeyStatus
     }
 
@@ -122,6 +125,7 @@ public struct SoundingAppPreferences: Equatable, Sendable {
         databaseURL: URL? = nil,
         whisperModelName: String = Self.defaultWhisperModelName,
         rollingBufferTargetSeconds: Double = RollingBufferConfiguration.appDefault().targetDurationSeconds,
+        isDiarizationEnabled: Bool = false,
         secretStore: any AppSecretStore,
         fileManager: FileManager = .default
     ) {
@@ -135,6 +139,7 @@ public struct SoundingAppPreferences: Equatable, Sendable {
             databaseURL: databaseURL,
             whisperModelName: whisperModelName,
             rollingBufferTargetSeconds: rollingBufferTargetSeconds,
+            isDiarizationEnabled: isDiarizationEnabled,
             acoustIDKeyStatus: status,
             fileManager: fileManager
         )
@@ -156,6 +161,7 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
     public var databaseURL: URL
     public var whisperModelName: String
     public var rollingBuffer: RollingBufferConfiguration
+    public var isDiarizationEnabled: Bool
     public var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
     public var issues: [SoundingAppConfigurationIssue]
 
@@ -167,12 +173,14 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
         databaseURL: URL,
         whisperModelName: String,
         rollingBuffer: RollingBufferConfiguration,
+        isDiarizationEnabled: Bool = false,
         acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus,
         issues: [SoundingAppConfigurationIssue] = []
     ) {
         self.databaseURL = databaseURL
         self.whisperModelName = whisperModelName
         self.rollingBuffer = rollingBuffer
+        self.isDiarizationEnabled = isDiarizationEnabled
         self.acoustIDKeyStatus = acoustIDKeyStatus
         self.issues = issues
     }
@@ -195,6 +203,7 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
             databaseURL: preferences.databaseURL,
             whisperModelName: modelName,
             rollingBuffer: rollingBuffer,
+            isDiarizationEnabled: preferences.isDiarizationEnabled,
             acoustIDKeyStatus: preferences.acoustIDKeyStatus,
             issues: issues
         )

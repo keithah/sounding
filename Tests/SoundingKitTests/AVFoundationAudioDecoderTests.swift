@@ -82,6 +82,147 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         XCTAssertEqual(chunks.compactMap { $0.hlsIdentity?.manifestPosition }, [0, 1])
     }
 
+    func testHLSDecodeSkipsSegmentsBeforeMinimumMediaSequenceBeforeLoading() async throws {
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:7
+                #EXTINF:6.0,
+                segments/segment7.ts
+                #EXTINF:6.0,
+                segments/segment8.ts
+                #EXTINF:6.0,
+                segments/segment9.ts
+                #EXT-X-ENDLIST
+                """)
+        defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
+
+        let loader = RecordingSegmentLoader(payload: Data([0x09]))
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: loader,
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls,
+                maxChunks: 1,
+                minimumHLSMediaSequence: 9
+            ))
+
+        XCTAssertEqual(chunks.map { $0.hlsIdentity?.mediaSequence }, [9])
+        let requests = await loader.requests()
+        XCTAssertEqual(requests.map(\.uri), ["segments/segment9.ts"])
+    }
+
+    func testHLSDecodeKeepsCurrentPlaylistWhenPersistedMinimumIsAboveResetSequence() async throws {
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:8
+                #EXT-X-DISCONTINUITY-SEQUENCE:2
+                #EXT-X-DISCONTINUITY
+                #EXTINF:6.0,
+                segments/segment8.ts
+                #EXTINF:6.0,
+                segments/segment9.ts
+                #EXT-X-ENDLIST
+                """)
+        defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
+
+        let loader = RecordingSegmentLoader(payload: Data([0x08]))
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: loader,
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls,
+                maxChunks: 1,
+                minimumHLSMediaSequence: 713
+            ))
+
+        XCTAssertEqual(chunks.map { $0.hlsIdentity?.mediaSequence }, [8])
+        let requests = await loader.requests()
+        XCTAssertEqual(requests.map(\.uri), ["segments/segment8.ts"])
+    }
+
+    func testHLSDecodedChunksIncludeSegmentByteMarkers() async throws {
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:7
+                #EXTINF:6.0,
+                segments/segment7.aac
+                #EXT-X-ENDLIST
+                """)
+        defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
+
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: FixtureSegmentLoader(payloads: [
+                "segments/segment7.aac": Data([0x01, 0x02, 0x03])
+            ]),
+            segmentID3Extractor: FixtureSegmentID3Extractor(),
+            segmentSCTE35Extractor: EmptySegmentSCTE35Extractor(),
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls,
+                maxChunks: 1
+            ))
+
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks[0].adMarkers.map(\.type), ["ID3"])
+        XCTAssertEqual(chunks[0].adMarkers.first?.fields["StreamTitle"], .string("Fixture Title"))
+        XCTAssertEqual(chunks[0].adMarkers.first?.segment, "7")
+    }
+
+    func testHLSSegmentByteMarkerFailuresDoNotAbortDecode() async throws {
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:7
+                #EXTINF:6.0,
+                segments/segment7.aac
+                #EXT-X-ENDLIST
+                """)
+        defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
+
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: FixtureSegmentLoader(payloads: [
+                "segments/segment7.aac": Data([0x01, 0x02, 0x03])
+            ]),
+            segmentID3Extractor: ThrowingSegmentID3Extractor(),
+            segmentSCTE35Extractor: EmptySegmentSCTE35Extractor(),
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls,
+                maxChunks: 1
+            ))
+
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks[0].audio, Data([0x01, 0x02, 0x03]))
+        XCTAssertEqual(chunks[0].adMarkers, [])
+    }
+
     func testHLSSegmentLoaderFailureKeepsRawSegmentURIOutOfError() async throws {
         let manifestURL = temporaryManifestURL(
             contents: """
@@ -253,5 +394,44 @@ private struct FixtureSegmentLoader: HLSSegmentLoading {
             return payload
         }
         throw AVFoundationAudioDecoderError.sourceOpenFailed("fixture segment missing")
+    }
+}
+
+private struct FixtureSegmentID3Extractor: HLSSegmentID3Extracting {
+    func extractMarkers(
+        from data: Data,
+        mediaSequence: String,
+        segmentURI: String
+    ) throws -> [AdMarker] {
+        [
+            AdMarker(
+                type: "ID3",
+                classification: .unknown,
+                source: "hls_segment",
+                tag: "ID3",
+                segment: mediaSequence,
+                fields: ["StreamTitle": .string("Fixture Title")]
+            )
+        ]
+    }
+}
+
+private struct ThrowingSegmentID3Extractor: HLSSegmentID3Extracting {
+    func extractMarkers(
+        from data: Data,
+        mediaSequence: String,
+        segmentURI: String
+    ) throws -> [AdMarker] {
+        throw NSError(domain: "fixture-id3", code: 32)
+    }
+}
+
+private struct EmptySegmentSCTE35Extractor: HLSSegmentSCTE35Extracting {
+    func extractMarkers(
+        from data: Data,
+        mediaSequence: String,
+        segmentURI: String
+    ) throws -> [AdMarker] {
+        []
     }
 }

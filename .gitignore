@@ -67,6 +67,7 @@ soak-evidence/
 shipping.local/
 release.local/
 notary-logs.local/
+updates.local/
 *.distribution-package.local/
 *.xcarchive
 *.dmg

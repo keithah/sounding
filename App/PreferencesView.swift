@@ -7,6 +7,7 @@ final class AppPreferencesController: ObservableObject {
     @Published var databasePath: String
     @Published var whisperModelName: String
     @Published var rollingBufferMinutes: Double
+    @Published var isDiarizationEnabled: Bool
     @Published private(set) var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
     @Published private(set) var issues: [SoundingAppConfigurationIssue]
     @Published private(set) var actionMessage: String?
@@ -25,6 +26,7 @@ final class AppPreferencesController: ObservableObject {
         databasePath = preferences.databaseURL.path
         whisperModelName = preferences.whisperModelName
         rollingBufferMinutes = preferences.rollingBufferTargetSeconds / 60
+        isDiarizationEnabled = preferences.isDiarizationEnabled
         acoustIDKeyStatus = preferences.acoustIDKeyStatus
         issues = SoundingAppConfiguration.validated(preferences: preferences).issues
     }
@@ -38,6 +40,7 @@ final class AppPreferencesController: ObservableObject {
         databasePath = preferences.databaseURL.path
         whisperModelName = preferences.whisperModelName
         rollingBufferMinutes = preferences.rollingBufferTargetSeconds / 60
+        isDiarizationEnabled = preferences.isDiarizationEnabled
         acoustIDKeyStatus = preferences.acoustIDKeyStatus
         issues = SoundingAppConfiguration.validated(preferences: preferences).issues
     }
@@ -47,7 +50,8 @@ final class AppPreferencesController: ObservableObject {
         storage.saveNonSecretPreferences(
             databaseURL: databaseURL,
             whisperModelName: whisperModelName,
-            rollingBufferTargetSeconds: rollingBufferMinutes * 60
+            rollingBufferTargetSeconds: rollingBufferMinutes * 60,
+            isDiarizationEnabled: isDiarizationEnabled
         )
         actionMessage = "Preferences saved. Restart the app runtime to apply startup settings."
         refreshStatus()
@@ -101,12 +105,14 @@ final class AppPreferencesController: ObservableObject {
 
 struct PreferencesView: View {
     @ObservedObject var controller: AppPreferencesController
+    @ObservedObject var softwareUpdateController: SoftwareUpdateController
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                acoustIDSection
+                softwareUpdateSection
+                acoustIDEnrichmentSection
                 whisperSection
                 rollingBufferSection
                 databaseSection
@@ -130,14 +136,43 @@ struct PreferencesView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var acoustIDSection: some View {
-        SettingsSection(title: "AcoustID", systemImage: "key.horizontal") {
+    private var softwareUpdateSection: some View {
+        SettingsSection(title: "Software Updates", systemImage: "arrow.down.app") {
+            HStack(alignment: .center, spacing: 12) {
+                if softwareUpdateController.canCheckForUpdates {
+                    Pill(text: "Enabled", color: .green, systemImage: "checkmark.circle")
+                } else {
+                    Pill(text: "Setup needed", color: .orange, systemImage: "exclamationmark.triangle")
+                }
+                Text(softwareUpdateController.statusMessage)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            Text("Sparkle checks the signed appcast configured by SUFeedURL. Keep Sparkle private keys out of the repository.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Check for Updates…", systemImage: "arrow.clockwise") {
+                softwareUpdateController.checkForUpdates()
+            }
+            .buttonStyle(.bordered)
+            .disabled(!softwareUpdateController.canCheckForUpdates)
+        }
+    }
+
+    private var acoustIDEnrichmentSection: some View {
+        SettingsSection(title: "AcoustID Enrichment", systemImage: "key.horizontal") {
             HStack(alignment: .center, spacing: 12) {
                 statusPill(for: controller.acoustIDKeyStatus)
                 Text(acoustIDStatusDetail)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
+
+            Text("Used only for AcoustID song metadata enrichment. HLS timed ID3 metadata and transcript ingest continue without this key.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             SecureField("Paste AcoustID API key", text: $controller.acoustIDKeyDraft)
                 .textFieldStyle(.roundedBorder)

@@ -9,6 +9,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
     public var timelineLimit: Int
     public var lookbackSeconds: Double?
     public var focusedSegmentID: Int64?
+    public var hideDeterministicUnknownSongs: Bool
     public var refreshedAt: String
 
     public init(
@@ -20,6 +21,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
         timelineLimit: Int = 100,
         lookbackSeconds: Double? = 300,
         focusedSegmentID: Int64? = nil,
+        hideDeterministicUnknownSongs: Bool = false,
         refreshedAt: String? = nil
     ) {
         self.streamID = streamID
@@ -30,6 +32,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
         self.timelineLimit = timelineLimit
         self.lookbackSeconds = lookbackSeconds
         self.focusedSegmentID = focusedSegmentID
+        self.hideDeterministicUnknownSongs = hideDeterministicUnknownSongs
         self.refreshedAt = refreshedAt ?? Self.defaultRefreshTimestamp()
     }
 
@@ -75,6 +78,8 @@ public struct StreamAppTranscriptParagraph: Equatable, Identifiable, Sendable {
     public var speakerDisplay: StreamAppSpeakerDisplay
     public var startSeconds: Double
     public var endSeconds: Double
+    public var startTimestamp: String?
+    public var endTimestamp: String?
     public var text: String
     public var confidence: Double?
     public var words: [StreamAppTranscriptWord]
@@ -88,6 +93,8 @@ public struct StreamAppTranscriptParagraph: Equatable, Identifiable, Sendable {
         speakerDisplay: StreamAppSpeakerDisplay,
         startSeconds: Double,
         endSeconds: Double,
+        startTimestamp: String? = nil,
+        endTimestamp: String? = nil,
         text: String,
         confidence: Double?,
         words: [StreamAppTranscriptWord] = []
@@ -100,6 +107,8 @@ public struct StreamAppTranscriptParagraph: Equatable, Identifiable, Sendable {
         self.speakerDisplay = speakerDisplay
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
+        self.startTimestamp = startTimestamp
+        self.endTimestamp = endTimestamp
         self.text = text
         self.confidence = confidence
         self.words = words
@@ -163,7 +172,10 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
     public var kind: StreamAppMetadataKind
     public var startSeconds: Double
     public var endSeconds: Double?
+    public var startTimestamp: String?
+    public var endTimestamp: String?
     public var title: String
+    public var artist: String?
     public var subtitle: String?
     public var confidence: Double?
 
@@ -172,7 +184,10 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         kind: StreamAppMetadataKind,
         startSeconds: Double,
         endSeconds: Double? = nil,
+        startTimestamp: String? = nil,
+        endTimestamp: String? = nil,
         title: String,
+        artist: String? = nil,
         subtitle: String? = nil,
         confidence: Double? = nil
     ) {
@@ -180,7 +195,10 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         self.kind = kind
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
+        self.startTimestamp = startTimestamp
+        self.endTimestamp = endTimestamp
         self.title = title
+        self.artist = artist
         self.subtitle = subtitle
         self.confidence = confidence
     }
@@ -197,6 +215,8 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
     public var kind: StreamAppTimelineItemKind
     public var startSeconds: Double
     public var endSeconds: Double?
+    public var startTimestamp: String?
+    public var endTimestamp: String?
     public var title: String
     public var subtitle: String?
     public var speakerDisplay: StreamAppSpeakerDisplay?
@@ -207,6 +227,8 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         kind: StreamAppTimelineItemKind,
         startSeconds: Double,
         endSeconds: Double? = nil,
+        startTimestamp: String? = nil,
+        endTimestamp: String? = nil,
         title: String,
         subtitle: String? = nil,
         speakerDisplay: StreamAppSpeakerDisplay? = nil,
@@ -216,6 +238,8 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         self.kind = kind
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
+        self.startTimestamp = startTimestamp
+        self.endTimestamp = endTimestamp
         self.title = title
         self.subtitle = subtitle
         self.speakerDisplay = speakerDisplay

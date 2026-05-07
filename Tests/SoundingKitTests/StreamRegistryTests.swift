@@ -18,6 +18,7 @@ final class StreamRegistryTests: XCTestCase {
         XCTAssertEqual(record.streamType, "hls")
         XCTAssertEqual(record.sourceDescription, "https://example.test/private/live.m3u8")
         XCTAssertEqual(record.status, .active)
+        XCTAssertFalse(record.diarizationEnabled)
         XCTAssertEqual(record.createdAt, "2026-05-01T10:00:00Z")
         XCTAssertEqual(record.updatedAt, "2026-05-01T10:00:00Z")
         XCTAssertNil(record.pausedAt)
@@ -40,6 +41,45 @@ final class StreamRegistryTests: XCTestCase {
             stored?["source_url"] as String?,
             "https://user:pass@example.test/private/live.m3u8?token=secret#frag"
         )
+    }
+
+    func testDiarizationSettingIsPerStreamAndPersists() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+
+        let first = try registry.add(
+            name: "Main",
+            streamType: "hls",
+            source: "https://example.test/main.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let second = try registry.add(
+            name: "Backup",
+            streamType: "hls",
+            source: "https://example.test/backup.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+
+        let enabled = try registry.setDiarizationEnabled(
+            id: first.id,
+            isEnabled: true,
+            updatedAt: "2026-05-01T10:01:00Z"
+        )
+
+        XCTAssertTrue(enabled.changed)
+        XCTAssertTrue(enabled.record.diarizationEnabled)
+        XCTAssertEqual(enabled.record.updatedAt, "2026-05-01T10:01:00Z")
+        XCTAssertTrue(try XCTUnwrap(registry.find(id: first.id)).diarizationEnabled)
+        XCTAssertFalse(try XCTUnwrap(registry.find(id: second.id)).diarizationEnabled)
+        XCTAssertTrue(try XCTUnwrap(registry.reconnectSource(id: first.id)).diarizationEnabled)
+
+        let enabledAgain = try registry.setDiarizationEnabled(
+            id: first.id,
+            isEnabled: true,
+            updatedAt: "2026-05-01T10:02:00Z"
+        )
+        XCTAssertFalse(enabledAgain.changed)
+        XCTAssertEqual(enabledAgain.record.updatedAt, "2026-05-01T10:01:00Z")
     }
 
     func testReconnectSourceExposesRawSourceWithoutChangingListRedaction() throws {

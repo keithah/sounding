@@ -13,6 +13,7 @@ final class SoundingAppPreferencesTests: XCTestCase {
             RollingBufferConfiguration.appDefault().targetDurationSeconds
         )
         XCTAssertEqual(preferences.acoustIDKeyStatus, .missing)
+        XCTAssertFalse(preferences.isDiarizationEnabled)
         XCTAssertEqual(preferences.databaseURL.lastPathComponent, "Sounding.sqlite")
         XCTAssertEqual(preferences.databaseURL.deletingLastPathComponent().lastPathComponent, "Sounding")
         XCTAssertFalse(String(describing: preferences).contains("api_key"))
@@ -35,6 +36,7 @@ final class SoundingAppPreferencesTests: XCTestCase {
         XCTAssertEqual(configuration.databaseURL, databaseURL)
         XCTAssertEqual(configuration.whisperModelName, "tiny.en")
         XCTAssertEqual(configuration.rollingBuffer.targetDurationSeconds, 120)
+        XCTAssertFalse(configuration.isDiarizationEnabled)
         XCTAssertFalse(configuration.hasBlockingIssues)
         XCTAssertEqual(configuration.issues.map(\.id), ["acoustid.key-missing"])
         XCTAssertEqual(configuration.issues.first?.severity, .warning)

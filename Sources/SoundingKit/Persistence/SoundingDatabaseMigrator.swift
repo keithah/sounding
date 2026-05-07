@@ -415,6 +415,14 @@ enum SoundingDatabaseMigrator {
             )
         }
 
+        migrator.registerMigration("addPerStreamDiarizationSetting") { db in
+            try db.alter(table: "streams") { table in
+                table.add(column: "diarization_enabled", .boolean)
+                    .notNull()
+                    .defaults(to: false)
+            }
+        }
+
         try migrator.migrate(writer)
     }
 }

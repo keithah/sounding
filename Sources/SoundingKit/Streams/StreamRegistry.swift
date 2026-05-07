@@ -13,11 +13,38 @@ public struct StreamRecord: Equatable, Sendable {
     public var streamType: String
     public var sourceDescription: String
     public var status: StreamStatus
+    public var diarizationEnabled: Bool
     public var createdAt: String
     public var updatedAt: String
     public var pausedAt: String?
     public var resumedAt: String?
     public var removedAt: String?
+
+    public init(
+        id: Int64,
+        name: String,
+        streamType: String,
+        sourceDescription: String,
+        status: StreamStatus,
+        diarizationEnabled: Bool = false,
+        createdAt: String,
+        updatedAt: String,
+        pausedAt: String?,
+        resumedAt: String?,
+        removedAt: String?
+    ) {
+        self.id = id
+        self.name = name
+        self.streamType = streamType
+        self.sourceDescription = sourceDescription
+        self.status = status
+        self.diarizationEnabled = diarizationEnabled
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.pausedAt = pausedAt
+        self.resumedAt = resumedAt
+        self.removedAt = removedAt
+    }
 }
 
 public struct StreamReconnectSource: Equatable, Sendable {
@@ -26,6 +53,7 @@ public struct StreamReconnectSource: Equatable, Sendable {
     public var streamType: String
     public var source: String
     public var sourceDescription: String
+    public var diarizationEnabled: Bool
 }
 
 public struct StreamMutationResult: Equatable, Sendable {
@@ -81,8 +109,8 @@ public final class StreamRegistry {
                     sql: """
                     INSERT INTO streams (
                         name, stream_type, source, source_url, status, created_at, updated_at,
-                        paused_at, resumed_at, removed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                        diarization_enabled, paused_at, resumed_at, removed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                     """,
                     arguments: [
                         name,
@@ -91,7 +119,8 @@ public final class StreamRegistry {
                         source,
                         StreamStatus.active.rawValue,
                         createdAt,
-                        createdAt
+                        createdAt,
+                        false
                     ]
                 )
                 return try fetchStream(id: db.lastInsertedRowID, includeRemoved: true, db: db) ?? {
@@ -113,7 +142,7 @@ public final class StreamRegistry {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                        SELECT id, name, stream_type, source, status, created_at, updated_at,
+                        SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
                                paused_at, resumed_at, removed_at
                         FROM streams
                         WHERE name IS NOT NULL
@@ -124,7 +153,7 @@ public final class StreamRegistry {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                        SELECT id, name, stream_type, source, status, created_at, updated_at,
+                        SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
                                paused_at, resumed_at, removed_at
                         FROM streams
                         WHERE name IS NOT NULL
@@ -231,6 +260,26 @@ public final class StreamRegistry {
         }
     }
 
+    public func setDiarizationEnabled(
+        id: Int64,
+        isEnabled: Bool,
+        updatedAt: String? = nil
+    ) throws -> StreamMutationResult {
+        let updatedAt = updatedAt ?? Self.nowString()
+        return try transition(id: id, at: updatedAt, includeRemoved: false) { record, db in
+            guard record.diarizationEnabled != isEnabled else { return false }
+            try db.execute(
+                sql: """
+                UPDATE streams
+                SET diarization_enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                arguments: [isEnabled, updatedAt, record.id]
+            )
+            return true
+        }
+    }
+
     private func transition(
         id: Int64,
         at _: String,
@@ -297,7 +346,7 @@ public final class StreamRegistry {
         return try Row.fetchOne(
             db,
             sql: """
-            SELECT id, name, stream_type, source, status, created_at, updated_at,
+            SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
                    paused_at, resumed_at, removed_at
             FROM streams
             WHERE id = ?
@@ -314,7 +363,7 @@ public final class StreamRegistry {
         return try Row.fetchOne(
             db,
             sql: """
-            SELECT id, name, stream_type, source, status, created_at, updated_at,
+            SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
                    paused_at, resumed_at, removed_at
             FROM streams
             WHERE name = ?
@@ -331,7 +380,7 @@ public final class StreamRegistry {
         return try Row.fetchOne(
             db,
             sql: """
-            SELECT id, name, stream_type, source, source_url, status
+            SELECT id, name, stream_type, source, source_url, status, diarization_enabled
             FROM streams
             WHERE id = ?
               AND name IS NOT NULL
@@ -353,6 +402,7 @@ public final class StreamRegistry {
             streamType: row["stream_type"],
             sourceDescription: row["source"],
             status: status,
+            diarizationEnabled: row["diarization_enabled"],
             createdAt: row["created_at"],
             updatedAt: row["updated_at"],
             pausedAt: row["paused_at"],
@@ -373,7 +423,8 @@ public final class StreamRegistry {
             name: row["name"],
             streamType: row["stream_type"],
             source: sourceURL ?? sourceDescription,
-            sourceDescription: sourceDescription
+            sourceDescription: sourceDescription,
+            diarizationEnabled: row["diarization_enabled"]
         )
     }
 

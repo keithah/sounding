@@ -88,7 +88,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "paused_at",
             "resumed_at",
             "removed_at",
-            "source_url"
+            "source_url",
+            "diarization_enabled"
         ])
         XCTAssertEqual(columnsByTable["ingest_runs"], [
             "id",

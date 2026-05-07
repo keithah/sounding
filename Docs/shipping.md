@@ -82,7 +82,45 @@ scripts/distribution/package --real --json \
   --notary-profile "[local-notary-profile-label]"
 ```
 
-Real mode signs the staged app, verifies the signature, creates and verifies the disk image, submits it to notarytool, staples the app and disk image, and runs Gatekeeper assessment. It is expected to fail fast with redacted diagnostics when credentials or Apple tooling are missing.
+Real mode signs the staged app, verifies the signature, notarizes a zipped copy of the app, staples the app, creates a drag-install DMG containing `Sounding.app` and an `Applications` shortcut, signs and verifies the DMG, notarizes the DMG, staples the DMG, and runs Gatekeeper assessment against both artifacts. This keeps the copied app usable after a user drags it out of the disk image and keeps the downloadable DMG independently stapled.
+
+The script follows Apple's current Developer ID distribution model: Developer ID signing, hardened runtime, `notarytool` submission, `stapler`, and Gatekeeper validation with `spctl`. It is expected to fail fast with redacted diagnostics when credentials or Apple tooling are missing.
+
+## Sparkle OTA updates
+
+Sounding uses Sparkle 2 for non-App-Store OTA updates. Sparkle is inert until the app bundle has a real `SUFeedURL` and `SUPublicEDKey`.
+
+Generate the Sparkle EdDSA key once on the release Mac after Xcode resolves packages:
+
+```sh
+SPARKLE_GENERATE_KEYS=$(find "$HOME/Library/Developer/Xcode/DerivedData" \
+  -path '*/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_keys' \
+  -type f -perm -111 | sort | tail -n 1)
+
+"$SPARKLE_GENERATE_KEYS" \
+  --account sounding-updates
+```
+
+Copy only the printed public key into `SUPublicEDKey` in `App/Info.plist`. Keep the private key in Keychain; do not export or commit it. Set `SUFeedURL` to the public HTTPS appcast URL, for example:
+
+```xml
+<key>SUFeedURL</key>
+<string>https://updates.example.com/sounding/appcast.xml</string>
+<key>SUPublicEDKey</key>
+<string>[sparkle-public-key]</string>
+```
+
+After a successful real package, generate the appcast from the notarized DMG:
+
+```sh
+scripts/distribution/appcast \
+  --release-dir updates.local/sounding \
+  --dmg release.local/current/package-YYYYMMDD-HHMMSS/Sounding.dmg \
+  --download-url-prefix https://updates.example.com/sounding/ \
+  --key-account sounding-updates
+```
+
+Upload `updates.local/sounding/Sounding.dmg` and `updates.local/sounding/appcast.xml` to the same HTTPS location. Sparkle's `generate_appcast` signs update entries and can reuse an existing `appcast.xml` in that directory when publishing later versions.
 
 ## Local artifact layout
 
@@ -95,11 +133,13 @@ shipping.local/
 release.local/
   current/
   prior/
+updates.local/
+  sounding/
 notary-logs.local/
   private-notary-investigation/
 ```
 
-Generated app bundles, disk images, archive bundles, export directories, raw command logs, notary logs, screenshots, and command transcripts are private. They may include paths, certificate metadata, submission identifiers, tool output, or machine details. Do not commit them and do not paste their contents into tracked notes.
+Generated app bundles, disk images, archive bundles, Sparkle appcasts, update feeds, export directories, raw command logs, notary logs, screenshots, and command transcripts are private until intentionally uploaded. They may include paths, certificate metadata, submission identifiers, tool output, or machine details. Do not commit them and do not paste their contents into tracked notes.
 
 ## Pre-release health checks
 

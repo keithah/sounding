@@ -159,6 +159,105 @@ final class StreamIngestPipelineTests: XCTestCase {
         XCTAssertEqual(storedSources["adRaw"] as? String, "[redacted]")
     }
 
+    func testDiarizationTurnsAssignTranscriptSegmentAndWordSpeakersBeforePersistence() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let segments = [
+            Self.segment(
+                text: "first voice second voice",
+                speakerLabel: "",
+                startSeconds: 0,
+                endSeconds: 4,
+                words: ["first", "voice", "second", "voice"]
+            )
+        ]
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeTranscriber(segmentsBySequence: [0: segments]),
+            diarizer: FakeDiarizer(turnsBySequence: [
+                0: [
+                    SpeakerTurnDraft(speakerLabel: "speaker-S1", startSeconds: 0, endSeconds: 2, confidence: 0.9),
+                    SpeakerTurnDraft(speakerLabel: "speaker-S2", startSeconds: 2, endSeconds: 4, confidence: 0.9),
+                ]
+            ])
+        )
+
+        _ = try await pipeline.run(
+            source: "https://example.test/live", streamType: .icecast, maxChunks: 1)
+
+        let labels = try temporary.database.read { db in
+            try (
+                segments: String.fetchAll(
+                    db,
+                    sql: "SELECT speaker_label || ':' || text FROM transcript_segments ORDER BY sequence"
+                ),
+                words: String.fetchAll(
+                    db,
+                    sql: "SELECT DISTINCT speaker_label FROM transcript_words ORDER BY speaker_label"
+                )
+            )
+        }
+        XCTAssertEqual(labels.segments, ["speaker-S1:first voice", "speaker-S2:second voice"])
+        XCTAssertEqual(labels.words, ["speaker-S1", "speaker-S2"])
+    }
+
+    func testSplitDiarizedSegmentsKeepUniqueSequencesAcrossMultipleChunks() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeDecoder(chunks: [Self.chunk(sequence: 0), Self.chunk(sequence: 1)]),
+            transcriber: FakeTranscriber(segmentsBySequence: [
+                0: [
+                    Self.segment(
+                        text: "one two three four",
+                        speakerLabel: "",
+                        startSeconds: 0,
+                        endSeconds: 4,
+                        words: ["one", "two", "three", "four"]
+                    )
+                ],
+                1: [
+                    Self.segment(
+                        text: "five six seven eight",
+                        speakerLabel: "",
+                        startSeconds: 4,
+                        endSeconds: 8,
+                        words: ["five", "six", "seven", "eight"]
+                    )
+                ],
+            ]),
+            diarizer: FakeDiarizer(turnsBySequence: [
+                0: [
+                    SpeakerTurnDraft(speakerLabel: "speaker-S1", startSeconds: 0, endSeconds: 2, confidence: 0.9),
+                    SpeakerTurnDraft(speakerLabel: "speaker-S2", startSeconds: 2, endSeconds: 4, confidence: 0.9),
+                ],
+                1: [
+                    SpeakerTurnDraft(speakerLabel: "speaker-S1", startSeconds: 4, endSeconds: 6, confidence: 0.9),
+                    SpeakerTurnDraft(speakerLabel: "speaker-S2", startSeconds: 6, endSeconds: 8, confidence: 0.9),
+                ],
+            ])
+        )
+
+        _ = try await pipeline.run(
+            source: "https://example.test/live", streamType: .icecast, maxChunks: 2)
+
+        let rows = try temporary.database.read { db in
+            try String.fetchAll(
+                db,
+                sql: "SELECT sequence || ':' || speaker_label || ':' || text FROM transcript_segments ORDER BY sequence"
+            )
+        }
+        XCTAssertEqual(
+            rows,
+            [
+                "0:speaker-S1:one two",
+                "1:speaker-S2:three four",
+                "2:speaker-S1:five six",
+                "3:speaker-S2:seven eight",
+            ]
+        )
+    }
+
     func testTranscriberAndDiarizerFailuresPersistPhaseDiagnosticsAndCompleteRun() async throws {
         let temporary = try TemporarySoundingDatabase()
         let pipeline = StreamIngestPipeline(

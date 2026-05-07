@@ -203,6 +203,49 @@ final class AppStreamRuntimeStatusStoreTests: XCTestCase {
         XCTAssertEqual(try store.statuses(), [])
     }
 
+    func testResetTransientStatusesClearsStaleRuntimeState() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Stale",
+            streamType: "hls",
+            source: "https://example.test/stale.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let store = AppStreamRuntimeStatusStore(database: temporary.database)
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .running,
+                attempt: 2,
+                maxAttempts: 3,
+                nextRetrySeconds: 5,
+                nextRetryAt: "2026-05-01T10:00:06Z",
+                updatedAt: "2026-05-01T10:00:01Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message: "prior failure",
+                    occurredAt: "2026-05-01T10:00:01Z"
+                ),
+                lifecycleEvidence: AppStreamRuntimeLifecycleEvidence(
+                    reason: "recovering",
+                    suspendedAt: "2026-05-01T10:00:00Z"
+                )
+            )
+        )
+
+        try store.resetTransientStatuses(updatedAt: "2026-05-01T10:01:00Z")
+
+        let snapshot = try XCTUnwrap(try store.status(streamID: stream.id))
+        XCTAssertEqual(snapshot.phase, .stopped)
+        XCTAssertEqual(snapshot.attempt, 0)
+        XCTAssertEqual(snapshot.maxAttempts, 0)
+        XCTAssertNil(snapshot.nextRetrySeconds)
+        XCTAssertNil(snapshot.nextRetryAt)
+        XCTAssertNil(snapshot.recentFailure)
+        XCTAssertNil(snapshot.lifecycleEvidence)
+        XCTAssertEqual(snapshot.updatedAt, "2026-05-01T10:01:00Z")
+    }
+
     func testRepeatedUpdatesReplaceSingleStatusRow() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

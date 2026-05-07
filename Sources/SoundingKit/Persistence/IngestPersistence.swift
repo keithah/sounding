@@ -113,6 +113,39 @@ public struct IngestPersistence {
         }
     }
 
+    public func lastPersistedHLSTimelineEndSeconds(streamID: Int64) throws -> Double? {
+        try database.read { db in
+            try Double.fetchOne(
+                db,
+                sql: """
+                    SELECT MAX(json_extract(ingest_chunks.context_json, '$.endSeconds'))
+                    FROM hls_ingest_segments
+                    JOIN ingest_chunks ON ingest_chunks.id = hls_ingest_segments.chunk_id
+                    WHERE hls_ingest_segments.stream_id = ?
+                    """,
+                arguments: [streamID]
+            )
+        }
+    }
+
+    public func hasPersistedHLSSegment(streamID: Int64, mediaSequence: Int) throws -> Bool {
+        guard streamID > 0, mediaSequence >= 0 else { return false }
+        return try database.read { db in
+            try Bool.fetchOne(
+                db,
+                sql: """
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM hls_ingest_segments
+                        WHERE stream_id = ?
+                          AND media_sequence = ?
+                    )
+                    """,
+                arguments: [streamID, mediaSequence]
+            ) ?? false
+        }
+    }
+
     public func claimHLSSegment(_ claim: HLSSegmentClaim?) throws -> HLSSegmentClaimResult {
         guard let claim else { return .noClaim }
         guard claim.streamID > 0, claim.mediaSequence >= 0 else { return .noClaim }

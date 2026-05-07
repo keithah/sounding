@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var timelineActionMessage: String?
     @State private var streamVolumes: [Int64: Double] = [:]
     @State private var mutedStreamIDs: Set<Int64> = []
+    @State private var isAddingStream = false
 
     init(preferences: SoundingAppPreferences? = nil) {
         let initial = Self.makeInitialState(preferences: preferences)
@@ -77,6 +78,20 @@ struct ContentView: View {
                                 Button("Remove Stream", systemImage: "trash", role: .destructive) {
                                     removeStream(stream.id)
                                 }
+                                Divider()
+                                Button(
+                                    stream.diarizationEnabled
+                                        ? "Disable Speaker Diarization"
+                                        : "Enable Speaker Diarization",
+                                    systemImage: stream.diarizationEnabled
+                                        ? "person.wave.2.fill"
+                                        : "person.wave.2"
+                                ) {
+                                    setDiarizationEnabled(
+                                        for: stream.id,
+                                        isEnabled: !stream.diarizationEnabled
+                                    )
+                                }
                             }
                     }
                 }
@@ -84,15 +99,42 @@ struct ContentView: View {
 
             Divider()
 
-            addStreamForm
+            sidebarAddStreamArea
                 .padding(16)
+        }
+    }
+
+    private var sidebarAddStreamArea: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if isAddingStream {
+                addStreamForm
+            } else {
+                Button {
+                    isAddingStream = true
+                } label: {
+                    Label("Add Stream", systemImage: "plus.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            SettingsLink {
+                Label("Preferences", systemImage: "gearshape")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
         }
     }
 
     private var addStreamForm: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Add Stream", systemImage: "plus.circle")
-                .font(.headline)
+            HStack {
+                Label("Add Stream", systemImage: "plus.circle")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") {
+                    isAddingStream = false
+                }
+            }
 
             TextField(
                 "Name",
@@ -146,8 +188,6 @@ struct ContentView: View {
                     .accessibilityLabel("Persistence error: \(persistenceError)")
             }
 
-            ConfigurationIssuesView(issues: viewModel.configurationIssues)
-
             Button {
                 addStream()
             } label: {
@@ -168,40 +208,54 @@ struct ContentView: View {
     @ViewBuilder
     private var detail: some View {
         if let selected = viewModel.selectedStream {
-            StreamDetail(
-                selected: selected,
-                timelineActionMessage: timelineActionMessage,
-                startRuntime: { startRuntime(for: selected.item.id) },
-                pauseRuntime: { pauseRuntime(for: selected.item.id) },
-                resumeRuntime: { resumeRuntime(for: selected.item.id) },
-                stopRuntime: { stopRuntime(for: selected.item.id) },
-                seekToLive: { seekToLive() },
-                scrubBackward: { scrubBackward(seconds: 30) },
-                seekToSeconds: { seekToSeconds($0) },
-                seekUnavailable: { seconds in
-                    reportSeekUnavailable(seconds: seconds, selected: selected)
-                },
-                volume: Binding(
-                    get: { streamVolumes[selected.item.id] ?? 1.0 },
-                    set: { updateVolume(for: selected.item.id, volume: $0) }
-                ),
-                isMuted: Binding(
-                    get: { mutedStreamIDs.contains(selected.item.id) },
-                    set: { updateMuted(for: selected.item.id, isMuted: $0) }
-                ),
-                refreshTimeline: { refreshSelectedTimeline() },
-                searchDraft: Binding(
-                    get: { viewModel.searchDraft },
-                    set: { viewModel.updateSearchDraft($0) }
-                ),
-                runSearch: { runSearch() },
-                clearSearch: { clearSearch() },
-                selectSearchResult: { resultID in selectSearchResult(resultID) },
-                updateSpeakerDisplay: { rawLabel, displayLabel, colorToken in
-                    updateSpeakerDisplay(
-                        rawLabel: rawLabel, displayLabel: displayLabel, colorToken: colorToken)
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 12) {
+                    GlobalPlayerBar(
+                        selected: selected,
+                        seekToLive: { seekToLive() },
+                        scrubBackward: { scrubBackward(seconds: 30) },
+                        startRuntime: { startRuntime(for: selected.item.id) },
+                        pauseRuntime: { pauseRuntime(for: selected.item.id) },
+                        resumeRuntime: { resumeRuntime(for: selected.item.id) },
+                        stopRuntime: { stopRuntime(for: selected.item.id) },
+                        volume: Binding(
+                            get: { streamVolumes[selected.item.id] ?? 1.0 },
+                            set: { updateVolume(for: selected.item.id, volume: $0) }
+                        ),
+                        isMuted: Binding(
+                            get: { mutedStreamIDs.contains(selected.item.id) },
+                            set: { updateMuted(for: selected.item.id, isMuted: $0) }
+                        )
+                    )
+                    Divider()
+                    StreamHeader(selected: selected)
                 }
-            )
+                .padding(.horizontal, 28)
+                .padding(.top, 24)
+                .padding(.bottom, 12)
+                Divider()
+                StreamDetail(
+                    selected: selected,
+                    timelineActionMessage: timelineActionMessage,
+                    seekToSeconds: { seekToSeconds($0) },
+                    seekUnavailable: { seconds in
+                        reportSeekUnavailable(seconds: seconds, selected: selected)
+                    },
+                    refreshTimeline: { refreshSelectedTimeline() },
+                    clearTimeline: { clearTimeline(for: selected.item.id) },
+                    searchDraft: Binding(
+                        get: { viewModel.searchDraft },
+                        set: { viewModel.updateSearchDraft($0) }
+                    ),
+                    runSearch: { runSearch() },
+                    clearSearch: { clearSearch() },
+                    selectSearchResult: { resultID in selectSearchResult(resultID) },
+                    updateSpeakerDisplay: { rawLabel, displayLabel, colorToken in
+                        updateSpeakerDisplay(
+                            rawLabel: rawLabel, displayLabel: displayLabel, colorToken: colorToken)
+                    }
+                )
+            }
         } else {
             ContentUnavailableView(
                 viewModel.emptyStateTitle,
@@ -232,6 +286,7 @@ struct ContentView: View {
             )
             persistenceError = nil
             timelineActionMessage = nil
+            isAddingStream = false
             refreshRuntimeStatuses()
             refreshSelectedTimeline()
         } catch {
@@ -302,6 +357,33 @@ struct ContentView: View {
                 streamVolumes[streamID] = nil
                 persistenceError = nil
                 timelineActionMessage = "Removed stream."
+                refreshRuntimeStatuses()
+                refreshSelectedTimeline()
+            } catch {
+                persistenceError = IngestRedaction.redact(String(describing: error))
+            }
+        }
+    }
+
+    private func setDiarizationEnabled(for streamID: Int64, isEnabled: Bool) {
+        guard let registry else {
+            persistenceError = "Sounding database unavailable."
+            return
+        }
+        Task {
+            diagnosticsLog.recordEvent(
+                "ui.stream.diarization.toggled",
+                streamID: streamID,
+                phase: "ui.stream",
+                fields: ["isEnabled": String(isEnabled)]
+            )
+            do {
+                _ = try registry.setDiarizationEnabled(id: streamID, isEnabled: isEnabled)
+                try viewModel.reload(from: registry)
+                persistenceError = nil
+                timelineActionMessage = isEnabled
+                    ? "Speaker diarization enabled for this stream. Restart the stream to apply it."
+                    : "Speaker diarization disabled for this stream. Restart the stream to apply it."
                 refreshRuntimeStatuses()
                 refreshSelectedTimeline()
             } catch {
@@ -437,6 +519,9 @@ struct ContentView: View {
             }
             guard !Task.isCancelled, streamID == viewModel.selectedStreamID else { return }
             if viewModel.selectedStream?.item.status == .running {
+                if let runtime, let streamID, let event = await runtime.snapshot(streamID: streamID) {
+                    viewModel.applyRuntimeEvent(event)
+                }
                 refreshRuntimeStatuses()
                 refreshSelectedTimeline()
             }
@@ -449,6 +534,24 @@ struct ContentView: View {
             _ = try viewModel.refreshSelectedTimeline(using: timelineStore)
         } catch {
             // The view model preserves the last good snapshot and stores a redacted error message.
+        }
+    }
+
+    private func clearTimeline(for streamID: Int64) {
+        guard let timelineStore else {
+            timelineActionMessage = "Timeline storage is unavailable."
+            return
+        }
+
+        do {
+            let deletedCount = try timelineStore.clearTimeline(streamID: streamID)
+            viewModel.clearSearch()
+            refreshSelectedTimeline()
+            timelineActionMessage = deletedCount == 0
+                ? "No timeline rows to clear."
+                : "Cleared \(deletedCount) timeline rows."
+        } catch {
+            timelineActionMessage = "Timeline clear failed."
         }
     }
 
@@ -519,58 +622,6 @@ struct ContentView: View {
     }
 }
 
-private struct ConfigurationIssuesView: View {
-    var issues: [SoundingAppConfigurationIssue]
-
-    var body: some View {
-        if !issues.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(issues) { issue in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Label(issue.message, systemImage: systemImage(for: issue.severity))
-                            .font(.caption)
-                            .foregroundStyle(color(for: issue.severity))
-                        if let detail = issue.detail {
-                            Text(detail)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(issue.action.label)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(
-                        "Configuration \(issue.severity.rawValue): \(issue.message) \(issue.detail ?? "") Action: \(issue.action.label)"
-                    )
-                }
-            }
-        }
-    }
-
-    private func systemImage(for severity: SoundingAppIssueSeverity) -> String {
-        switch severity {
-        case .info:
-            return "info.circle"
-        case .warning:
-            return "exclamationmark.triangle"
-        case .blocking:
-            return "exclamationmark.triangle.fill"
-        }
-    }
-
-    private func color(for severity: SoundingAppIssueSeverity) -> Color {
-        switch severity {
-        case .info:
-            return .secondary
-        case .warning:
-            return .orange
-        case .blocking:
-            return .red
-        }
-    }
-}
-
 private struct StreamRow: View {
     var item: StreamAppListItem
 
@@ -595,7 +646,12 @@ private struct StreamRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
-            Text("Control-click to remove")
+            if item.diarizationEnabled {
+                Text("Speaker diarization on")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.orange)
+            }
+            Text("Control-click for stream options")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -607,17 +663,10 @@ private struct StreamRow: View {
 private struct StreamDetail: View {
     var selected: StreamAppSelectedStream
     var timelineActionMessage: String?
-    var startRuntime: () -> Void
-    var pauseRuntime: () -> Void
-    var resumeRuntime: () -> Void
-    var stopRuntime: () -> Void
-    var seekToLive: () -> Void
-    var scrubBackward: () -> Void
     var seekToSeconds: (Double) -> Void
     var seekUnavailable: (Double) -> Void
-    @Binding var volume: Double
-    @Binding var isMuted: Bool
     var refreshTimeline: () -> Void
+    var clearTimeline: () -> Void
     @Binding var searchDraft: StreamAppSearchDraft
     var runSearch: () -> Void
     var clearSearch: () -> Void
@@ -629,78 +678,38 @@ private struct StreamDetail: View {
     @State private var speakerColorDrafts: [String: String] = [:]
 
     var body: some View {
-        ScrollViewReader { scrollProxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    StreamHeader(selected: selected)
-                    RuntimeStatusCard(selected: selected)
-                    PlayerCard(
-                        selected: selected,
-                        seekToLive: seekToLive,
-                        scrubBackward: scrubBackward,
-                        startRuntime: startRuntime,
-                        pauseRuntime: pauseRuntime,
-                        resumeRuntime: resumeRuntime,
-                        stopRuntime: stopRuntime,
-                        volume: $volume,
-                        isMuted: $isMuted
-                    )
-                    TimelineDiagnosticsCard(
-                        selected: selected,
-                        timelineActionMessage: timelineActionMessage,
-                        refreshTimeline: refreshTimeline
-                    )
-                    MetadataCard(selected: selected)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                if selected.item.diarizationEnabled {
                     SpeakerDisplayEditor(
                         speakers: selected.speakerDisplays,
                         labelDrafts: $speakerLabelDrafts,
                         colorDrafts: $speakerColorDrafts,
                         updateSpeakerDisplay: updateSpeakerDisplay
                     )
-                    SearchCard(
-                        selected: selected,
-                        draft: $searchDraft,
-                        runSearch: runSearch,
-                        clearSearch: clearSearch,
-                        selectResult: handleSearchResultSelection
-                    )
-                    TranscriptCard(
-                        paragraphs: selected.recentTranscriptParagraphs,
-                        autoscrolls: $transcriptAutoscrolls,
-                        isSeekable: isSeekableTranscript,
-                        seekToSeconds: seekToSeconds,
-                        seekUnavailable: seekUnavailable
-                    )
-                    TimelineItemsCard(
-                        items: selected.timelineItems,
-                        seekToSeconds: seekToSeconds,
-                        seekUnavailable: seekUnavailable
-                    )
                 }
-                .padding(28)
+                SearchCard(
+                    selected: selected,
+                    draft: $searchDraft,
+                    runSearch: runSearch,
+                    clearSearch: clearSearch,
+                    selectResult: handleSearchResultSelection
+                )
+                TimelineItemsCard(
+                    items: selected.timelineItems,
+                    isDiarizationEnabled: selected.item.diarizationEnabled,
+                    actionMessage: timelineActionMessage,
+                    refreshTimeline: refreshTimeline,
+                    clearTimeline: clearTimeline,
+                    seekToSeconds: seekToSeconds,
+                    seekUnavailable: seekUnavailable
+                )
             }
-            .onChange(of: selected.recentTranscriptParagraphs.last?.id) { _, _ in
-                guard transcriptAutoscrolls,
-                    let lastID = selected.recentTranscriptParagraphs.last?.id
-                else {
-                    return
-                }
-                withAnimation(.easeOut(duration: 0.2)) {
-                    scrollProxy.scrollTo(transcriptScrollID(lastID), anchor: .bottom)
-                }
-            }
-            .onChange(of: selected.transcriptScrollTargetSegmentID) { _, segmentID in
-                guard let segmentID else { return }
-                transcriptAutoscrolls = false
-                withAnimation(.easeOut(duration: 0.2)) {
-                    scrollProxy.scrollTo(transcriptScrollID(segmentID), anchor: .center)
-                }
-            }
+            .padding(28)
         }
     }
 
     private func handleSearchResultSelection(_ resultID: String) {
-        transcriptAutoscrolls = false
         guard let action = selectSearchResult(resultID) else { return }
         if action.shouldSeek, let seconds = action.seekSeconds, seconds.isFinite {
             seekToSeconds(seconds)
@@ -856,6 +865,96 @@ private struct PlayerCard: View {
     }
 }
 
+private struct GlobalPlayerBar: View {
+    var selected: StreamAppSelectedStream
+    var seekToLive: () -> Void
+    var scrubBackward: () -> Void
+    var startRuntime: () -> Void
+    var pauseRuntime: () -> Void
+    var resumeRuntime: () -> Void
+    var stopRuntime: () -> Void
+    @Binding var volume: Double
+    @Binding var isMuted: Bool
+
+    private var nowPlaying: StreamAppMetadataItem? {
+        selected.currentMetadata ?? selected.recentMetadata.first
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(selected.item.name)
+                        .font(.headline)
+                    Text(selected.playerStateTitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Start", systemImage: "play.fill", action: startRuntime)
+                    .disabled(!selected.canStartRuntime)
+                Button("Restart", systemImage: "arrow.clockwise", action: startRuntime)
+                    .disabled(!selected.canStopRuntime)
+                Button("Pause", systemImage: "pause.fill", action: pauseRuntime)
+                    .disabled(!selected.canPauseRuntime)
+                Button("Resume", systemImage: "playpause.fill", action: resumeRuntime)
+                    .disabled(!selected.canResumeRuntime)
+                Button("Stop", systemImage: "stop.fill", action: stopRuntime)
+                    .disabled(!selected.canStopRuntime)
+                Button("-30s", systemImage: "gobackward.30", action: scrubBackward)
+                    .disabled(!selected.canScrubBufferedRange)
+                Button("Live", systemImage: "dot.radiowaves.forward", action: seekToLive)
+                    .disabled(!selected.canSeekToLive)
+            }
+            .disabled(!selected.controlsEnabled)
+
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "music.note")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18)
+                if let nowPlaying {
+                    Text(nowPlaying.artist ?? "Metadata")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(nowPlaying.title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    if let subtitle = nowPlaying.subtitle {
+                        Text(subtitle)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                } else {
+                    Text("No current metadata")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
+                Toggle("Mute", isOn: $isMuted)
+                    .toggleStyle(.switch)
+                Slider(value: $volume, in: 0...1)
+                    .disabled(isMuted)
+                Text("\(Int((volume * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, alignment: .trailing)
+                Text(selected.bufferedRangeTitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(.bar)
+    }
+}
+
 private struct VisibleIssueRow: View {
     var issue: StreamAppVisibleIssue
 
@@ -967,11 +1066,20 @@ private struct TimelineDiagnosticGrid: View {
 private struct MetadataCard: View {
     var selected: StreamAppSelectedStream
 
+    private var displayedCurrentMetadata: StreamAppMetadataItem? {
+        selected.currentMetadata ?? selected.recentMetadata.first
+    }
+
+    private var recentMetadata: [StreamAppMetadataItem] {
+        guard let displayedCurrentMetadata else { return selected.recentMetadata }
+        return selected.recentMetadata.filter { $0.id != displayedCurrentMetadata.id }
+    }
+
     var body: some View {
         GroupBox("Metadata") {
             VStack(alignment: .leading, spacing: 12) {
-                if let current = selected.currentMetadata {
-                    MetadataRow(title: "Current", item: current)
+                if let current = displayedCurrentMetadata {
+                    MetadataRow(title: selected.currentMetadata == nil ? "Latest" : "Current", item: current)
                 } else {
                     ContentUnavailableView(
                         "No current metadata",
@@ -982,12 +1090,12 @@ private struct MetadataCard: View {
                     .frame(minHeight: 80)
                 }
 
-                if !selected.recentMetadata.isEmpty {
+                if !recentMetadata.isEmpty {
                     Divider()
                     Text("Recent")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                    ForEach(selected.recentMetadata) { item in
+                    ForEach(recentMetadata) { item in
                         MetadataRow(title: item.kind.title, item: item)
                     }
                 }
@@ -1008,8 +1116,20 @@ private struct MetadataRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 72, alignment: .leading)
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.title)
-                    .font(.headline)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if let artist = item.artist?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !artist.isEmpty {
+                        SpeakerBadge(
+                            speaker: StreamAppSpeakerDisplay(
+                                rawLabel: artist,
+                                displayLabel: artist,
+                                colorToken: StreamAppSpeakerDisplay.fallbackColorToken(for: artist)
+                            )
+                        )
+                    }
+                    Text(item.title)
+                        .font(.headline)
+                }
                 if let subtitle = item.subtitle {
                     Text(subtitle)
                         .foregroundStyle(.secondary)
@@ -1404,6 +1524,15 @@ private struct TranscriptCard: View {
     var isSeekable: (StreamAppTranscriptParagraph) -> Bool
     var seekToSeconds: (Double) -> Void
     var seekUnavailable: (Double) -> Void
+    var clearTimeline: () -> Void
+
+    private var newestFirstParagraphs: [StreamAppTranscriptParagraph] {
+        paragraphs.sorted {
+            if $0.endSeconds != $1.endSeconds { return $0.endSeconds > $1.endSeconds }
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds > $1.startSeconds }
+            return $0.id > $1.id
+        }
+    }
 
     var body: some View {
         GroupBox("Transcript") {
@@ -1415,6 +1544,10 @@ private struct TranscriptCard: View {
                     Button("Jump to Live", systemImage: "arrow.down.to.line") {
                         autoscrolls = true
                     }
+                    Button("Clear", systemImage: "trash", role: .destructive) {
+                        clearTimeline()
+                    }
+                    .disabled(paragraphs.isEmpty)
                 }
 
                 if paragraphs.isEmpty {
@@ -1428,7 +1561,7 @@ private struct TranscriptCard: View {
                     .frame(minHeight: 120)
                 } else {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(paragraphs) { paragraph in
+                        ForEach(newestFirstParagraphs) { paragraph in
                             TranscriptParagraphButton(
                                 paragraph: paragraph,
                                 isSeekable: isSeekable(paragraph),
@@ -1501,39 +1634,79 @@ private struct TranscriptParagraphButton: View {
 
 private struct TimelineItemsCard: View {
     var items: [StreamAppTimelineItem]
+    var isDiarizationEnabled: Bool
+    var actionMessage: String?
+    var refreshTimeline: () -> Void
+    var clearTimeline: () -> Void
     var seekToSeconds: (Double) -> Void
     var seekUnavailable: (Double) -> Void
 
+    private var newestFirstItems: [StreamAppTimelineItem] {
+        items.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds > $1.startSeconds }
+            return $0.id > $1.id
+        }
+    }
+
     var body: some View {
         GroupBox("Timeline") {
-            if items.isEmpty {
-                ContentUnavailableView(
-                    "No timeline items yet",
-                    systemImage: "list.bullet.indent",
-                    description: Text(
-                        "Transcript, metadata, and event moments appear here once refreshed.")
-                )
-                .frame(minHeight: 100)
-            } else {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(items) { item in
-                        TimelineItemButton(
-                            item: item,
-                            seekToSeconds: seekToSeconds,
-                            seekUnavailable: seekUnavailable
-                        )
-                    }
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Spacer()
+                    Button("Refresh", systemImage: "arrow.clockwise", action: refreshTimeline)
+                    Button("Clear Timeline", systemImage: "trash", role: .destructive, action: clearTimeline)
+                        .disabled(items.isEmpty)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                if let actionMessage {
+                    Text(actionMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if items.isEmpty {
+                    ContentUnavailableView(
+                        "No timeline items yet",
+                        systemImage: "list.bullet.indent",
+                        description: Text("Transcript and metadata changes appear here once refreshed.")
+                    )
+                    .frame(minHeight: 100)
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(newestFirstItems) { item in
+                            TimelineItemButton(
+                                item: item,
+                                isDiarizationEnabled: isDiarizationEnabled,
+                                seekToSeconds: seekToSeconds,
+                                seekUnavailable: seekUnavailable
+                            )
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
 
 private struct TimelineItemButton: View {
     var item: StreamAppTimelineItem
+    var isDiarizationEnabled: Bool
     var seekToSeconds: (Double) -> Void
     var seekUnavailable: (Double) -> Void
+
+    private var showsSpeaker: Bool {
+        item.kind != .transcript || isDiarizationEnabled
+    }
+
+    private var primaryText: String {
+        guard item.kind == .transcript, !isDiarizationEnabled else { return item.title }
+        return item.subtitle ?? item.title
+    }
+
+    private var secondaryText: String? {
+        guard item.kind == .transcript, !isDiarizationEnabled else { return item.subtitle }
+        return nil
+    }
 
     var body: some View {
         Button {
@@ -1548,19 +1721,25 @@ private struct TimelineItemButton: View {
                     .foregroundStyle(item.isSeekable ? .blue : .secondary)
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    if let subtitle = item.subtitle {
+                    Text(timeRange(item: item))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if showsSpeaker, let speaker = item.speakerDisplay {
+                            SpeakerBadge(speaker: speaker)
+                        }
+                        Text(primaryText)
+                            .font(item.kind == .transcript && !isDiarizationEnabled ? .body : .headline)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let subtitle = secondaryText {
                         Text(subtitle)
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 Spacer()
-                Text(timeRange(start: item.startSeconds, end: item.endSeconds))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
                 if !item.isSeekable {
                     Text("Not buffered")
                         .font(.caption.weight(.semibold))
@@ -1572,12 +1751,12 @@ private struct TimelineItemButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(
-            "\(item.kind.title) at \(timeRange(start: item.startSeconds, end: item.endSeconds)): \(item.title)"
+            "\(item.kind.title) at \(timeRange(item: item)): \(primaryText)"
         )
         .accessibilityHint(
             item.isSeekable
                 ? "Seeks playback to this buffered timeline item."
-                : "Reports that this timeline item is outside the buffered range.")
+                : "This item is outside the current buffered audio range.")
     }
 }
 
@@ -1632,6 +1811,26 @@ private func transcriptScrollID(_ id: Int64) -> String {
 private func timeRange(start: Double, end: Double?) -> String {
     guard let end, end != start else { return String(format: "%.1fs", start) }
     return String(format: "%.1f–%.1fs", start, end)
+}
+
+private func timeRange(item: StreamAppTimelineItem) -> String {
+    guard let start = clockTime(item.startTimestamp) else {
+        return timeRange(start: item.startSeconds, end: item.endSeconds)
+    }
+    let duration = max(0, (item.endSeconds ?? item.startSeconds) - item.startSeconds)
+    guard let end = clockTime(item.endTimestamp), end != start else {
+        return "\(start) \(String(format: "%.0fs", duration))"
+    }
+    return "\(start) - \(end) \(String(format: "%.0fs", duration))"
+}
+
+private func clockTime(_ timestamp: String?) -> String? {
+    guard let timestamp,
+          let date = ISO8601DateFormatter().date(from: timestamp) else { return nil }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "HH:mm:ss"
+    return formatter.string(from: date)
 }
 
 extension StreamAppSearchResult {
@@ -1690,6 +1889,12 @@ extension StreamAppTimelineItemKind {
 }
 
 extension StreamAppSpeakerDisplay {
+    fileprivate static func fallbackColorToken(for rawLabel: String) -> String {
+        let total = rawLabel.unicodeScalars.reduce(0) { $0 + Int($1.value) }
+        let tokens = ["blue", "green", "orange", "pink", "purple", "teal", "violet", "yellow"]
+        return tokens[abs(total) % tokens.count]
+    }
+
     fileprivate var color: Color {
         switch colorToken {
         case "blue": return .blue

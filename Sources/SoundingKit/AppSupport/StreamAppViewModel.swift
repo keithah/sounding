@@ -202,6 +202,7 @@ public struct StreamAppListItem: Equatable, Identifiable, Sendable {
     public var transportLabel: String
     public var sourceDescription: String
     public var status: StreamAppStatus
+    public var diarizationEnabled: Bool
     public var runtimeStatusDetail: String?
 
     public init(record: StreamRecord) {
@@ -212,6 +213,7 @@ public struct StreamAppListItem: Equatable, Identifiable, Sendable {
             ?? record.streamType.uppercased()
         sourceDescription = record.sourceDescription
         status = .fromRegistryStatus(record.status)
+        diarizationEnabled = record.diarizationEnabled
         runtimeStatusDetail = nil
     }
 }
@@ -991,6 +993,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
                 request: StreamAppTimelineRequest(
                     streamID: streamID,
                     player: playerTimelines[streamID],
+                    hideDeterministicUnknownSongs: true,
                     refreshedAt: refreshedAt
                 )
             )
@@ -1097,6 +1100,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
                     streamID: streamID,
                     player: playerTimelines[streamID],
                     focusedSegmentID: result.segmentID,
+                    hideDeterministicUnknownSongs: true,
                     refreshedAt: refreshedAt
                 )
             )

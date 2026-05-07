@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Generate a Sparkle appcast for a signed/notarized Sounding DMG.
+
+set -euo pipefail
+
+RELEASE_DIR=""
+DMG_PATH=""
+DOWNLOAD_URL_PREFIX=""
+RELEASE_NOTES=""
+KEY_ACCOUNT="ed25519"
+GENERATE_APPCAST="${SPARKLE_GENERATE_APPCAST:-}"
+
+usage() {
+    cat <<'USAGE'
+Usage: scripts/distribution/appcast --release-dir <ignored-dir> --dmg <Sounding.dmg> --download-url-prefix <https-url> [--release-notes <file>] [--key-account <account>] [--generate-appcast <tool>]
+
+Copies a signed/notarized DMG into a local Sparkle release directory and runs
+Sparkle's generate_appcast tool. The output directory will contain Sounding.dmg
+and appcast.xml ready to upload to the update host.
+
+Options:
+  --release-dir <ignored-dir>       Directory that stores Sparkle update files.
+  --dmg <Sounding.dmg>              Signed and notarized DMG from package --real.
+  --download-url-prefix <https-url> Public URL prefix where the DMG will be hosted.
+  --release-notes <file>            Optional .html, .md, or .txt release notes.
+  --key-account <account>           Sparkle Keychain account for EdDSA signing. Defaults to ed25519.
+  --generate-appcast <tool>         Optional explicit path to Sparkle generate_appcast.
+  --help                            Show this help text.
+
+Do not pass Sparkle private keys on the command line. Store the private EdDSA
+key in Keychain with Sparkle's generate_keys tool.
+USAGE
+}
+
+require_value() {
+    local option="$1"
+    local value="${2-}"
+    if [[ -z "$value" ]]; then
+        printf 'Invalid appcast option: %s requires a non-empty value.\n' "$option" >&2
+        exit 64
+    fi
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --release-dir)
+            [[ $# -ge 2 ]] || { printf 'Invalid appcast option: --release-dir requires a value.\n' >&2; exit 64; }
+            require_value "$1" "$2"
+            RELEASE_DIR="$2"
+            shift 2
+            ;;
+        --dmg)
+            [[ $# -ge 2 ]] || { printf 'Invalid appcast option: --dmg requires a value.\n' >&2; exit 64; }
+            require_value "$1" "$2"
+            DMG_PATH="$2"
+            shift 2
+            ;;
+        --download-url-prefix)
+            [[ $# -ge 2 ]] || { printf 'Invalid appcast option: --download-url-prefix requires a value.\n' >&2; exit 64; }
+            require_value "$1" "$2"
+            DOWNLOAD_URL_PREFIX="$2"
+            shift 2
+            ;;
+        --release-notes)
+            [[ $# -ge 2 ]] || { printf 'Invalid appcast option: --release-notes requires a value.\n' >&2; exit 64; }
+            require_value "$1" "$2"
+            RELEASE_NOTES="$2"
+            shift 2
+            ;;
+        --key-account)
+            [[ $# -ge 2 ]] || { printf 'Invalid appcast option: --key-account requires a value.\n' >&2; exit 64; }
+            require_value "$1" "$2"
+            KEY_ACCOUNT="$2"
+            shift 2
+            ;;
+        --generate-appcast)
+            [[ $# -ge 2 ]] || { printf 'Invalid appcast option: --generate-appcast requires a value.\n' >&2; exit 64; }
+            require_value "$1" "$2"
+            GENERATE_APPCAST="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --*)
+            printf 'Invalid appcast option: unknown option. Run scripts/distribution/appcast --help for supported flags.\n' >&2
+            exit 64
+            ;;
+        *)
+            printf 'Invalid appcast option: positional arguments are not supported. Run scripts/distribution/appcast --help for supported flags.\n' >&2
+            exit 64
+            ;;
+    esac
+done
+
+if [[ -z "$RELEASE_DIR" || -z "$DMG_PATH" || -z "$DOWNLOAD_URL_PREFIX" ]]; then
+    printf 'Invalid appcast option: --release-dir, --dmg, and --download-url-prefix are required.\n' >&2
+    exit 64
+fi
+if [[ "$DOWNLOAD_URL_PREFIX" != https://* ]]; then
+    printf 'Invalid appcast option: --download-url-prefix must use https.\n' >&2
+    exit 64
+fi
+if [[ ! -f "$DMG_PATH" ]]; then
+    printf 'Invalid appcast option: DMG file does not exist.\n' >&2
+    exit 66
+fi
+if [[ -n "$RELEASE_NOTES" && ! -f "$RELEASE_NOTES" ]]; then
+    printf 'Invalid appcast option: release notes file does not exist.\n' >&2
+    exit 66
+fi
+
+find_generate_appcast() {
+    if [[ -n "$GENERATE_APPCAST" ]]; then
+        [[ -x "$GENERATE_APPCAST" ]] && { printf '%s' "$GENERATE_APPCAST"; return 0; }
+        return 1
+    fi
+    local tool
+    tool=$(find "$HOME/Library/Developer/Xcode/DerivedData" -path '*/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast' -type f -perm -111 2>/dev/null | sort | tail -n 1)
+    if [[ -n "$tool" ]]; then
+        printf '%s' "$tool"
+        return 0
+    fi
+    return 1
+}
+
+TOOL=$(find_generate_appcast) || {
+    printf 'Sparkle generate_appcast tool was not found. Resolve Xcode packages or pass --generate-appcast.\n' >&2
+    exit 69
+}
+
+mkdir -p "$RELEASE_DIR"
+DMG_NAME=$(basename "$DMG_PATH")
+DEST_DMG="$RELEASE_DIR/$DMG_NAME"
+/usr/bin/ditto "$DMG_PATH" "$DEST_DMG"
+
+if [[ -n "$RELEASE_NOTES" ]]; then
+    NOTES_EXT="${RELEASE_NOTES##*.}"
+    NOTES_BASE="${DMG_NAME%.*}.$NOTES_EXT"
+    /usr/bin/ditto "$RELEASE_NOTES" "$RELEASE_DIR/$NOTES_BASE"
+fi
+
+"$TOOL" \
+    --account "$KEY_ACCOUNT" \
+    --download-url-prefix "$DOWNLOAD_URL_PREFIX" \
+    "$RELEASE_DIR"
+
+printf 'Sparkle appcast generated: %s\n' "$RELEASE_DIR/appcast.xml"

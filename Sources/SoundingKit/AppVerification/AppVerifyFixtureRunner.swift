@@ -82,7 +82,10 @@ public struct AppVerifyFixtureRunner: Sendable {
       AVFoundationAudioDecoder(chunkDurationSeconds: 0.25)
     },
     playerFactory: @escaping PlayerFactory = { volumeStore, diagnosticsLog in
-      AVFoundationAppPCMPlayerAdapter(volumeStore: volumeStore, diagnosticsLog: diagnosticsLog)
+      AVFoundationAppPCMPlayerAdapter.verificationAdapter(
+        volumeStore: volumeStore,
+        diagnosticsLog: diagnosticsLog
+      )
     },
     runtimeFactory: @escaping RuntimeFactory = {
       registry, ingester, timeline, rollingBuffer, statusStore, volumeStore, player, diagnosticsLog
@@ -113,7 +116,7 @@ public struct AppVerifyFixtureRunner: Sendable {
         timeline: timeline,
         rollingBuffer: rollingBuffer,
         diagnosticsLog: diagnosticsLog,
-        keepPlaybackRunningAfterIngestCompletes: true,
+        keepPlaybackRunningAfterIngestCompletes: false,
         now: now
       )
     }

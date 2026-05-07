@@ -8,6 +8,9 @@ options:
 packages:
   SoundingPackage:
     path: .
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.7.0
 
 targets:
   Sounding:
@@ -19,6 +22,8 @@ targets:
     dependencies:
       - package: SoundingPackage
         product: SoundingKit
+      - package: Sparkle
+        product: Sparkle
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.sounding.Sounding

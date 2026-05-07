@@ -136,6 +136,54 @@ final class AppPlayerTimelineTests: XCTestCase {
         XCTAssertFalse(snapshot.lastMessage.contains("secret"), snapshot.lastMessage)
     }
 
+    func testSinglePathDecoderDoesNotReplayPersistedHLSSegments() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Dedup HLS",
+            streamType: "hls",
+            source: "https://example.test/dedup.m3u8"
+        )
+        try temporary.database.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO hls_ingest_segments (
+                    stream_id, media_sequence, segment_identity, segment_identity_hash,
+                    claimed_run_id, chunk_id, claimed_at, finalized_at, updated_at
+                ) VALUES (?, 7, 'https://example.test/segment-7.ts', 'existing', NULL, NULL, ?, ?, ?)
+                """,
+                arguments: [
+                    stream.id,
+                    "2026-05-01T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                    "2026-05-01T00:00:00Z"
+                ]
+            )
+        }
+        let decoder = CountingSharedDecoder(chunks: [
+            Self.hlsPCMChunk(sequence: 0, mediaSequence: 7),
+            Self.hlsPCMChunk(sequence: 1, mediaSequence: 8),
+        ])
+        let player = DeterministicAppPCMPlayerAdapter()
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: stream.id)
+        let tee = SinglePathPCMDecoder(
+            streamID: stream.id,
+            upstream: decoder,
+            player: player,
+            timeline: timeline,
+            database: temporary.database
+        )
+
+        let decoded = try await tee.decodedChunks(
+            for: AudioDecodeRequest(source: "https://example.test/dedup.m3u8", streamType: .hls))
+
+        XCTAssertEqual(decoded.count, 2)
+        let frames = await player.frames()
+        XCTAssertEqual(frames.map(\.hlsIdentity?.mediaSequence), [8])
+        XCTAssertEqual(frames.map(\.sequence), [1])
+    }
+
     func testAVFoundationAdapterSchedulesSupportedPCMFrames() async throws {
         #if canImport(AVFoundation)
             let timeline = AppPlayerTimelineClock()
@@ -356,6 +404,24 @@ final class AppPlayerTimelineTests: XCTestCase {
         XCTAssertEqual(snapshot.bufferedEndSeconds, 20)
         XCTAssertEqual(snapshot.driftSeconds, 8)
         XCTAssertEqual(snapshot.decodedFrameCount, 2)
+    }
+
+    private static func hlsPCMChunk(sequence: Int, mediaSequence: Int) -> DecodedAudioChunk {
+        DecodedAudioChunk(
+            sequence: sequence,
+            segmentURI: "https://example.test/segment-\(mediaSequence).ts",
+            hlsIdentity: HLSDecodedAudioChunkIdentity(
+                mediaSequence: mediaSequence,
+                segmentIdentity: "https://example.test/segment-\(mediaSequence).ts",
+                manifestPosition: sequence
+            ),
+            audio: Data([UInt8(mediaSequence), 0x02]),
+            audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16),
+            startSeconds: Double(sequence) * 2,
+            endSeconds: Double(sequence + 1) * 2,
+            startedAt: "2026-05-01T00:00:00Z",
+            endedAt: "2026-05-01T00:00:02Z"
+        )
     }
 }
 

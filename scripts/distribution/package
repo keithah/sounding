@@ -35,6 +35,8 @@ WORKSPACE=""
 LOG_DIR=""
 APP_STAGE=""
 DMG_STAGE=""
+DMG_PAYLOAD=""
+APP_ZIP_STAGE=""
 
 usage() {
     cat <<'USAGE'
@@ -227,6 +229,8 @@ prepare_workspace() {
     LOG_DIR="$WORKSPACE/logs"
     APP_STAGE="$WORKSPACE/Sounding.app"
     DMG_STAGE="$WORKSPACE/Sounding.dmg"
+    DMG_PAYLOAD="$WORKSPACE/dmg-payload"
+    APP_ZIP_STAGE="$WORKSPACE/Sounding.app.zip"
     if ! mkdir -p "$LOG_DIR"; then
         add_step "$DISTRIBUTION_PHASE_OUTPUT" "$DISTRIBUTION_STATUS_FAILED" "Distribution run workspace could not be prepared." "$DISTRIBUTION_GUIDANCE_OUTPUT"
         return 1
@@ -383,6 +387,51 @@ sign_app() {
     add_step "$DISTRIBUTION_PHASE_CODESIGN" "$DISTRIBUTION_STATUS_READY" "Developer ID signing and verification completed." "Continue with notarization."
 }
 
+notarize_and_staple_app() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_SKIPPED" "App notarization skipped during dry-run packaging." "Configure operator-local notarization credentials before real notarization."
+        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_SKIPPED" "App stapling skipped during dry-run packaging." "$DISTRIBUTION_GUIDANCE_STAPLE"
+        return 0
+    fi
+
+    local notary_log="$LOG_DIR/notary-app.log"
+    local stapler_log="$LOG_DIR/staple-app.log"
+    rm -f "$APP_ZIP_STAGE"
+    set +e
+    run_bounded_to_log 180 "$notary_log" /usr/bin/ditto -c -k --keepParent "$APP_STAGE" "$APP_ZIP_STAGE"
+    local zip_status=$?
+    set -e
+    if [[ "$zip_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "Signed app could not be prepared for notarization." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        return 1
+    fi
+
+    set +e
+    run_bounded_to_log 1800 "$notary_log" /usr/bin/xcrun notarytool submit "$APP_ZIP_STAGE" --keychain-profile "$NOTARY_PROFILE" --wait
+    local notary_status=$?
+    set -e
+    if [[ "$notary_status" -eq 124 ]]; then
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "App notarization timed out." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        return 1
+    fi
+    if [[ "$notary_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_NOTARIZATION_REJECTED" "App notarization failed or was rejected." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        add_step "$DISTRIBUTION_PHASE_NOTARY_LOG" "$DISTRIBUTION_STATUS_FAILED" "App notary diagnostics were preserved in the local ignored workspace." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "App notarization completed." "Continue with app stapling."
+
+    set +e
+    run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$APP_STAGE"
+    local staple_status=$?
+    set -e
+    if [[ "$staple_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_FAILED" "App stapling failed." "$DISTRIBUTION_GUIDANCE_STAPLE"
+        return 1
+    fi
+    add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_READY" "App stapling completed." "Continue with DMG packaging."
+}
+
 create_dmg() {
     local dmg_log="$LOG_DIR/dmg.log"
     if [[ ! -x /usr/bin/hdiutil ]]; then
@@ -390,8 +439,18 @@ create_dmg() {
         return 0
     fi
     rm -f "$DMG_STAGE"
+    rm -rf "$DMG_PAYLOAD"
+    mkdir -p "$DMG_PAYLOAD"
+    if ! /usr/bin/ditto "$APP_STAGE" "$DMG_PAYLOAD/Sounding.app" >>"$dmg_log" 2>&1; then
+        add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_FAILED" "DMG payload could not be prepared." "$DISTRIBUTION_GUIDANCE_DMG"
+        return 1
+    fi
+    if ! /bin/ln -s /Applications "$DMG_PAYLOAD/Applications" >>"$dmg_log" 2>&1; then
+        add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_FAILED" "DMG install shortcut could not be prepared." "$DISTRIBUTION_GUIDANCE_DMG"
+        return 1
+    fi
     set +e
-    run_bounded_to_log 180 "$dmg_log" /usr/bin/hdiutil create -volname Sounding -srcfolder "$APP_STAGE" -ov -format UDZO "$DMG_STAGE"
+    run_bounded_to_log 180 "$dmg_log" /usr/bin/hdiutil create -volname Sounding -srcfolder "$DMG_PAYLOAD" -ov -format UDZO "$DMG_STAGE"
     local create_status=$?
     set -e
     if [[ "$create_status" -ne 0 ]]; then
@@ -406,13 +465,27 @@ create_dmg() {
         add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_FAILED" "DMG verification failed." "$DISTRIBUTION_GUIDANCE_DMG"
         return 1
     fi
-    add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_READY" "DMG was created and verified." "Use the generated DMG for credential-gated notarization when running in real mode."
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        set +e
+        run_bounded_to_log 120 "$dmg_log" /usr/bin/codesign --force --timestamp --sign "$IDENTITY_SELECTOR" "$DMG_STAGE"
+        local dmg_sign_status=$?
+        run_bounded_to_log 60 "$dmg_log" /usr/bin/codesign --verify --verbose=2 "$DMG_STAGE"
+        local dmg_verify_status=$?
+        set -e
+        if [[ "$dmg_sign_status" -ne 0 || "$dmg_verify_status" -ne 0 ]]; then
+            add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_FAILED" "DMG signing or signature verification failed." "$DISTRIBUTION_GUIDANCE_DMG"
+            return 1
+        fi
+        add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_READY" "Installer DMG was created, signed, and verified." "Continue with DMG notarization."
+    else
+        add_step "$DISTRIBUTION_PHASE_DMG" "$DISTRIBUTION_STATUS_READY" "Installer DMG was created and verified." "Use the generated DMG for credential-gated notarization when running in real mode."
+    fi
 }
 
-notarize_and_staple() {
+notarize_dmg_and_assess() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_SKIPPED" "Notary submission skipped during dry-run packaging." "Configure operator-local notarization credentials before real notarization."
-        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_SKIPPED" "Stapling skipped during dry-run packaging." "$DISTRIBUTION_GUIDANCE_STAPLE"
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_SKIPPED" "DMG notarization skipped during dry-run packaging." "Configure operator-local notarization credentials before real notarization."
+        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_SKIPPED" "DMG stapling skipped during dry-run packaging." "$DISTRIBUTION_GUIDANCE_STAPLE"
         add_step "$DISTRIBUTION_PHASE_GATEKEEPER" "$DISTRIBUTION_STATUS_SKIPPED" "Gatekeeper assessment skipped during dry-run packaging." "$DISTRIBUTION_GUIDANCE_GATEKEEPER"
         return 0
     fi
@@ -426,32 +499,30 @@ notarize_and_staple() {
     local notary_status=$?
     set -e
     if [[ "$notary_status" -eq 124 ]]; then
-        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "Notary submission timed out." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "DMG notarization timed out." "$DISTRIBUTION_GUIDANCE_NOTARY"
         return 1
     fi
     if [[ "$notary_status" -ne 0 ]]; then
-        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_NOTARIZATION_REJECTED" "Notary submission failed or was rejected." "$DISTRIBUTION_GUIDANCE_NOTARY"
-        add_step "$DISTRIBUTION_PHASE_NOTARY_LOG" "$DISTRIBUTION_STATUS_FAILED" "Notary diagnostics were preserved in the local ignored workspace." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_NOTARIZATION_REJECTED" "DMG notarization failed or was rejected." "$DISTRIBUTION_GUIDANCE_NOTARY"
+        add_step "$DISTRIBUTION_PHASE_NOTARY_LOG" "$DISTRIBUTION_STATUS_FAILED" "DMG notary diagnostics were preserved in the local ignored workspace." "$DISTRIBUTION_GUIDANCE_NOTARY"
         return 1
     fi
-    add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "Notary submission completed." "Continue with stapling and assessment."
+    add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "DMG notarization completed." "Continue with DMG stapling and assessment."
 
     set +e
-    run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$APP_STAGE"
-    local staple_app_status=$?
     run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$DMG_STAGE"
     local staple_dmg_status=$?
     set -e
-    if [[ "$staple_app_status" -ne 0 || "$staple_dmg_status" -ne 0 ]]; then
-        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_FAILED" "Stapling failed." "$DISTRIBUTION_GUIDANCE_STAPLE"
+    if [[ "$staple_dmg_status" -ne 0 ]]; then
+        add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_FAILED" "DMG stapling failed." "$DISTRIBUTION_GUIDANCE_STAPLE"
         return 1
     fi
-    add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_READY" "Stapling completed for packaged artifacts." "Continue with Gatekeeper assessment."
+    add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_READY" "DMG stapling completed." "Continue with Gatekeeper assessment."
 
     set +e
     run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type execute --verbose=2 "$APP_STAGE"
     local app_assess_status=$?
-    run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type open --verbose=2 "$DMG_STAGE"
+    run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_STAGE"
     local dmg_assess_status=$?
     set -e
     if [[ "$app_assess_status" -ne 0 || "$dmg_assess_status" -ne 0 ]]; then
@@ -522,10 +593,13 @@ main() {
         sign_app || failed=1
     fi
     if [[ "$failed" -eq 0 ]]; then
+        notarize_and_staple_app || failed=1
+    fi
+    if [[ "$failed" -eq 0 ]]; then
         create_dmg || failed=1
     fi
     if [[ "$failed" -eq 0 ]]; then
-        notarize_and_staple || failed=1
+        notarize_dmg_and_assess || failed=1
     fi
 
     if [[ "$JSON_OUTPUT" -eq 1 ]]; then

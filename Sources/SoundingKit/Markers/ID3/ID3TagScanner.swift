@@ -60,9 +60,14 @@ public struct ID3TagScanner: Sendable {
                 break
             }
 
-            let tag = try parseTag(in: data, bytes: bytes, at: magicOffset)
-            tags.append(tag)
-            cursor = tag.byteRange.upperBound
+            do {
+                let tag = try parseTag(in: data, bytes: bytes, at: magicOffset)
+                tags.append(tag)
+                cursor = tag.byteRange.upperBound
+            } catch {
+                guard magicOffset > 0 else { throw error }
+                cursor = magicOffset + 3
+            }
         }
 
         return tags

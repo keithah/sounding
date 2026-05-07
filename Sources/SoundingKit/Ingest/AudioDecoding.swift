@@ -6,17 +6,23 @@ public struct AudioDecodeRequest: Equatable, Sendable {
     public var streamType: StreamType
     public var durationSeconds: Double?
     public var maxChunks: Int?
+    public var minimumHLSMediaSequence: Int?
+    public var hlsTimelineStartSeconds: Double?
 
     public init(
         source: String,
         streamType: StreamType,
         durationSeconds: Double? = nil,
-        maxChunks: Int? = nil
+        maxChunks: Int? = nil,
+        minimumHLSMediaSequence: Int? = nil,
+        hlsTimelineStartSeconds: Double? = nil
     ) {
         self.source = source
         self.streamType = streamType
         self.durationSeconds = durationSeconds
         self.maxChunks = maxChunks
+        self.minimumHLSMediaSequence = minimumHLSMediaSequence
+        self.hlsTimelineStartSeconds = hlsTimelineStartSeconds
     }
 }
 

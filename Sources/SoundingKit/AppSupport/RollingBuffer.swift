@@ -156,18 +156,35 @@ public actor RollingPCMBuffer {
             start(streamID: frames.first?.streamID)
         }
 
+        var retainedFrameCount = 0
         for frame in frames.sorted(by: { $0.startSeconds < $1.startSeconds }) {
+            guard !containsEquivalentFrame(frame) else { continue }
             entries.append(RollingBufferEntry(frame: frame, storage: .memory(frame.audio)))
+            retainedFrameCount += 1
         }
 
         spillColdFramesIfPossible()
         evictExpiredFrames()
         if memoryOnlyFallback && !spillAvailable {
-            lastMessage = "Rolling buffer stored \(frames.count) frame(s) in memory-only fallback; \(entries.count) retained."
+            lastMessage = "Rolling buffer stored \(retainedFrameCount) frame(s) in memory-only fallback; \(entries.count) retained."
         } else {
-            lastMessage = "Rolling buffer stored \(frames.count) frame(s); \(entries.count) retained."
+            lastMessage = "Rolling buffer stored \(retainedFrameCount) frame(s); \(entries.count) retained."
         }
         return snapshot()
+    }
+
+    private func containsEquivalentFrame(_ frame: SharedPCMFrame) -> Bool {
+        entries.contains { entry in
+            let existing = entry.frame
+            guard existing.streamID == frame.streamID else { return false }
+            if let existingHLS = existing.hlsIdentity, let frameHLS = frame.hlsIdentity {
+                return existingHLS.mediaSequence == frameHLS.mediaSequence
+                    && existingHLS.segmentIdentity == frameHLS.segmentIdentity
+            }
+            return existing.sequence == frame.sequence
+                && abs(existing.startSeconds - frame.startSeconds) < 0.001
+                && abs(existing.endSeconds - frame.endSeconds) < 0.001
+        }
     }
 
     public func seek(to seconds: Double) -> RollingBufferSeekResult {

@@ -258,17 +258,17 @@ check_notary_profile() {
 
     local output status
     set +e
-    output=$(run_bounded 10 /usr/bin/security find-generic-password -s com.apple.gke.notary.tool -a "$NOTARY_PROFILE" 2>&1)
+    output=$(run_bounded 30 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" --output-format json 2>&1)
     status=$?
     set -e
     if [[ "$status" -eq 124 ]]; then
-        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "Notary credential lookup timed out." "Configure operator-local notarization credentials before real notarization."
+        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_FAILED" "Notary credential validation timed out." "Configure operator-local notarization credentials before real notarization."
         return 0
     fi
     if [[ "$status" -eq 0 ]]; then
-        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "Notary keychain credential is available for local notarization checks." "Use local notarization credentials for credential-gated notarization."
+        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "Notary credentials validated with notarytool." "Use local notarization credentials for credential-gated notarization."
     else
-        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_MISSING_CREDENTIAL" "Notary keychain credential is not available locally." "Configure operator-local notarization credentials before real notarization."
+        add_check "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_MISSING_CREDENTIAL" "Notary keychain profile could not be validated with notarytool." "Configure operator-local notarization credentials before real notarization."
     fi
 }
 

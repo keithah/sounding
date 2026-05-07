@@ -10,6 +10,7 @@ public enum MPEGTSProgramMap {
     private static let patTableID: UInt8 = 0x00
     private static let pmtTableID: UInt8 = 0x02
     private static let scte35StreamType: UInt8 = 0x86
+    private static let timedID3StreamType: UInt8 = 0x15
     private static let crcLength = 4
 
     public static func pmtPIDs(inPATSection section: Data) throws -> Set<UInt16> {
@@ -35,6 +36,14 @@ public enum MPEGTSProgramMap {
     }
 
     public static func scte35PIDs(inPMTSection section: Data) throws -> Set<UInt16> {
+        try elementaryPIDs(inPMTSection: section, streamTypes: [scte35StreamType])
+    }
+
+    public static func timedID3PIDs(inPMTSection section: Data) throws -> Set<UInt16> {
+        try elementaryPIDs(inPMTSection: section, streamTypes: [timedID3StreamType])
+    }
+
+    private static func elementaryPIDs(inPMTSection section: Data, streamTypes: Set<UInt8>) throws -> Set<UInt16> {
         let bytes = [UInt8](section)
         guard bytes.first == pmtTableID else { return [] }
         let sectionEnd = try validatedSectionEnd(in: bytes, minimumHeaderLength: 12)
@@ -50,7 +59,7 @@ public enum MPEGTSProgramMap {
             let streamType = bytes[offset]
             let elementaryPID = readPID(bytes, at: offset + 1)
             let esInfoLength = (Int(bytes[offset + 3] & 0x0F) << 8) | Int(bytes[offset + 4])
-            if streamType == scte35StreamType {
+            if streamTypes.contains(streamType) {
                 pids.insert(elementaryPID)
             }
             offset += 5 + esInfoLength

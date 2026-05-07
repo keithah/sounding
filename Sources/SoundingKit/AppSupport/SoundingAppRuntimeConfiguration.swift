@@ -160,6 +160,12 @@ public struct SoundingAppRuntimeFactory {
         let timelineStore = StreamAppTimelineStore(database: database)
         let searchStore = StreamAppSearchStore(database: database)
         let statusStore = AppStreamRuntimeStatusStore(database: database)
+        do {
+            try statusStore.resetTransientStatuses(
+                updatedAt: ISO8601DateFormatter().string(from: Date()))
+        } catch {
+            configuration.issues.append(Self.databaseOpenIssue(error: error))
+        }
         let timeline = AppPlayerTimelineClock()
         let rollingBuffer = RollingPCMBuffer(configuration: configuration.rollingBuffer)
         let volumeStore = AppPlaybackVolumeStore()
@@ -241,16 +247,23 @@ public struct SoundingAppRuntimeFactory {
                 WhisperKitTranscriber(modelName: configuration.whisperModelName, cache: cache),
                 queue: queue
             ),
-            diarizer: QueuedDiarizer(
-                FluidAudioDiarizer(cache: cache),
-                queue: queue
-            ),
-            fingerprinter: NoOpAudioFingerprinter(),
+            diarizer: NoOpSpeakerDiarizer(),
+            fingerprinter: ProcessInfo.processInfo.environment["SOUNDING_DETERMINISTIC_FINGERPRINT"] == "1"
+                ? DeterministicAudioFingerprinter()
+                : NoOpAudioFingerprinter(),
             fingerprintEnricher: NoOpAudioFingerprintEnricher(),
             player: player,
             timeline: timeline,
             rollingBuffer: rollingBuffer,
-            keepPlaybackRunningAfterIngestCompletes: true
+            keepPlaybackRunningAfterIngestCompletes: true,
+            diarizerFactory: { isEnabled in
+                QueuedDiarizer(
+                    isEnabled || ProcessInfo.processInfo.environment["SOUNDING_ENABLE_FLUIDAUDIO"] == "1"
+                        ? FluidAudioDiarizer(cache: cache)
+                        : NoOpSpeakerDiarizer(),
+                    queue: queue
+                )
+            }
         )
     }
 

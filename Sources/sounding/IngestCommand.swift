@@ -262,6 +262,12 @@ struct IngestCommand: AsyncParsableCommand {
                 QueuedDiarizer(DeterministicCLIDiarizer(), queue: queue)
             )
         }
+        if ProcessInfo.processInfo.environment["SOUNDING_ENABLE_FLUIDAUDIO"] != "1" {
+            return (
+                QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
+                QueuedDiarizer(NoOpSpeakerDiarizer(), queue: queue)
+            )
+        }
         return (
             QueuedTranscriber(WhisperKitTranscriber(cache: cache), queue: queue),
             QueuedDiarizer(FluidAudioDiarizer(cache: cache), queue: queue)

@@ -3,7 +3,7 @@ import Foundation
 @preconcurrency import WhisperKit
 #endif
 
-public protocol WhisperTranscriptionEngine: Sendable {
+public protocol WhisperTranscriptionEngine {
     func transcribeAudio(at url: URL, chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft]
 }
 
@@ -58,23 +58,29 @@ public actor WhisperKitTranscriber: MLTranscription {
     public init(
         modelName: String = "tiny",
         cache: ModelCache = ModelCache(),
-        setup: @escaping ModelCache.Downloader = { targetDirectory, progress in
-            try await WhisperKitTranscriber.defaultSetup(targetDirectory: targetDirectory, progress: progress)
-        },
-        engineFactory: @escaping EngineFactory = { modelName, modelDirectory in
-            try await WhisperKitTranscriber.defaultEngineFactory(modelName: modelName, modelDirectory: modelDirectory)
-        }
+        setup: ModelCache.Downloader? = nil,
+        engineFactory: EngineFactory? = nil
     ) {
         self.modelName = modelName
         self.cache = cache
-        self.setup = setup
-        self.engineFactory = engineFactory
+        self.setup = setup ?? { targetDirectory, progress in
+            try await WhisperKitTranscriber.defaultSetup(
+                targetDirectory: targetDirectory,
+                progress: progress
+            )
+        }
+        self.engineFactory = engineFactory ?? { modelName, modelDirectory in
+            try await WhisperKitTranscriber.defaultEngineFactory(
+                modelName: modelName,
+                modelDirectory: modelDirectory
+            )
+        }
     }
 
     public func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
         guard !chunk.audio.isEmpty else { throw MLProviderError.emptyAudio(provider: "whisperkit") }
         let engine = try await ensureEngine()
-        let url = try writeTemporaryAudio(chunk.audio, provider: "whisperkit", segmentURI: chunk.segmentURI)
+        let url = try writeTemporaryAudio(chunk, provider: "whisperkit")
         defer { try? FileManager.default.removeItem(at: url) }
         return try await engine.transcribeAudio(at: url, chunk: chunk)
     }
@@ -111,27 +117,103 @@ public actor WhisperKitTranscriber: MLTranscription {
     }
 }
 
-func writeTemporaryAudio(_ data: Data, provider: String, segmentURI: String?) throws -> URL {
-    let suffix = URL(string: segmentURI ?? "")?.pathExtension
-    let ext = (suffix?.isEmpty == false) ? suffix! : "audio"
+func writeTemporaryAudio(_ chunk: DecodedAudioChunk, provider: String) throws -> URL {
+    let prepared = try providerAudioData(for: chunk, provider: provider)
+    let ext = prepared.fileExtension
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SoundingProviderAudio", isDirectory: true)
     do {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
-        try data.write(to: url, options: .atomic)
+        try prepared.data.write(to: url, options: .atomic)
         return url
     } catch {
         throw MLProviderError.temporaryFileFailed(provider: provider, reason: String(describing: error))
     }
 }
 
+private func providerAudioData(
+    for chunk: DecodedAudioChunk,
+    provider: String
+) throws -> (data: Data, fileExtension: String) {
+    if chunk.audioFormat.payloadKind == .linearPCM {
+        return (
+            try wavData(
+                pcm: chunk.audio,
+                format: chunk.audioFormat,
+                provider: provider
+            ),
+            "wav"
+        )
+    }
+
+    let suffix = URL(string: chunk.segmentURI ?? "")?.pathExtension
+    return (chunk.audio, (suffix?.isEmpty == false) ? suffix! : "audio")
+}
+
+private func wavData(
+    pcm: Data,
+    format: DecodedAudioFormat,
+    provider: String
+) throws -> Data {
+    guard let sampleRate = format.sampleRate, sampleRate.isFinite, sampleRate > 0,
+        let channelCount = format.channelCount, channelCount > 0,
+        let bitDepth = format.bitDepth, bitDepth > 0,
+        !format.isBigEndian
+    else {
+        throw MLProviderError.temporaryFileFailed(
+            provider: provider,
+            reason: "linear PCM format is incomplete for provider WAV staging"
+        )
+    }
+
+    let audioFormat: UInt16 = format.isFloat ? 3 : 1
+    let channelCountValue = UInt16(clamping: channelCount)
+    let sampleRateValue = UInt32(clamping: Int(sampleRate.rounded()))
+    let bitDepthValue = UInt16(clamping: bitDepth)
+    let blockAlign = UInt16(clamping: channelCount * max(1, bitDepth / 8))
+    let byteRate = UInt32(clamping: Int(sampleRate.rounded()) * Int(blockAlign))
+    let dataByteCount = UInt32(clamping: pcm.count)
+    let riffChunkSize = UInt32(clamping: 36 + pcm.count)
+
+    var data = Data()
+    data.reserveCapacity(44 + pcm.count)
+    data.append(contentsOf: [0x52, 0x49, 0x46, 0x46])
+    data.appendLittleEndian(riffChunkSize)
+    data.append(contentsOf: [0x57, 0x41, 0x56, 0x45])
+    data.append(contentsOf: [0x66, 0x6d, 0x74, 0x20])
+    data.appendLittleEndian(UInt32(16))
+    data.appendLittleEndian(audioFormat)
+    data.appendLittleEndian(channelCountValue)
+    data.appendLittleEndian(sampleRateValue)
+    data.appendLittleEndian(byteRate)
+    data.appendLittleEndian(blockAlign)
+    data.appendLittleEndian(bitDepthValue)
+    data.append(contentsOf: [0x64, 0x61, 0x74, 0x61])
+    data.appendLittleEndian(dataByteCount)
+    data.append(pcm)
+    return data
+}
+
+private extension Data {
+    mutating func appendLittleEndian(_ value: UInt16) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendLittleEndian(_ value: UInt32) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+    }
+}
+
 #if canImport(WhisperKit)
-private final class LiveWhisperKitEngine: WhisperTranscriptionEngine, @unchecked Sendable {
+private final class LiveWhisperKitEngine: WhisperTranscriptionEngine {
     private let whisperKit: WhisperKit
 
     init(modelName: String, modelDirectory: URL) async throws {
         let config = WhisperKitConfig(
-            model: modelName,
+            model: nil,
+            downloadBase: modelDirectory.deletingLastPathComponent(),
             modelFolder: modelDirectory.path,
             verbose: false,
             load: true,
@@ -144,7 +226,7 @@ private final class LiveWhisperKitEngine: WhisperTranscriptionEngine, @unchecked
         do {
             let results = try await whisperKit.transcribe(
                 audioPath: url.path,
-                decodeOptions: DecodingOptions(wordTimestamps: true)
+                decodeOptions: DecodingOptions(skipSpecialTokens: true, wordTimestamps: true)
             )
             var sequence = 0
             return results.flatMap { result in

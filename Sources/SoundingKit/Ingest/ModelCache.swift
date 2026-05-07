@@ -95,8 +95,16 @@ public actor ModelCache {
         do {
             try fileManager.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
             emit(provider: safeProvider, model: safeModel, event: .downloadStarted)
-            let preparedDirectory = try await downloader(targetDirectory) { [weak self] fraction in
-                Task { await self?.emit(provider: safeProvider, model: safeModel, event: .downloadProgress, fractionCompleted: fraction) }
+            let progressHandler = progressHandler
+            let preparedDirectory = try await downloader(targetDirectory) { fraction in
+                progressHandler?(
+                    ModelCacheProgress(
+                        provider: safeProvider,
+                        model: safeModel,
+                        event: .downloadProgress,
+                        fractionCompleted: fraction
+                    )
+                )
             }
             try fileManager.createDirectory(at: preparedDirectory, withIntermediateDirectories: true)
             try Data("prepared\n".utf8).write(to: preparedDirectory.appendingPathComponent(".sounding-model-cache"), options: .atomic)

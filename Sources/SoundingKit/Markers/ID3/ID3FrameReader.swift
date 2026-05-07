@@ -85,7 +85,7 @@ public struct ID3FrameReader: Sendable {
 
     private func decode(frameID: String, payload: Data) throws -> ID3Frame {
         switch frameID {
-        case "TIT2", "TIT3":
+        case "TALB", "TIT2", "TIT3", "TPE1":
             return .text(id: frameID, texts: try ID3TextDecoder.decode(payload))
         case "TXXX":
             let values = try ID3TextDecoder.decode(payload)

@@ -160,7 +160,17 @@ public struct StreamIngestPipeline {
                     source: source,
                     streamType: streamType,
                     durationSeconds: durationSeconds,
-                    maxChunks: maxChunks
+                    maxChunks: maxChunks,
+                    minimumHLSMediaSequence: minimumHLSMediaSequence(
+                        streamID: streamID,
+                        streamType: streamType,
+                        persistence: persistence
+                    ),
+                    hlsTimelineStartSeconds: hlsTimelineStartSeconds(
+                        streamID: streamID,
+                        streamType: streamType,
+                        persistence: persistence
+                    )
                 )
             )
             try Task.checkCancellation()
@@ -252,7 +262,6 @@ public struct StreamIngestPipeline {
                     let validation = validateAndNormalize(
                         segments, nextSequence: nextSegmentSequence)
                     segments = validation.segments
-                    nextSegmentSequence += segments.count
                     chunkDiagnostics.append(
                         contentsOf: validation.diagnostics.map { template in
                             diagnostic(
@@ -299,6 +308,12 @@ public struct StreamIngestPipeline {
                 do {
                     try Task.checkCancellation()
                     speakerTurns = try await diarizer.diarize(chunk, transcriptSegments: segments)
+                    segments = applySpeakerTurns(
+                        speakerTurns,
+                        to: segments,
+                        startingSequence: nextSegmentSequence
+                    )
+                    nextSegmentSequence += segments.count
                 } catch let cancellation as CancellationError {
                     throw cancellation
                 } catch {
@@ -328,6 +343,7 @@ public struct StreamIngestPipeline {
                     }
                     chunkDiagnostics.append(providerDiagnostic)
                     speakerTurns = []
+                    nextSegmentSequence += segments.count
                 }
 
                 var fingerprints: [AudioFingerprintDraft] = []
@@ -541,6 +557,100 @@ public struct StreamIngestPipeline {
         return (accepted, diagnostics)
     }
 
+    private func applySpeakerTurns(
+        _ turns: [SpeakerTurnDraft],
+        to segments: [TranscriptSegmentDraft],
+        startingSequence: Int
+    ) -> [TranscriptSegmentDraft] {
+        guard !turns.isEmpty else { return segments }
+        let sortedTurns = turns.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            if $0.endSeconds != $1.endSeconds { return $0.endSeconds < $1.endSeconds }
+            return $0.speakerLabel < $1.speakerLabel
+        }
+
+        let splitSegments = segments.flatMap { segment in
+            let segmentSpeaker = speakerLabel(
+                forStart: segment.startSeconds,
+                end: segment.endSeconds,
+                in: sortedTurns
+            ) ?? segment.speakerLabel
+            var updated = segment
+            updated.speakerLabel = segmentSpeaker
+            updated.words = segment.words.map { word in
+                var updatedWord = word
+                updatedWord.speakerLabel = speakerLabel(
+                    forStart: word.startSeconds,
+                    end: word.endSeconds,
+                    in: sortedTurns
+                ) ?? segmentSpeaker
+                return updatedWord
+            }
+            return splitSegmentBySpeaker(updated)
+        }
+        return splitSegments.enumerated().map { offset, segment in
+            var renumbered = segment
+            renumbered.sequence = startingSequence + offset
+            return renumbered
+        }
+    }
+
+    private func splitSegmentBySpeaker(
+        _ segment: TranscriptSegmentDraft
+    ) -> [TranscriptSegmentDraft] {
+        guard !segment.words.isEmpty else { return [segment] }
+        var groups: [[TranscriptWordDraft]] = []
+        for word in segment.words {
+            if let last = groups.last,
+               last.last?.speakerLabel == word.speakerLabel {
+                groups[groups.count - 1].append(word)
+            } else {
+                groups.append([word])
+            }
+        }
+        guard groups.count > 1 else { return [segment] }
+
+        return groups.enumerated().map { offset, words in
+            let text = words.map(\.text).joined(separator: " ")
+            let speakerLabel = words.first?.speakerLabel ?? segment.speakerLabel
+            let wordConfidences = words.map(\.confidence).compactMap { $0 }
+            return TranscriptSegmentDraft(
+                sequence: segment.sequence + offset,
+                speakerLabel: speakerLabel,
+                startSeconds: words.first?.startSeconds ?? segment.startSeconds,
+                endSeconds: words.last?.endSeconds ?? segment.endSeconds,
+                text: text.isEmpty ? segment.text : text,
+                confidence: wordConfidences.min() ?? segment.confidence,
+                words: words.enumerated().map { wordOffset, word in
+                    var updatedWord = word
+                    updatedWord.sequence = wordOffset
+                    return updatedWord
+                }
+            )
+        }
+    }
+
+    private func speakerLabel(
+        forStart startSeconds: Double,
+        end endSeconds: Double,
+        in turns: [SpeakerTurnDraft]
+    ) -> String? {
+        let midpoint = (startSeconds + endSeconds) / 2
+        if let containing = turns.first(where: {
+            $0.startSeconds <= midpoint && $0.endSeconds >= midpoint
+        }) {
+            return containing.speakerLabel
+        }
+        return turns
+            .map { turn -> (label: String, overlap: Double) in
+                let overlap = max(0, min(endSeconds, turn.endSeconds) - max(startSeconds, turn.startSeconds))
+                return (turn.speakerLabel, overlap)
+            }
+            .filter { $0.overlap > 0 }
+            .max { $0.overlap < $1.overlap }?
+            .label
+    }
+
     private func validate(_ fingerprintResult: AudioFingerprintResult) throws {
         for fingerprint in fingerprintResult.fingerprints {
             guard !fingerprint.algorithm.isEmpty else {
@@ -646,6 +756,27 @@ public struct StreamIngestPipeline {
             mediaSequence: mediaSequence,
             runID: runID
         )
+    }
+
+    private func minimumHLSMediaSequence(
+        streamID: Int64,
+        streamType: StreamType,
+        persistence: IngestPersistence
+    ) -> Int? {
+        guard streamType == .hls else { return nil }
+        guard let last = try? persistence.lastPersistedHLSMediaSequence(streamID: streamID) else {
+            return nil
+        }
+        return last + 1
+    }
+
+    private func hlsTimelineStartSeconds(
+        streamID: Int64,
+        streamType: StreamType,
+        persistence: IngestPersistence
+    ) -> Double? {
+        guard streamType == .hls else { return nil }
+        return try? persistence.lastPersistedHLSTimelineEndSeconds(streamID: streamID)
     }
 
     private func diagnostic(
