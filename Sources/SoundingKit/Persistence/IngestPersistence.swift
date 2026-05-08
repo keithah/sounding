@@ -146,6 +146,60 @@ public struct IngestPersistence {
         }
     }
 
+    public func hasPersistedHLSSegment(
+        streamID: Int64,
+        mediaSequence: Int,
+        segmentIdentity: String
+    ) throws -> Bool {
+        guard streamID > 0, mediaSequence >= 0 else { return false }
+        let segmentIdentity = sanitizedHLSIdentity(segmentIdentity)
+        guard !segmentIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return try hasPersistedHLSSegment(streamID: streamID, mediaSequence: mediaSequence)
+        }
+        let segmentIdentityHash = stableHash(segmentIdentity)
+        return try database.read { db in
+            try Bool.fetchOne(
+                db,
+                sql: """
+                    SELECT EXISTS(
+                        SELECT 1
+                        FROM hls_ingest_segments
+                        WHERE stream_id = ?
+                          AND media_sequence = ?
+                          AND segment_identity = ?
+                          AND segment_identity_hash = ?
+                    )
+                    """,
+                arguments: [streamID, mediaSequence, segmentIdentity, segmentIdentityHash]
+            ) ?? false
+        }
+    }
+
+    public func persistedHLSSegmentKeys(streamID: Int64) throws -> Set<HLSDecodedAudioSegmentKey> {
+        guard streamID > 0 else { return [] }
+        return try database.read { db in
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT media_sequence, segment_identity
+                    FROM hls_ingest_segments
+                    WHERE stream_id = ?
+                    """,
+                arguments: [streamID]
+            )
+            return Set(rows.compactMap { row in
+                let segmentIdentity = row["segment_identity"] as String? ?? ""
+                guard !segmentIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return HLSDecodedAudioSegmentKey(
+                    mediaSequence: row["media_sequence"] as Int,
+                    segmentIdentity: segmentIdentity
+                )
+            })
+        }
+    }
+
     public func claimHLSSegment(_ claim: HLSSegmentClaim?) throws -> HLSSegmentClaimResult {
         guard let claim else { return .noClaim }
         guard claim.streamID > 0, claim.mediaSequence >= 0 else { return .noClaim }
@@ -172,24 +226,42 @@ public struct IngestPersistence {
                 let existingIdentity = existing["segment_identity"] as String? ?? ""
                 let existingIdentityHash = existing["segment_identity_hash"] as String? ?? ""
 
-                let severity: IngestDiagnosticSeverity
-                let reason: String
-                let decision: String
                 if existingIdentity == segmentIdentity && existingIdentityHash == segmentIdentityHash {
-                    severity = .info
-                    reason = "hls-segment-duplicate"
-                    decision = "duplicate-skip"
-                } else {
-                    severity = .error
-                    reason = "hls-segment-identity-conflict"
-                    decision = "identity-conflict"
+                    let diagnostic = HLSSegmentClaimDiagnostic(
+                        severity: .info,
+                        reason: "hls-segment-duplicate",
+                        context: hlsDecisionContext(
+                            decision: "duplicate-skip",
+                            mediaSequence: claim.mediaSequence,
+                            segmentIdentity: segmentIdentity,
+                            segmentIdentityHash: segmentIdentityHash,
+                            existingSegmentIdentity: existingIdentity,
+                            existingSegmentIdentityHash: existingIdentityHash,
+                            currentRunID: claim.runID,
+                            existingRunID: existingRunID,
+                            existingChunkID: existingChunkID
+                        )
+                    )
+                    try insertHLSDecisionDiagnostic(
+                        diagnostic,
+                        streamID: claim.streamID,
+                        runID: claim.runID,
+                        chunkID: existingChunkID,
+                        createdAt: claim.claimedAt,
+                        db: db
+                    )
+                    return .duplicate(
+                        existingRunID: existingRunID,
+                        existingChunkID: existingChunkID,
+                        diagnostic: diagnostic
+                    )
                 }
 
                 let diagnostic = HLSSegmentClaimDiagnostic(
-                    severity: severity,
-                    reason: reason,
+                    severity: .warning,
+                    reason: "hls-media-sequence-reset",
                     context: hlsDecisionContext(
-                        decision: decision,
+                        decision: "sequence-reset-reclaim",
                         mediaSequence: claim.mediaSequence,
                         segmentIdentity: segmentIdentity,
                         segmentIdentityHash: segmentIdentityHash,
@@ -208,19 +280,30 @@ public struct IngestPersistence {
                     createdAt: claim.claimedAt,
                     db: db
                 )
-
-                if reason == "hls-segment-duplicate" {
-                    return .duplicate(
-                        existingRunID: existingRunID,
-                        existingChunkID: existingChunkID,
-                        diagnostic: diagnostic
-                    )
-                }
-                return .conflict(
-                    existingRunID: existingRunID,
-                    existingChunkID: existingChunkID,
-                    diagnostic: diagnostic
+                try db.execute(
+                    sql: """
+                        UPDATE hls_ingest_segments
+                        SET segment_identity = ?,
+                            segment_identity_hash = ?,
+                            claimed_run_id = ?,
+                            chunk_id = NULL,
+                            claimed_at = ?,
+                            finalized_at = NULL,
+                            updated_at = ?
+                        WHERE stream_id = ?
+                          AND media_sequence = ?
+                        """,
+                    arguments: [
+                        segmentIdentity,
+                        segmentIdentityHash,
+                        claim.runID,
+                        claim.claimedAt,
+                        claim.claimedAt,
+                        claim.streamID,
+                        claim.mediaSequence
+                    ]
                 )
+                return .claimed(diagnostics: [diagnostic])
             }
 
             var diagnostics: [HLSSegmentClaimDiagnostic] = []
@@ -633,10 +716,11 @@ public struct IngestPersistence {
                   AND song_plays.song_id = ?
                   AND last_chunk.run_id = current_chunk.run_id
                   AND last_chunk.sequence = current_chunk.sequence - 1
+                  AND song_plays.end_seconds >= ?
                 ORDER BY song_plays.id DESC
                 LIMIT 1
                 """,
-            arguments: [timeline.chunkID, streamID, timeline.runID, songID]
+            arguments: [timeline.chunkID, streamID, timeline.runID, songID, play.startSeconds - 1.0]
         ) {
             try db.execute(
                 sql: """

@@ -136,6 +136,53 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.lastLifecycleMessage.contains("token=secret"))
     }
 
+    func testPlayerTimelineEventDoesNotDowngradeVisibleRuntimeStatus() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        var viewModel = StreamAppViewModel()
+        viewModel.addDraft = StreamAppAddDraft(
+            name: "Fixture HLS",
+            source: "https://example.test/live.m3u8",
+            transport: .hls
+        )
+        let item = try viewModel.addStream(using: registry)
+
+        viewModel.applyRuntimeEvent(
+            AppStreamRuntimeEvent(
+                streamID: item.id,
+                phase: .running,
+                message: "Live ingest and playback are active."
+            )
+        )
+
+        viewModel.applyRuntimeEvent(
+            AppStreamRuntimeEvent(
+                streamID: item.id,
+                phase: .stopped,
+                message: "Buffered 0-136s.",
+                result: AppStreamRuntimeResult(
+                    streamID: item.id,
+                    playerTimeline: AppPlayerTimelineSnapshot(
+                        streamID: item.id,
+                        state: .buffering,
+                        positionSeconds: 0,
+                        liveEdgeSeconds: 136,
+                        bufferedStartSeconds: 0,
+                        bufferedEndSeconds: 136,
+                        lastMessage: "Buffered 0-136s."
+                    )
+                )
+            )
+        )
+
+        let selected = try XCTUnwrap(viewModel.selectedStream)
+        XCTAssertEqual(viewModel.streams.first?.status, .running)
+        XCTAssertEqual(selected.item.status, .running)
+        XCTAssertEqual(selected.playerStateTitle, "Buffering")
+        XCTAssertEqual(selected.canStartRuntime, false)
+        XCTAssertEqual(selected.canStopRuntime, true)
+    }
+
     func testRuntimeReconnectIssueProjectsLastRedactedMessageForVisibleStatus() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

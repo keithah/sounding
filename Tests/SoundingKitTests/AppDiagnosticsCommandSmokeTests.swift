@@ -28,7 +28,9 @@ final class AppDiagnosticsCommandSmokeTests: XCTestCase {
         XCTAssertTrue(output.contains("app-diagnostics recent-events"), output)
         XCTAssertTrue(
             output.contains("event=runtime.decode.completed stream=42 phase=decode"), output)
-        XCTAssertTrue(output.contains("fields=detail:kept-diagnostic-context"), output)
+        XCTAssertTrue(
+            output.contains("fields=[redacted-secret-key]:[redacted-secret],detail:kept-diagnostic-context"),
+            output)
         XCTAssertTrue(output.contains("app-diagnostics recent-failures"), output)
         XCTAssertTrue(output.contains("event=runtime.failure stream=99 phase=playback"), output)
         XCTAssertEqual(lines(in: output, containing: " event=runtime."), 2, output)

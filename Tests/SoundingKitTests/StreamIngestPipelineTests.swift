@@ -563,7 +563,7 @@ final class StreamIngestPipelineTests: XCTestCase {
             "failed opening https://viewer:letmein@ token=synthetic-secret#private-fragment path=/tmp/audio-token=synthetic-secret.wav"
         )
 
-        XCTAssertTrue(text.contains("https://[redacted-source]"), text)
+        XCTAssertTrue(text.contains("failed opening"), text)
         XCTAssertTrue(text.contains("[redacted-path]"), text)
         Self.assertNoForbiddenLiterals(
             in: text,

@@ -251,7 +251,7 @@ final class HLSMonitorAdapterTests: XCTestCase {
             XCTAssertTrue(description.contains("sourceOpen"), description)
             XCTAssertTrue(description.contains("hls"), description)
             XCTAssertTrue(description.contains("sourceClass=hls_manifest"), description)
-            XCTAssertTrue(description.contains("/tmp/"), description)
+            XCTAssertTrue(description.contains("[redacted-path]/"), description)
             XCTAssertTrue(description.contains("missing-manifest.m3u8"), description)
             assertSanitized(description, forbiddenLiteral: source)
             assertSanitized(description, forbiddenLiteral: "user:pass")

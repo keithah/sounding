@@ -148,7 +148,7 @@ final class LiveStreamVerifierTests: XCTestCase {
             ICYMonitorAdapter(source: source, streamType: streamType) { _, _ in
                 ICYMonitorAdapter.OpenedStream(
                     responseHeaders: ["icy-metaint": "4"],
-                    streamBytes: Data(repeating: 0x41, count: 12)
+                    streamBytes: Data([0x41, 0x41, 0x41, 0x41, 0x00])
                 )
             }
         }

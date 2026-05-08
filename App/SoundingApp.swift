@@ -43,6 +43,10 @@ private enum SoundingProcessEnvironment {
         try? FileManager.default.createDirectory(at: huggingFaceRoot, withIntermediateDirectories: true)
         setenvIfMissing("HF_HOME", huggingFaceRoot.path)
         setenvIfMissing("HF_HUB_CACHE", huggingFaceRoot.path)
+        if let acoustIDClientKey = try? AppKeychainSecretStore().acoustIDClientKey(),
+           !acoustIDClientKey.isEmpty {
+            setenvIfMissing("SOUNDING_ACOUSTID_API_KEY", acoustIDClientKey)
+        }
     }
 
     private static func setenvIfMissing(_ name: String, _ value: String) {

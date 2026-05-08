@@ -63,6 +63,10 @@ public enum MonitorError: Error, Equatable, CustomStringConvertible, Sendable {
         }
         safe = redactSecretAssignments(in: safe)
         safe = redactCredentialLikePathSegments(in: safe)
+        if safe.hasPrefix("/") {
+            let filename = URL(fileURLWithPath: safe).lastPathComponent
+            return filename.isEmpty ? "[redacted-path]" : "[redacted-path]/\(filename)"
+        }
         return safe
     }
 

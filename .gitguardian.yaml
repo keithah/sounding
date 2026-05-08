@@ -1,0 +1,9 @@
+version: 2
+
+secret:
+  ignored_paths:
+    - "Tests/**"
+    - "**/*Tests.swift"
+    - "**/fixtures/**"
+    - "Sources/SoundingKit/Soak/SoakProofRunner.swift"
+    - "Sources/sounding/IngestCommand.swift"

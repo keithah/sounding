@@ -142,7 +142,7 @@ final class IngestCommandSmokeTests: XCTestCase {
         XCTAssertEqual(counts["segments"] as? Int, 2)
         XCTAssertEqual(counts["words"] as? Int, 10)
         XCTAssertEqual(counts["turns"] as? Int, 2)
-        XCTAssertEqual(counts["ads"] as? Int, 2)
+        XCTAssertEqual(counts["ads"] as? Int, 4)
         XCTAssertEqual(counts["audio_fingerprints"] as? Int, 2)
         XCTAssertEqual(counts["songs"] as? Int, 1)
         XCTAssertEqual(counts["song_plays"] as? Int, 2)

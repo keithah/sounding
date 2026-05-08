@@ -151,10 +151,10 @@ public struct SoakProofRunner: Sendable {
             try await runtime.start(streamID: streams.sibling.id)
             await Task.yield()
             queueSnapshots.append(SoakEvidenceQueueSnapshot(await queue.snapshot()))
-            await queueGate.release(count: 1)
+            await queueGate.release(count: 2)
             for _ in 0..<20 {
                 if await eventRecorder.containsPhase(AppStreamRuntimeStatusPhase.reconnecting.rawValue) { break }
-                await Task.yield()
+                try await Task.sleep(nanoseconds: 5_000_000)
             }
 
             if config.simulateLifecycle {
@@ -469,7 +469,6 @@ private actor SyntheticSoakIngester: AppStreamRuntimeIngesting {
     private let queue: InferenceQueue
     private let gate: SoakProofGate
     private var callsByStream: [Int64: Int] = [:]
-    private var retryingStreamID: Int64?
 
     init(queue: InferenceQueue, gate: SoakProofGate) {
         self.queue = queue
@@ -479,14 +478,12 @@ private actor SyntheticSoakIngester: AppStreamRuntimeIngesting {
     func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
         let nextCall = (callsByStream[request.streamID] ?? 0) + 1
         callsByStream[request.streamID] = nextCall
-        if retryingStreamID == nil {
-            retryingStreamID = request.streamID
-        }
+        let shouldExerciseRetry = request.name.contains("Short Soak Retry")
         try await queue.run("soak-proof") {
             await gate.wait()
         }
         try Task.checkCancellation()
-        if request.streamID == retryingStreamID, nextCall == 1 {
+        if shouldExerciseRetry, nextCall == 1 {
             throw SyntheticSoakFailure(
                 message: "synthetic runtime failure for https://user:pass@example.test/fail.m3u8?token=synthetic-secret#frag"
             )

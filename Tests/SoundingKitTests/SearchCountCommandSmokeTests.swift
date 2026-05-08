@@ -190,7 +190,7 @@ final class SearchCountCommandSmokeTests: XCTestCase {
             [
                 "search", "alpha", "--db",
                 temporaryDatabaseURL(secretComponent: "bad-context-token=synthetic-secret").path,
-                "--context", "-1",
+                "--context=-1",
             ],
             [
                 "count", "   \t", "--db",

@@ -7,6 +7,7 @@ public struct AudioDecodeRequest: Equatable, Sendable {
     public var durationSeconds: Double?
     public var maxChunks: Int?
     public var minimumHLSMediaSequence: Int?
+    public var excludedHLSSegmentKeys: Set<HLSDecodedAudioSegmentKey>
     public var hlsTimelineStartSeconds: Double?
 
     public init(
@@ -15,6 +16,7 @@ public struct AudioDecodeRequest: Equatable, Sendable {
         durationSeconds: Double? = nil,
         maxChunks: Int? = nil,
         minimumHLSMediaSequence: Int? = nil,
+        excludedHLSSegmentKeys: Set<HLSDecodedAudioSegmentKey> = [],
         hlsTimelineStartSeconds: Double? = nil
     ) {
         self.source = source
@@ -22,7 +24,18 @@ public struct AudioDecodeRequest: Equatable, Sendable {
         self.durationSeconds = durationSeconds
         self.maxChunks = maxChunks
         self.minimumHLSMediaSequence = minimumHLSMediaSequence
+        self.excludedHLSSegmentKeys = excludedHLSSegmentKeys
         self.hlsTimelineStartSeconds = hlsTimelineStartSeconds
+    }
+}
+
+public struct HLSDecodedAudioSegmentKey: Equatable, Hashable, Sendable {
+    public var mediaSequence: Int
+    public var segmentIdentity: String
+
+    public init(mediaSequence: Int, segmentIdentity: String) {
+        self.mediaSequence = mediaSequence
+        self.segmentIdentity = segmentIdentity
     }
 }
 

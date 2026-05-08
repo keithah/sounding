@@ -168,7 +168,8 @@ public struct AppVerifyParsedDiagnosticEntry: Codable, Equatable, Sendable {
         self.streamID = streamID
         self.message = message.map(AppVerifyEvidenceSanitizer.redact)
         self.fields = fields.prefix(16).reduce(into: [:]) { partial, pair in
-            partial[AppVerifyEvidenceSanitizer.redact(pair.key)] = AppVerifyEvidenceSanitizer.redact(pair.value)
+            partial[AppVerifyEvidenceSanitizer.fieldKey(pair.key)] =
+                AppVerifyEvidenceSanitizer.fieldValue(pair.value, key: pair.key)
         }
     }
 }
@@ -531,9 +532,38 @@ public struct AppVerifyEvidence: Codable, Equatable, Sendable {
         self.runtimeFacts = runtimeFacts
         self.artifacts = Array(artifacts.prefix(32))
         self.metadata = metadata.reduce(into: [:]) { partial, pair in
-            partial[AppVerifyEvidenceSanitizer.redact(pair.key)] = AppVerifyEvidenceSanitizer.redact(pair.value)
+            partial[AppVerifyEvidenceSanitizer.fieldKey(pair.key)] =
+                AppVerifyEvidenceSanitizer.fieldValue(pair.value, key: pair.key)
         }
         self.summary = summary ?? AppVerifyEvidenceSummary.aggregate(boundedChecks)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, generatedAt, runID, summary, checks, runtimeFacts, artifacts, metadata
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedChecks = try container.decode([AppVerifyCheckRecord].self, forKey: .checks)
+        let boundedChecks = Array(decodedChecks.prefix(64))
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            ?? Self.currentSchemaVersion
+        generatedAt = AppVerifyEvidenceSanitizer.redact(
+            try container.decodeIfPresent(String.self, forKey: .generatedAt) ?? "unknown")
+        runID = AppVerifyEvidenceSanitizer.redact(
+            try container.decodeIfPresent(String.self, forKey: .runID) ?? "unknown")
+        checks = boundedChecks
+        runtimeFacts = try container.decodeIfPresent(AppVerifyRuntimeFacts.self, forKey: .runtimeFacts)
+        artifacts = Array(
+            try container.decodeIfPresent([AppVerifyRedactedArtifact].self, forKey: .artifacts) ?? []
+        ).prefix(32).map { $0 }
+        let decodedMetadata = try container.decodeIfPresent([String: String].self, forKey: .metadata) ?? [:]
+        metadata = decodedMetadata.reduce(into: [:]) { partial, pair in
+            partial[AppVerifyEvidenceSanitizer.fieldKey(pair.key)] =
+                AppVerifyEvidenceSanitizer.fieldValue(pair.value, key: pair.key)
+        }
+        summary = try container.decodeIfPresent(AppVerifyEvidenceSummary.self, forKey: .summary)
+            ?? AppVerifyEvidenceSummary.aggregate(boundedChecks)
     }
 
     public func jsonData() throws -> Data {
@@ -800,9 +830,43 @@ enum AppVerifyEvidenceSanitizer {
         return redacted
     }
 
+    static func fieldKey(_ key: String) -> String {
+        if isSecretLikeKey(key) {
+            return "[redacted-secret-key]"
+        }
+        return redact(key)
+    }
+
+    static func fieldValue(_ value: String, key: String) -> String {
+        if isSecretLikeKey(key) {
+            return "[redacted-secret]"
+        }
+        if isPathLikeKey(key) {
+            return artifactPath(value)
+        }
+        return redact(value)
+    }
+
+    private static func isSecretLikeKey(_ key: String) -> Bool {
+        key.range(
+            of: #"(?i)\b(token|access[_-]?token|api[_-]?key|secret|password|passwd|pwd|credential|authorization)\b"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func isPathLikeKey(_ key: String) -> Bool {
+        key.range(of: "path", options: [.caseInsensitive]) != nil
+            || key.range(of: "directory", options: [.caseInsensitive]) != nil
+    }
+
     private static func scrubSecretKeyNames(_ value: String) -> String {
         value.replacingOccurrences(
             of: #"(?i)\b(?:token|access_token|api[_-]?key|secret|password|passwd|pwd|key)=\[redacted\]"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
+        .replacingOccurrences(
+            of: #"\[redacted-\[redacted-secret\]\]"#,
             with: "[redacted-secret]",
             options: .regularExpression
         )

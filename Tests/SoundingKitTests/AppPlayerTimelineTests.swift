@@ -60,23 +60,23 @@ final class AppPlayerTimelineTests: XCTestCase {
                 streamType: .hls
             ))
 
-        XCTAssertEqual(result.processedChunks, 2)
+        XCTAssertEqual(result.processedChunks, 1)
         let decodeCallCount = await decoder.callCount()
         XCTAssertEqual(decodeCallCount, 1)
         let frames = await player.frames()
-        XCTAssertEqual(frames.map(\.sequence), [0, 1])
-        XCTAssertEqual(frames.map(\.audio), [Data([0x01, 0x02, 0x03]), Data([0x04, 0x05])])
-        XCTAssertEqual(frames.map(\.startSeconds), [0, 2])
-        XCTAssertEqual(frames.map(\.endSeconds), [2, 4])
+        XCTAssertEqual(frames.map(\.sequence), [0])
+        XCTAssertEqual(frames.map(\.audio), [Data([0x01, 0x02, 0x03])])
+        XCTAssertEqual(frames.map(\.startSeconds), [0])
+        XCTAssertEqual(frames.map(\.endSeconds), [2])
         let preparedStreams = await player.preparedStreams()
         XCTAssertEqual(preparedStreams, [stream.id])
 
         let snapshot = try XCTUnwrap(result.playerTimeline)
         XCTAssertEqual(snapshot.streamID, stream.id)
-        XCTAssertEqual(snapshot.decodedFrameCount, 2)
+        XCTAssertEqual(snapshot.decodedFrameCount, 1)
         XCTAssertEqual(snapshot.bufferedStartSeconds, 0)
-        XCTAssertEqual(snapshot.bufferedEndSeconds, 4)
-        XCTAssertEqual(snapshot.liveEdgeSeconds, 4)
+        XCTAssertEqual(snapshot.bufferedEndSeconds, 2)
+        XCTAssertEqual(snapshot.liveEdgeSeconds, 2)
         XCTAssertEqual(snapshot.state, .stopped)
         XCTAssertFalse(snapshot.lastMessage.contains("token=secret"), snapshot.lastMessage)
 
@@ -92,7 +92,7 @@ final class AppPlayerTimelineTests: XCTestCase {
                 arguments: [stream.id]
             )
         }
-        XCTAssertEqual(rows?["chunk_count"] as Int?, 2)
+        XCTAssertEqual(rows?["chunk_count"] as Int?, 1)
     }
 
     func testSinglePathDecoderSurfacesPlaybackFailuresWithoutSecondDecodePath() async throws {
@@ -144,22 +144,21 @@ final class AppPlayerTimelineTests: XCTestCase {
             streamType: "hls",
             source: "https://example.test/dedup.m3u8"
         )
-        try temporary.database.write { db in
-            try db.execute(
-                sql: """
-                INSERT INTO hls_ingest_segments (
-                    stream_id, media_sequence, segment_identity, segment_identity_hash,
-                    claimed_run_id, chunk_id, claimed_at, finalized_at, updated_at
-                ) VALUES (?, 7, 'https://example.test/segment-7.ts', 'existing', NULL, NULL, ?, ?, ?)
-                """,
-                arguments: [
-                    stream.id,
-                    "2026-05-01T00:00:00Z",
-                    "2026-05-01T00:00:00Z",
-                    "2026-05-01T00:00:00Z"
-                ]
+        let persistence = IngestPersistence(database: temporary.database)
+        let runID = try persistence.createRun(
+            streamID: stream.id,
+            startedAt: "2026-05-01T00:00:00Z",
+            status: .running
+        )
+        _ = try persistence.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: stream.id,
+                runID: runID,
+                mediaSequence: 7,
+                segmentIdentity: "https://example.test/segment-7.ts",
+                claimedAt: "2026-05-01T00:00:00Z"
             )
-        }
+        )
         let decoder = CountingSharedDecoder(chunks: [
             Self.hlsPCMChunk(sequence: 0, mediaSequence: 7),
             Self.hlsPCMChunk(sequence: 1, mediaSequence: 8),
@@ -182,6 +181,179 @@ final class AppPlayerTimelineTests: XCTestCase {
         let frames = await player.frames()
         XCTAssertEqual(frames.map(\.hlsIdentity?.mediaSequence), [8])
         XCTAssertEqual(frames.map(\.sequence), [1])
+    }
+
+    func testSinglePathDecoderAllowsHLSSequenceResetWithDifferentIdentity() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Reset HLS",
+            streamType: "hls",
+            source: "https://example.test/reset.m3u8"
+        )
+        try temporary.database.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO hls_ingest_segments (
+                    stream_id, media_sequence, segment_identity, segment_identity_hash,
+                    claimed_run_id, chunk_id, claimed_at, finalized_at, updated_at
+                ) VALUES (?, 7, 'https://old.example.test/segment-7.ts', 'old', NULL, NULL, ?, ?, ?)
+                """,
+                arguments: [
+                    stream.id,
+                    "2026-05-01T00:00:00Z",
+                    "2026-05-01T00:00:00Z",
+                    "2026-05-01T00:00:00Z"
+                ]
+            )
+        }
+        let decoder = CountingSharedDecoder(chunks: [
+            Self.hlsPCMChunk(
+                sequence: 0,
+                mediaSequence: 7,
+                segmentIdentity: "https://new.example.test/segment-7.ts")
+        ])
+        let player = DeterministicAppPCMPlayerAdapter()
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: stream.id)
+        let tee = SinglePathPCMDecoder(
+            streamID: stream.id,
+            upstream: decoder,
+            player: player,
+            timeline: timeline,
+            database: temporary.database
+        )
+
+        _ = try await tee.decodedChunks(
+            for: AudioDecodeRequest(source: "https://example.test/reset.m3u8", streamType: .hls))
+
+        let frames = await player.frames()
+        XCTAssertEqual(frames.map(\.hlsIdentity?.mediaSequence), [7])
+        XCTAssertEqual(frames.map(\.hlsIdentity?.segmentIdentity), ["https://new.example.test/segment-7.ts"])
+    }
+
+    func testRuntimeLimitsLiveHLSPassesToOneChunk() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Live HLS",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8"
+        )
+        let decoder = RecordingDecodeRequestDecoder(chunks: [
+            Self.hlsPCMChunk(sequence: 0, mediaSequence: 20)
+        ])
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: decoder,
+            transcriber: FixtureTimelineTranscriber(),
+            diarizer: FixtureTimelineDiarizer(),
+            player: DeterministicAppPCMPlayerAdapter(),
+            timeline: AppPlayerTimelineClock(),
+            now: { "2026-05-01T00:00:00Z" }
+        )
+
+        _ = try await runner.run(
+            AppStreamRuntimeRequest(
+                streamID: stream.id,
+                name: stream.name,
+                source: "https://example.test/live.m3u8",
+                sourceDescription: stream.sourceDescription,
+                streamType: .hls
+            ))
+
+        let requests = await decoder.requests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.maxChunks, 1)
+    }
+
+    func testRuntimePassesPersistedHLSKeysForResetDuplicateFiltering() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Reset HLS",
+            streamType: "hls",
+            source: "https://example.test/reset.m3u8"
+        )
+        let persistence = IngestPersistence(database: temporary.database)
+        let previousRunID = try persistence.createRun(
+            streamID: stream.id,
+            startedAt: "2026-05-01T00:00:00Z",
+            status: .completed
+        )
+        _ = try persistence.claimHLSSegment(
+            HLSSegmentClaim(
+                streamID: stream.id,
+                runID: previousRunID,
+                mediaSequence: 8,
+                segmentIdentity: "https://example.test/segment-8.ts",
+                claimedAt: "2026-05-01T00:00:01Z"
+            ))
+        let decoder = RecordingDecodeRequestDecoder(chunks: [
+            Self.hlsPCMChunk(sequence: 0, mediaSequence: 20)
+        ])
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: decoder,
+            transcriber: FixtureTimelineTranscriber(),
+            diarizer: FixtureTimelineDiarizer(),
+            player: DeterministicAppPCMPlayerAdapter(),
+            timeline: AppPlayerTimelineClock(),
+            now: { "2026-05-01T00:00:02Z" }
+        )
+
+        _ = try await runner.run(
+            AppStreamRuntimeRequest(
+                streamID: stream.id,
+                name: stream.name,
+                source: "https://example.test/reset.m3u8",
+                sourceDescription: stream.sourceDescription,
+                streamType: .hls
+            ))
+
+        let requests = await decoder.requests()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertTrue(request.excludedHLSSegmentKeys.contains(
+            HLSDecodedAudioSegmentKey(
+                mediaSequence: 8,
+                segmentIdentity: IngestRedaction.sourceDescription("https://example.test/segment-8.ts")
+            )))
+    }
+
+    func testSinglePathDecoderDoesNotMarkContainerBytesAsBufferedPlayback() async throws {
+        let decoder = CountingSharedDecoder(chunks: [
+            DecodedAudioChunk(
+                sequence: 0,
+                audio: Data([0x23, 0x45, 0x58, 0x54]),
+                audioFormat: .containerBytes,
+                startSeconds: 30,
+                endSeconds: 36,
+                startedAt: "2026-05-01T00:00:00Z"
+            )
+        ])
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: 42)
+        let tee = SinglePathPCMDecoder(
+            streamID: 42,
+            upstream: decoder,
+            player: DeterministicAppPCMPlayerAdapter(),
+            timeline: timeline,
+            rollingBuffer: RollingPCMBuffer()
+        )
+
+        let chunks = try await tee.decodedChunks(
+            for: AudioDecodeRequest(source: "https://example.test/live.m3u8", streamType: .hls))
+
+        XCTAssertEqual(chunks.count, 1)
+        let snapshot = await timeline.snapshot()
+        XCTAssertEqual(snapshot.decodedFrameCount, 0)
+        XCTAssertNil(snapshot.bufferedStartSeconds)
+        XCTAssertNil(snapshot.bufferedEndSeconds)
+        XCTAssertEqual(snapshot.rollingBuffer?.frameCount, 0)
+        XCTAssertEqual(snapshot.state, .buffering)
+        XCTAssertEqual(
+            snapshot.lastMessage,
+            "Decoded audio was not playable PCM; ingest continues without scheduling playback.")
     }
 
     func testAVFoundationAdapterSchedulesSupportedPCMFrames() async throws {
@@ -233,6 +405,20 @@ final class AppPlayerTimelineTests: XCTestCase {
             XCTAssertEqual(snapshot.bufferedStartSeconds, 0)
             XCTAssertEqual(snapshot.bufferedEndSeconds, 0.00008)
             XCTAssertEqual(snapshot.lastMessage, "Playing shared PCM frame 1.")
+        #endif
+    }
+
+    func testAVFoundationAdapterAppliesVolumeAtOnlyOneAudioStage() async throws {
+        #if canImport(AVFoundation)
+            let volumeStore = AppPlaybackVolumeStore()
+            let adapter = AVFoundationAppPCMPlayerAdapter.verificationAdapter(volumeStore: volumeStore)
+            await volumeStore.setVolume(streamID: 91, volume: 0.5)
+
+            await adapter.applyPlaybackVolume(streamID: 91)
+
+            let nodeVolumes = adapter.nodeVolumeSnapshotForTesting
+            XCTAssertEqual(nodeVolumes.player, 1.0, accuracy: 0.001)
+            XCTAssertEqual(nodeVolumes.mixer, 0.5, accuracy: 0.001)
         #endif
     }
 
@@ -406,13 +592,18 @@ final class AppPlayerTimelineTests: XCTestCase {
         XCTAssertEqual(snapshot.decodedFrameCount, 2)
     }
 
-    private static func hlsPCMChunk(sequence: Int, mediaSequence: Int) -> DecodedAudioChunk {
-        DecodedAudioChunk(
+    private static func hlsPCMChunk(
+        sequence: Int,
+        mediaSequence: Int,
+        segmentIdentity: String? = nil
+    ) -> DecodedAudioChunk {
+        let segmentIdentity = segmentIdentity ?? "https://example.test/segment-\(mediaSequence).ts"
+        return DecodedAudioChunk(
             sequence: sequence,
-            segmentURI: "https://example.test/segment-\(mediaSequence).ts",
+            segmentURI: segmentIdentity,
             hlsIdentity: HLSDecodedAudioChunkIdentity(
                 mediaSequence: mediaSequence,
-                segmentIdentity: "https://example.test/segment-\(mediaSequence).ts",
+                segmentIdentity: segmentIdentity,
                 manifestPosition: sequence
             ),
             audio: Data([UInt8(mediaSequence), 0x02]),
@@ -453,10 +644,29 @@ private actor CountingSharedDecoder: AudioDecoding {
     func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
         calls += 1
         XCTAssertEqual(request.streamType, .hls)
+        if let maxChunks = request.maxChunks {
+            return Array(chunks.prefix(max(0, maxChunks)))
+        }
         return chunks
     }
 
     func callCount() -> Int { calls }
+}
+
+private actor RecordingDecodeRequestDecoder: AudioDecoding {
+    private let chunks: [DecodedAudioChunk]
+    private var recordedRequests: [AudioDecodeRequest] = []
+
+    init(chunks: [DecodedAudioChunk]) {
+        self.chunks = chunks
+    }
+
+    func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+        recordedRequests.append(request)
+        return chunks
+    }
+
+    func requests() -> [AudioDecodeRequest] { recordedRequests }
 }
 
 private struct FailingAppPCMPlayerAdapter: AppPCMPlaybackAdapting {

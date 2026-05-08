@@ -353,6 +353,7 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                               AND reason IN (
                                   'hls-segment-duplicate',
                                   'hls-media-sequence-gap',
+                                  'hls-media-sequence-reset',
                                   'hls-segment-identity-conflict'
                               )
                             GROUP BY stream_id

@@ -5,6 +5,151 @@ import XCTest
 @testable import SoundingKit
 
 final class IntegratedAppUATTests: XCTestCase {
+    func testSyntheticTimedID3HLSFixtureProjectsPlaybackBufferMetadataAndTranscriptTimeline()
+        async throws
+    {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Synthetic Timed ID3 HLS",
+            streamType: "hls",
+            source: "https://example.test/synthetic/live.m3u8",
+            createdAt: "2026-05-01T12:00:00Z"
+        )
+        let recorder = UATRuntimeRecorder()
+        let timeline = AppPlayerTimelineClock()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 30 * 60,
+                hotMemoryDurationSeconds: 30 * 60,
+                maximumSpillBytes: 0
+            )
+        )
+        let player = RecordingDeterministicPlayer(recorder: recorder)
+        let decoder = SyntheticTimedID3HLSDecoder()
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: decoder,
+            transcriber: SyntheticTimedID3Transcriber(),
+            diarizer: NoOpSpeakerDiarizer(),
+            player: player,
+            timeline: timeline,
+            rollingBuffer: rollingBuffer,
+            keepPlaybackRunningAfterIngestCompletes: true,
+            livePollIntervalNanoseconds: 1_000_000,
+            diarizerFactory: { enabled -> any SpeakerDiarization in
+                enabled ? SyntheticTimedID3Diarizer() : NoOpSpeakerDiarizer()
+            },
+            now: { "2026-05-01T12:00:00Z" }
+        )
+
+        let request = AppStreamRuntimeRequest(
+            streamID: stream.id,
+            name: stream.name,
+            source: "https://example.test/synthetic/live.m3u8",
+            sourceDescription: stream.sourceDescription,
+            streamType: .hls,
+            isDiarizationEnabled: false
+        )
+        let runtimeTask = Task {
+            try await runner.run(request)
+        }
+        defer { runtimeTask.cancel() }
+
+        let store = StreamAppTimelineStore(database: temporary.database)
+        let snapshot = try await waitForSyntheticTimedID3Snapshot(
+            store: store,
+            streamID: stream.id,
+            timeline: timeline
+        )
+        let playerTimeline: AppPlayerTimelineSnapshot = await timeline.snapshot()
+        runtimeTask.cancel()
+        do {
+            _ = try await runtimeTask.value
+        } catch is CancellationError {
+            // Expected: the live polling fixture is cancelled after the third synthetic segment lands.
+        }
+
+        let emittedCount = await decoder.emittedCount()
+        XCTAssertEqual(emittedCount, 3)
+        let playedFrames = await recorder.playedFrames()
+        XCTAssertEqual(playedFrames.map(\.sequence), [0, 1, 2])
+        XCTAssertEqual(playerTimeline.rollingBuffer?.bufferedRange?.startSeconds, 0)
+        XCTAssertEqual(playerTimeline.rollingBuffer?.bufferedRange?.endSeconds, 30)
+        XCTAssertEqual(playerTimeline.rollingBuffer?.frameCount, 3)
+        XCTAssertEqual(snapshot.currentMetadata?.title, "Second Wire Song")
+        XCTAssertEqual(snapshot.currentMetadata?.artist, "Second Wire Artist")
+        let songItems: [StreamAppTimelineItem] = snapshot.timelineItems
+            .filter { $0.kind == StreamAppTimelineItemKind.song }
+            .sorted { $0.startSeconds < $1.startSeconds }
+        XCTAssertEqual(songItems.map { $0.title }, ["First Wire Song", "Second Wire Song"])
+        XCTAssertEqual(songItems.map { $0.speakerDisplay?.displayLabel }, [
+            "First Wire Artist", "Second Wire Artist",
+        ])
+        let hasAdjacentDuplicateSongItems = zip(songItems, songItems.dropFirst()).contains {
+            lhs, rhs in
+            lhs.title == rhs.title && lhs.speakerDisplay == rhs.speakerDisplay
+        }
+        XCTAssertFalse(hasAdjacentDuplicateSongItems)
+
+        let transcriptItems: [StreamAppTimelineItem] = snapshot.timelineItems
+            .filter { $0.kind == StreamAppTimelineItemKind.transcript }
+            .sorted { $0.startSeconds < $1.startSeconds }
+        XCTAssertEqual(transcriptItems.count, 2)
+        XCTAssertEqual(transcriptItems.first?.startTimestamp, "2026-05-01T12:00:00Z")
+        XCTAssertEqual(transcriptItems.first?.endTimestamp, "2026-05-01T12:00:20Z")
+        XCTAssertEqual(transcriptItems.first?.title, "First Wire Artist")
+        XCTAssertEqual(
+            transcriptItems.first?.subtitle,
+            "first synthetic sentence from the wire second synthetic sentence from the same performer"
+        )
+        XCTAssertEqual(transcriptItems.last?.title, "Second Wire Artist")
+        XCTAssertFalse(
+            transcriptItems.contains {
+                $0.title == StreamAppSpeakerDisplayProjection.unknownSpeakerLabel
+                    || $0.speakerDisplay?.displayLabel
+                        == StreamAppSpeakerDisplayProjection.unknownSpeakerLabel
+            }
+        )
+        XCTAssertTrue(transcriptItems.allSatisfy { $0.isSeekable })
+    }
+
+    private func waitForSyntheticTimedID3Snapshot(
+        store: StreamAppTimelineStore,
+        streamID: Int64,
+        timeline: AppPlayerTimelineClock,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> StreamAppTimelineSnapshot {
+        for _ in 0..<200 {
+            let playerTimeline = await timeline.snapshot()
+            let snapshot = try store.snapshot(
+                request: StreamAppTimelineRequest(
+                    streamID: streamID,
+                    player: playerTimeline,
+                    paragraphLimit: 10,
+                    wordLimitPerParagraph: 200,
+                    metadataLimit: 10,
+                    timelineLimit: 10,
+                    lookbackSeconds: 30 * 60,
+                    refreshedAt: "2026-05-01T12:00:40Z"
+                )
+            )
+            let songCount = snapshot.timelineItems.filter {
+                $0.kind == StreamAppTimelineItemKind.song
+            }.count
+            let transcriptCount = snapshot.timelineItems.filter {
+                $0.kind == StreamAppTimelineItemKind.transcript
+            }.count
+            if songCount == 2 && transcriptCount == 2 {
+                return snapshot
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed-ID3 synthetic HLS fixture did not finish projecting timeline.", file: file, line: line)
+        throw UATError.missingEvent
+    }
+
     func testAppSupportRuntimePersistsSearchableTimelineAndCLIConfirmsSameSQLite() async throws {
         let temporary = try TemporarySoundingDatabase()
         let spillDirectory = FileManager.default.temporaryDirectory
@@ -39,7 +184,7 @@ final class IntegratedAppUATTests: XCTestCase {
                     volumeStore: volumeStore,
                     playbackTimeline: timeline,
                     rollingBuffer: rollingBuffer,
-                    playbackController: player
+                    playbackController: RecordingDeterministicPlayer(recorder: recorder)
                 )
             }
         )
@@ -79,8 +224,8 @@ final class IntegratedAppUATTests: XCTestCase {
         let events = await runtime.events()
         var iterator = events.makeAsyncIterator()
         try await runtime.start(streamID: added.id)
-        let connecting = try await nextEvent(from: &iterator)
-        let running = try await nextEvent(from: &iterator)
+        let connecting = try await nextEvent(from: &iterator, matching: .connecting)
+        let running = try await nextEvent(from: &iterator, matching: .running)
         state.viewModel.applyRuntimeEvent(connecting)
         state.viewModel.applyRuntimeEvent(running)
         XCTAssertEqual(connecting.phase, .connecting)
@@ -105,7 +250,8 @@ final class IntegratedAppUATTests: XCTestCase {
                 "closing context only",
                 "late alpha beta unbuffered result",
             ])
-        XCTAssertTrue(initialTimeline.currentMetadata?.title.hasPrefix("Unknown song (") == true)
+        XCTAssertTrue(initialTimeline.currentMetadata?.title.hasPrefix("Deterministic Song ") == true)
+        XCTAssertEqual(initialTimeline.currentMetadata?.artist, "Sounding Fixtures")
         XCTAssertTrue(initialTimeline.timelineItems.contains { $0.kind == .event })
         XCTAssertTrue(initialTimeline.timelineItems.contains { $0.kind == .song })
         XCTAssertNil(initialTimeline.diagnostics.bufferedSeekUnavailableMessage)
@@ -117,8 +263,11 @@ final class IntegratedAppUATTests: XCTestCase {
         let scrubbed = try await nextEvent(from: &iterator)
         state.viewModel.applyRuntimeEvent(scrubbed)
         XCTAssertEqual(scrubbed.result?.playerTimeline?.positionSeconds, 30)
-        XCTAssertEqual(
-            scrubbed.result?.playerTimeline?.lastMessage, "Playback seeked to buffered frame 2.")
+        XCTAssertTrue(
+            ["Playback seeked to buffered frame 2.", "Playing shared PCM frame 2."]
+                .contains(scrubbed.result?.playerTimeline?.lastMessage ?? ""),
+            scrubbed.result?.playerTimeline?.lastMessage ?? ""
+        )
 
         await runtime.seekToLive()
         let live = try await nextEvent(from: &iterator)
@@ -250,14 +399,16 @@ final class IntegratedAppUATTests: XCTestCase {
 
     private func nextEvent(
         from iterator: inout AsyncStream<AppStreamRuntimeEvent>.Iterator,
+        matching phase: AppStreamRuntimePhase? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws -> AppStreamRuntimeEvent {
-        guard let event = await iterator.next() else {
-            XCTFail("Expected runtime event", file: file, line: line)
-            throw UATError.missingEvent
+        while let event = await iterator.next() {
+            guard let phase else { return event }
+            if event.phase == phase { return event }
         }
-        return event
+        XCTFail("Expected runtime event", file: file, line: line)
+        throw UATError.missingEvent
     }
 
     private func assertNoSecrets(
@@ -385,7 +536,11 @@ private struct IntegratedUATIngester: AppStreamRuntimeIngesting {
             transcriber: IntegratedUATTranscriber(),
             diarizer: IntegratedUATDiarizer(),
             fingerprinter: DeterministicAudioFingerprinter(),
-            fingerprintEnricher: NoOpAudioFingerprintEnricher(),
+            fingerprintEnricher: AcoustIDAudioFingerprintEnricher(
+                cache: AcoustIDLookupCache(database: database),
+                lookup: DeterministicAcoustIDLookup(),
+                now: { "2026-05-01T20:00:00Z" }
+            ),
             now: { "2026-05-01T20:00:00Z" }
         ).run(streamID: request.streamID, source: request.source, streamType: request.streamType)
         await gate.markPersisted()
@@ -420,6 +575,13 @@ private struct RecordingDeterministicPlayer: AppPCMPlaybackAdapting {
         try await adapter.play(frames, timeline: timeline)
     }
 
+    func playReplacingScheduledBuffers(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock)
+        async throws
+    {
+        await recorder.recordPlayedFrames(frames)
+        try await adapter.playReplacingScheduledBuffers(frames, timeline: timeline)
+    }
+
     func pause(timeline: AppPlayerTimelineClock) async { await adapter.pause(timeline: timeline) }
     func resume(timeline: AppPlayerTimelineClock) async { await adapter.resume(timeline: timeline) }
     func stop(timeline: AppPlayerTimelineClock) async { await adapter.stop(timeline: timeline) }
@@ -435,6 +597,7 @@ private struct IntegratedUATDecoder: AudioDecoding {
                 segmentURI:
                     "https://listener:pass@example.test/private/segment-0.ts?token=uat-secret#frag",
                 audio: Data([0x01, 0x02, 0x03, 0x04]),
+                audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1),
                 startSeconds: 0,
                 endSeconds: 8,
                 startedAt: "2026-05-01T20:00:00Z",
@@ -455,6 +618,7 @@ private struct IntegratedUATDecoder: AudioDecoding {
                 segmentURI:
                     "https://listener:pass@example.test/private/segment-1.ts?token=uat-secret#frag",
                 audio: Data([0x05, 0x06, 0x07, 0x08]),
+                audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1),
                 startSeconds: 10,
                 endSeconds: 14,
                 startedAt: "2026-05-01T20:00:10Z",
@@ -475,6 +639,7 @@ private struct IntegratedUATDecoder: AudioDecoding {
                 segmentURI:
                     "https://listener:pass@example.test/private/segment-2.ts?token=uat-secret#frag",
                 audio: Data([0x09, 0x0a, 0x0b, 0x0c]),
+                audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1),
                 startSeconds: 30,
                 endSeconds: 34,
                 startedAt: "2026-05-01T20:00:30Z",
@@ -542,6 +707,185 @@ private struct IntegratedUATDiarizer: SpeakerDiarization {
                 startSeconds: segment.startSeconds,
                 endSeconds: segment.endSeconds,
                 confidence: 0.88
+            )
+        }
+    }
+}
+
+private actor SyntheticTimedID3HLSDecoder: AudioDecoding {
+    private var nextIndex = 0
+
+    func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+        XCTAssertEqual(request.streamType, .hls)
+        XCTAssertEqual(request.maxChunks, 1)
+        let chunks = [
+            chunk(
+                sequence: 0,
+                mediaSequence: 100,
+                identity: "synthetic-100.ts",
+                start: 0,
+                end: 10,
+                title: "First Wire Song",
+                artist: "First Wire Artist",
+                album: "Synthetic Album"
+            ),
+            chunk(
+                sequence: 1,
+                mediaSequence: 101,
+                identity: "synthetic-101.ts",
+                start: 10,
+                end: 20,
+                title: "First Wire Song",
+                artist: "First Wire Artist",
+                album: "Synthetic Album"
+            ),
+            chunk(
+                sequence: 2,
+                mediaSequence: 102,
+                identity: "synthetic-102.ts",
+                start: 24,
+                end: 30,
+                title: "Second Wire Song",
+                artist: "Second Wire Artist",
+                album: "Synthetic Album"
+            ),
+        ]
+        guard nextIndex < chunks.count else { return [] }
+        let chunk = chunks[nextIndex]
+        nextIndex += 1
+        return [chunk]
+    }
+
+    func emittedCount() -> Int {
+        nextIndex
+    }
+
+    private func chunk(
+        sequence: Int,
+        mediaSequence: Int,
+        identity: String,
+        start: Double,
+        end: Double,
+        title: String,
+        artist: String,
+        album: String
+    ) -> DecodedAudioChunk {
+        DecodedAudioChunk(
+            sequence: sequence,
+            segmentURI: "https://example.test/synthetic/\(identity)",
+            hlsIdentity: HLSDecodedAudioChunkIdentity(
+                mediaSequence: mediaSequence,
+                segmentIdentity: identity,
+                manifestPosition: sequence
+            ),
+            audio: Data([UInt8(sequence + 1), UInt8(sequence + 2), UInt8(sequence + 3), UInt8(sequence + 4)]),
+            audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1),
+            startSeconds: start,
+            endSeconds: end,
+            startedAt: timestamp(start),
+            endedAt: timestamp(end),
+            adMarkers: [
+                AdMarker(
+                    type: "ID3",
+                    classification: .unknown,
+                    source: "hls_segment",
+                    pts: start,
+                    segment: identity,
+                    tags: [
+                        "TIT2": .string(title),
+                        "TPE1": .string(artist),
+                        "TALB": .string(album),
+                        "SourceClass": .string("hls_timed_id3"),
+                        "MediaSequence": .string(String(mediaSequence)),
+                    ],
+                    fields: ["FrameIDs": .array([.string("TIT2"), .string("TPE1"), .string("TALB")])],
+                    timestamp: timestamp(start)
+                )
+            ]
+        )
+    }
+
+    private func timestamp(_ seconds: Double) -> String {
+        let base = ISO8601DateFormatter().date(from: "2026-05-01T12:00:00Z")!
+        return ISO8601DateFormatter().string(from: base.addingTimeInterval(seconds))
+    }
+}
+
+private struct SyntheticTimedID3Transcriber: MLTranscription {
+    func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
+        switch chunk.sequence {
+        case 0:
+            return [
+                segment(
+                    sequence: 0,
+                    startSeconds: 0,
+                    endSeconds: 8,
+                    text: "first synthetic sentence from the wire"
+                )
+            ]
+        case 1:
+            return [
+                segment(
+                    sequence: 1,
+                    startSeconds: 10,
+                    endSeconds: 20,
+                    text: "second synthetic sentence from the same performer"
+                )
+            ]
+        case 2:
+            return [
+                segment(
+                    sequence: 2,
+                    startSeconds: 24,
+                    endSeconds: 30,
+                    text: "new performer arrives with a fresh wire cue"
+                )
+            ]
+        default:
+            return []
+        }
+    }
+
+    private func segment(
+        sequence: Int,
+        startSeconds: Double,
+        endSeconds: Double,
+        text: String
+    ) -> TranscriptSegmentDraft {
+        let words = text.split(separator: " ").map(String.init)
+        let duration = max((endSeconds - startSeconds) / Double(max(words.count, 1)), 0.1)
+        return TranscriptSegmentDraft(
+            sequence: sequence,
+            speakerLabel: nil,
+            startSeconds: startSeconds,
+            endSeconds: endSeconds,
+            text: text,
+            confidence: 0.96,
+            words: words.enumerated().map { index, word in
+                TranscriptWordDraft(
+                    sequence: index,
+                    speakerLabel: nil,
+                    startSeconds: startSeconds + Double(index) * duration,
+                    endSeconds: startSeconds + Double(index + 1) * duration,
+                    text: word,
+                    confidence: 0.95
+                )
+            }
+        )
+    }
+}
+
+private struct SyntheticTimedID3Diarizer: SpeakerDiarization {
+    func diarize(
+        _ chunk: DecodedAudioChunk,
+        transcriptSegments: [TranscriptSegmentDraft]
+    ) async throws -> [SpeakerTurnDraft] {
+        transcriptSegments.map { segment in
+            SpeakerTurnDraft(
+                speakerLabel: "speaker-S\(chunk.sequence + 1)",
+                startSeconds: segment.startSeconds,
+                endSeconds: segment.endSeconds,
+                confidence: 0.9
             )
         }
     }

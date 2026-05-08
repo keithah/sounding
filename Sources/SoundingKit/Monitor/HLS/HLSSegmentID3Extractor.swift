@@ -182,43 +182,45 @@ private struct PESAssembler {
     }
 
     private func packetLength(from data: Data) -> Int? {
-        guard data.count >= 6,
-              data[0] == 0x00,
-              data[1] == 0x00,
-              data[2] == 0x01
+        let bytes = [UInt8](data)
+        guard bytes.count >= 6,
+              bytes[0] == 0x00,
+              bytes[1] == 0x00,
+              bytes[2] == 0x01
         else { return nil }
-        let pesPacketLength = (Int(data[4]) << 8) | Int(data[5])
+        let pesPacketLength = (Int(bytes[4]) << 8) | Int(bytes[5])
         return pesPacketLength == 0 ? nil : 6 + pesPacketLength
     }
 
     private func decodePES(_ data: Data) throws -> TimedID3Payload? {
-        guard data.count >= 9,
-              data[0] == 0x00,
-              data[1] == 0x00,
-              data[2] == 0x01
+        let bytes = [UInt8](data)
+        guard bytes.count >= 9,
+              bytes[0] == 0x00,
+              bytes[1] == 0x00,
+              bytes[2] == 0x01
         else { return nil }
 
-        let optionalHeaderLength = Int(data[8])
+        let optionalHeaderLength = Int(bytes[8])
         let payloadOffset = 9 + optionalHeaderLength
-        guard payloadOffset <= data.count else { return nil }
+        guard payloadOffset <= bytes.count else { return nil }
 
-        let ptsSeconds = ptsSeconds(fromPESHeader: data)
-        let payload = data.subdata(in: payloadOffset..<data.count)
+        let ptsSeconds = ptsSeconds(fromPESHeader: bytes)
+        let payload = Data(bytes[payloadOffset..<bytes.count])
         guard !payload.isEmpty else { return nil }
         return TimedID3Payload(pid: pid, data: payload, ptsSeconds: ptsSeconds)
     }
 
-    private func ptsSeconds(fromPESHeader data: Data) -> Double? {
-        guard data.count >= 14 else { return nil }
-        let ptsDTSFlags = (data[7] >> 6) & 0x03
+    private func ptsSeconds(fromPESHeader bytes: [UInt8]) -> Double? {
+        guard bytes.count >= 14 else { return nil }
+        let ptsDTSFlags = (bytes[7] >> 6) & 0x03
         guard ptsDTSFlags == 0x02 || ptsDTSFlags == 0x03 else { return nil }
 
-        let bytes = [UInt8](data[9..<14])
-        let pts = (UInt64((bytes[0] >> 1) & 0x07) << 30)
-            | (UInt64(bytes[1]) << 22)
-            | (UInt64((bytes[2] >> 1) & 0x7F) << 15)
-            | (UInt64(bytes[3]) << 7)
-            | UInt64((bytes[4] >> 1) & 0x7F)
+        let ptsBytes = Array(bytes[9..<14])
+        let pts = (UInt64((ptsBytes[0] >> 1) & 0x07) << 30)
+            | (UInt64(ptsBytes[1]) << 22)
+            | (UInt64((ptsBytes[2] >> 1) & 0x7F) << 15)
+            | (UInt64(ptsBytes[3]) << 7)
+            | UInt64((ptsBytes[4] >> 1) & 0x7F)
         return Double(pts) / 90_000.0
     }
 }

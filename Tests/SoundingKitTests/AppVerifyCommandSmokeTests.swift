@@ -33,7 +33,7 @@ final class AppVerifyCommandSmokeTests: XCTestCase {
 
         XCTAssertNotEqual(result.exitCode, 0, result.diagnosticSummary)
         XCTAssertEqual(result.stdoutLineCount, 0, result.diagnosticSummary)
-        XCTAssertTrue(result.stderrText.contains("Unknown subcommand"), result.diagnosticSummary)
+        XCTAssertTrue(result.stderrText.contains("Unexpected argument 'bogus'"), result.diagnosticSummary)
         XCTAssertFalse(result.stderrText.contains("token=synthetic-secret"), result.diagnosticSummary)
     }
 

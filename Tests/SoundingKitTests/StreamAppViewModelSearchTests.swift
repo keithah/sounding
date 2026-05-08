@@ -162,12 +162,12 @@ final class StreamAppViewModelSearchTests: XCTestCase {
       try viewModel.selectSearchResult(
         id: result.id, using: failingStore, refreshedAt: "2026-05-01T18:15:20Z")
     ) { error in
-      XCTAssertEqual(error as? StreamAppTimelineStoreError, .streamNotFound)
+      XCTAssertEqual(error as? StreamAppTimelineStoreError, .databaseReadFailed)
     }
 
     let selected = try XCTUnwrap(viewModel.selectedStream)
     XCTAssertEqual(selected.recentTranscriptParagraphs, lastGoodParagraphs)
-    XCTAssertEqual(selected.searchJumpMessage, "The selected stream was not found.")
+    XCTAssertEqual(selected.searchJumpMessage, "Stream timeline database read failed.")
   }
 
   func testPlayerTimelineChangesRefreshSearchSeekabilityAndSelectionChangeClearsJumpTarget() throws

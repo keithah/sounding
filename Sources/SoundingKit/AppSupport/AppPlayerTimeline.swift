@@ -935,8 +935,12 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
         }
 
         private func applyEffectiveVolume(_ effectiveVolume: Float) {
-            playerNode.volume = effectiveVolume
+            playerNode.volume = 1
             volumeMixerNode.outputVolume = effectiveVolume
+        }
+
+        var nodeVolumeSnapshotForTesting: (player: Float, mixer: Float) {
+            (playerNode.volume, volumeMixerNode.outputVolume)
         }
 
         private func makePCMBuffer(from frame: SharedPCMFrame) throws -> AVAudioPCMBuffer {
@@ -1052,6 +1056,17 @@ public actor DeterministicAppPCMPlayerAdapter: AppPCMPlaybackAdapting {
             message: "Deterministic playback accepted \(frames.count) frame(s).")
     }
 
+    public func playReplacingScheduledBuffers(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock)
+        async throws
+    {
+        playedFrames.append(contentsOf: frames)
+        await timeline.recordDecodedFrames(frames)
+        await timeline.applySeekResult(frames.last.map { .available($0) } ?? .unavailable(
+            requestedSeconds: 0,
+            bufferedRange: nil
+        ))
+    }
+
     public func pause(timeline: AppPlayerTimelineClock) async {
         await timeline.updatePlayerState(.paused, message: "Deterministic playback paused.")
     }
@@ -1108,10 +1123,13 @@ public struct SinglePathPCMDecoder: AudioDecoding {
         let playableFrames = await playableFrames(from: frames)
 
         guard !playableFrames.isEmpty else {
-            await timeline.recordDecodedFrames(frames)
+            let sawDecodedAudio = frames.contains { !$0.audio.isEmpty && $0.byteCount > 0 }
+            let message = sawDecodedAudio
+                ? "Decoded audio was not playable PCM; ingest continues without scheduling playback."
+                : "No new playable PCM was decoded; ingest continues without rescheduling duplicate audio."
             await timeline.updatePlayerState(
                 .buffering,
-                message: "No new playable PCM was decoded; ingest continues without rescheduling duplicate audio."
+                message: message
             )
             return chunks
         }
@@ -1149,7 +1167,7 @@ public struct SinglePathPCMDecoder: AudioDecoding {
 private actor HLSPlaybackDeduplicator {
     private let streamID: Int64
     private let persistence: IngestPersistence
-    private var acceptedMediaSequences: Set<Int> = []
+    private var acceptedSegmentKeys: Set<String> = []
 
     init(streamID: Int64, database: SoundingDatabase) {
         self.streamID = streamID
@@ -1157,15 +1175,23 @@ private actor HLSPlaybackDeduplicator {
     }
 
     func shouldPlay(_ frame: SharedPCMFrame) -> Bool {
-        guard let mediaSequence = frame.hlsIdentity?.mediaSequence else { return true }
-        guard !acceptedMediaSequences.contains(mediaSequence) else { return false }
+        guard let hlsIdentity = frame.hlsIdentity else { return true }
+        let mediaSequence = hlsIdentity.mediaSequence
+        let inMemoryKey = "\(mediaSequence):\(hlsIdentity.segmentIdentity)"
+        guard !acceptedSegmentKeys.contains(inMemoryKey) else { return false }
         if (try? persistence.hasPersistedHLSSegment(
             streamID: streamID,
             mediaSequence: mediaSequence
         )) == true {
-            return false
+            if (try? persistence.hasPersistedHLSSegment(
+                streamID: streamID,
+                mediaSequence: mediaSequence,
+                segmentIdentity: hlsIdentity.segmentIdentity
+            )) == true {
+                return false
+            }
         }
-        acceptedMediaSequences.insert(mediaSequence)
+        acceptedSegmentKeys.insert(inMemoryKey)
         return true
     }
 }

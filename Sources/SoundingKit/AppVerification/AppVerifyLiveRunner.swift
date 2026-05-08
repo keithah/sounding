@@ -472,10 +472,10 @@ public struct AppVerifyLiveRunner: Sendable {
         var metadata: [String: String] = [
             "mode": "live",
             "streamCount": String(configuration.liveConfiguration.streams.count),
-            "runDirectory": AppVerifyEvidenceSanitizer.artifactPath(runDirectory.path),
+            "runArtifact": AppVerifyEvidenceSanitizer.artifactPath(runDirectory.path),
         ]
         if let configPath = configuration.configPath {
-            metadata["config"] = AppVerifyEvidenceSanitizer.artifactPath(configPath)
+            metadata["configArtifact"] = AppVerifyEvidenceSanitizer.artifactPath(configPath)
         }
         return metadata
     }

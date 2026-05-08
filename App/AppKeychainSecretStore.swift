@@ -5,13 +5,16 @@ import SoundingKit
 struct AppKeychainSecretStore: AppSecretStore {
     private let service: String
     private let account: String
+    private let bundle: Bundle
 
     init(
         service: String = "dev.sounding.Sounding.acoustid",
-        account: String = "acoustid-api-key"
+        account: String = "acoustid-api-key",
+        bundle: Bundle = .main
     ) {
         self.service = service
         self.account = account
+        self.bundle = bundle
     }
 
     func acoustIDKeyStatus() throws -> SoundingAppAcoustIDKeyStatus {
@@ -25,9 +28,31 @@ struct AppKeychainSecretStore: AppSecretStore {
         case errSecSuccess:
             return .present
         case errSecItemNotFound:
-            return .missing
+            return bundledAcoustIDKey() == nil ? .missing : .present
         default:
             throw AppKeychainSecretStoreError(operation: "read AcoustID key status", status: status)
+        }
+    }
+
+    func acoustIDClientKey() throws -> String? {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data,
+                  let key = String(data: data, encoding: .utf8) else {
+                throw AppKeychainSecretStoreError(message: "AcoustID key could not be decoded from secure storage.")
+            }
+            let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? bundledAcoustIDKey() : trimmed
+        case errSecItemNotFound:
+            return bundledAcoustIDKey()
+        default:
+            throw AppKeychainSecretStoreError(operation: "read AcoustID key", status: status)
         }
     }
 
@@ -77,6 +102,15 @@ struct AppKeychainSecretStore: AppSecretStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
+    }
+
+    private func bundledAcoustIDKey() -> String? {
+        guard let rawValue = bundle.object(forInfoDictionaryKey: "SoundingBundledAcoustIDClientKey") as? String else {
+            return nil
+        }
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("$(") else { return nil }
+        return trimmed
     }
 }
 

@@ -154,6 +154,45 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         XCTAssertEqual(requests.map(\.uri), ["segments/segment8.ts"])
     }
 
+    func testHLSResetFallbackAppliesMaxChunksAfterPersistedIdentityExclusions() async throws {
+        let manifestURL = temporaryManifestURL(
+            contents: """
+                #EXTM3U
+                #EXT-X-TARGETDURATION:6
+                #EXT-X-MEDIA-SEQUENCE:8
+                #EXT-X-DISCONTINUITY-SEQUENCE:2
+                #EXT-X-DISCONTINUITY
+                #EXTINF:6.0,
+                segments/segment8.ts
+                #EXTINF:6.0,
+                segments/segment9.ts
+                #EXT-X-ENDLIST
+                """)
+        defer { try? FileManager.default.removeItem(at: manifestURL.deletingLastPathComponent()) }
+
+        let loader = RecordingSegmentLoader(payload: Data([0x09]))
+        let decoder = AVFoundationAudioDecoder(
+            chunkDurationSeconds: 6,
+            segmentLoader: loader,
+            now: { "2026-04-30T12:00:00Z" }
+        )
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: manifestURL.path,
+                streamType: .hls,
+                maxChunks: 1,
+                minimumHLSMediaSequence: 713,
+                excludedHLSSegmentKeys: [
+                    HLSDecodedAudioSegmentKey(mediaSequence: 8, segmentIdentity: "[redacted-path]")
+                ]
+            ))
+
+        XCTAssertEqual(chunks.map { $0.hlsIdentity?.mediaSequence }, [9])
+        let requests = await loader.requests()
+        XCTAssertEqual(requests.map(\.uri), ["segments/segment9.ts"])
+    }
+
     func testHLSDecodedChunksIncludeSegmentByteMarkers() async throws {
         let manifestURL = temporaryManifestURL(
             contents: """

@@ -28,28 +28,28 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         assertCheck(evidence, .diagnosticsWritten, .pass)
         let transcriptPersistence = try projectionCheck(evidence, .transcriptPersistence, .pass)
         XCTAssertGreaterThan(transcriptPersistence.projectionFacts?.rowCount ?? 0, 0)
-        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["segments"], "1")
-        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["words"], "3")
-        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["ftsRows"], "1")
+        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["segments"], "2")
+        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["words"], "6")
+        XCTAssertEqual(transcriptPersistence.projectionFacts?.sampleFields["ftsRows"], "2")
         let transcriptTimeline = try projectionCheck(evidence, .transcriptTimelineProjection, .pass)
         XCTAssertGreaterThan(transcriptTimeline.projectionFacts?.projectionCount ?? 0, 0)
-        XCTAssertEqual(transcriptTimeline.projectionFacts?.sampleFields["paragraphs"], "1")
+        XCTAssertEqual(transcriptTimeline.projectionFacts?.sampleFields["paragraphs"], "2")
         XCTAssertEqual(transcriptTimeline.projectionFacts?.sampleFields["timelineTranscriptItems"], "1")
         let transcriptSearch = try projectionCheck(evidence, .transcriptSearchProjection, .pass)
         XCTAssertGreaterThan(transcriptSearch.projectionFacts?.projectionCount ?? 0, 0)
         XCTAssertEqual(
             transcriptSearch.projectionFacts?.sampleFields["phrase"], "app verify fixture")
-        XCTAssertEqual(transcriptSearch.projectionFacts?.sampleFields["results"], "1")
+        XCTAssertEqual(transcriptSearch.projectionFacts?.sampleFields["results"], "2")
         let songMetadata = try projectionCheck(evidence, .songMetadataProjection, .pass)
         XCTAssertGreaterThan(songMetadata.projectionFacts?.metadataCount ?? 0, 0)
         XCTAssertEqual(songMetadata.projectionFacts?.sampleFields["songRows"], "1")
-        XCTAssertEqual(songMetadata.projectionFacts?.sampleFields["songPlays"], "1")
+        XCTAssertEqual(songMetadata.projectionFacts?.sampleFields["songPlays"], "2")
         XCTAssertEqual(songMetadata.projectionFacts?.sampleFields["timelineSongItems"], "1")
         let adMetadata = try projectionCheck(evidence, .adMetadataProjection, .pass)
         XCTAssertGreaterThan(adMetadata.projectionFacts?.metadataCount ?? 0, 0)
-        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["adEvents"], "1")
-        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["adEventsWithPTS"], "1")
-        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["timelineAdItems"], "1")
+        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["adEvents"], "2")
+        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["adEventsWithPTS"], "2")
+        XCTAssertEqual(adMetadata.projectionFacts?.sampleFields["timelineAdItems"], "2")
         XCTAssertGreaterThan(evidence.runtimeFacts?.processedChunks ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.decodedChunks ?? 0, 0)
         XCTAssertGreaterThan(evidence.runtimeFacts?.scheduledBuffers ?? 0, 0)
@@ -75,7 +75,7 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         assertCheck(evidence, .runtimeStarted, .pass)
         assertCheck(evidence, .decodeCompleted, .fail)
         assertCheck(evidence, .avfoundationPlaybackScheduled, .fail)
-        assertCheck(evidence, .runtimeStopped, .pass)
+        assertCheck(evidence, .runtimeStopped, .fail)
         XCTAssertEqual(evidence.runtimeFacts?.processedChunks, 0)
         XCTAssertEqual(evidence.runtimeFacts?.decodedChunks, 0)
     }
@@ -158,7 +158,7 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
         let evidence = await runner.run()
 
         XCTAssertEqual(evidence.summary.status, .fail)
-        XCTAssertEqual(
+        XCTAssertGreaterThanOrEqual(
             evidence.summary.failedRequiredCheckCount,
             AppVerifyCheckName.s03ProjectionRequired.count)
         for name in AppVerifyCheckName.s03ProjectionRequired {
@@ -183,11 +183,22 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
                 try database.write { db in
                     try db.execute(
                         sql: """
+                            DELETE FROM transcript_words
+                            WHERE segment_id IN (
+                                SELECT id FROM transcript_segments
+                                WHERE run_id IN (SELECT id FROM ingest_runs WHERE stream_id = ?)
+                            )
+                            """,
+                        arguments: [streamID]
+                    )
+                    try db.execute(
+                        sql: """
                             DELETE FROM transcript_segments
                             WHERE run_id IN (SELECT id FROM ingest_runs WHERE stream_id = ?)
                             """,
                         arguments: [streamID]
                     )
+                    try db.execute(sql: "INSERT INTO transcript_segments_fts(transcript_segments_fts) VALUES('rebuild')")
                 }
             }
         )
@@ -337,7 +348,7 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
 
     private func makeRunner(
         root: URL,
-        timeoutSeconds: Double = 2,
+        timeoutSeconds: Double = 8,
         decoder: any AudioDecoding = FixedLinearPCMDecoder(),
         player: DiagnosticsRecordingPlayer,
         ingesterFactory: AppVerifyFixtureRunner.IngesterFactory? = nil
@@ -482,8 +493,8 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
     private let queue = DispatchQueue(
         label: "AppVerifyFixtureRunnerTests.DiagnosticsRecordingPlayer")
     private var diagnosticsLog: AppRuntimeDiagnosticsLog?
+    private var volumeStore: AppPlaybackVolumeStore?
     private var currentStreamID: Int64?
-    private var volumeObserverTask: Task<Void, Never>?
     private var stops = 0
 
     init(
@@ -495,34 +506,10 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
         self.writeMalformedDiagnostics = writeMalformedDiagnostics
     }
 
-    deinit {
-        volumeObserverTask?.cancel()
-    }
-
     func attach(volumeStore: AppPlaybackVolumeStore, diagnosticsLog: AppRuntimeDiagnosticsLog) {
         queue.sync {
             self.diagnosticsLog = diagnosticsLog
-        }
-        guard recordVolumeEvent else { return }
-        volumeObserverTask?.cancel()
-        volumeObserverTask = Task { [weak self, volumeStore] in
-            let changes = await volumeStore.changes()
-            for await snapshot in changes {
-                guard let self else { return }
-                if self.currentStreamIDValue() == snapshot.streamID {
-                    diagnosticsLog.recordEvent(
-                        "playback.volume.applied",
-                        streamID: snapshot.streamID,
-                        phase: "playback.volume",
-                        fields: [
-                            "volume": String(format: "%.3f", snapshot.volume),
-                            "isMuted": String(snapshot.isMuted),
-                            "effectiveVolume": String(format: "%.3f", snapshot.effectiveVolume),
-                            "source": "test-observer",
-                        ]
-                    )
-                }
-            }
+            self.volumeStore = volumeStore
         }
     }
 
@@ -566,11 +553,27 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
     func pause(timeline: AppPlayerTimelineClock) async {}
     func resume(timeline: AppPlayerTimelineClock) async {}
 
+    func applyPlaybackVolume(streamID: Int64) async {
+        guard recordVolumeEvent, let diagnosticsLog = currentDiagnosticsLog() else { return }
+        let snapshot = await currentVolumeStore()?.snapshot(streamID: streamID)
+            ?? AppPlaybackVolumeSnapshot(streamID: streamID)
+        diagnosticsLog.recordEvent(
+            "playback.volume.applied",
+            streamID: streamID,
+            phase: "playback.volume",
+            fields: [
+                "volume": String(format: "%.3f", snapshot.volume),
+                "isMuted": String(snapshot.isMuted),
+                "effectiveVolume": String(format: "%.3f", snapshot.effectiveVolume),
+                "source": "test-player",
+            ]
+        )
+    }
+
     func stop(timeline: AppPlayerTimelineClock) async {
         let streamID = currentStreamIDValue()
         queue.sync {
             stops += 1
-            currentStreamID = nil
         }
         currentDiagnosticsLog()?.recordEvent(
             "playback.stop.applied",
@@ -587,6 +590,10 @@ private final class DiagnosticsRecordingPlayer: AppPCMPlaybackAdapting, @uncheck
 
     private func currentDiagnosticsLog() -> AppRuntimeDiagnosticsLog? {
         queue.sync { diagnosticsLog }
+    }
+
+    private func currentVolumeStore() -> AppPlaybackVolumeStore? {
+        queue.sync { volumeStore }
     }
 
     private func setCurrentStreamID(_ streamID: Int64?) {

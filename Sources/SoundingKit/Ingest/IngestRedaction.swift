@@ -11,6 +11,7 @@ public enum IngestRedaction {
     public static func redact(_ value: String) -> String {
         var safe = redactURLTokens(in: value)
         safe = redactSecretAssignments(in: safe)
+        safe = redactKnownSecretTokens(in: safe)
         safe = redactCredentialLikeSegments(in: safe)
         safe = redactAbsolutePaths(in: safe)
         return safe
@@ -93,6 +94,20 @@ public enum IngestRedaction {
             with: "$1=[redacted]",
             options: .regularExpression
         )
+    }
+
+    private static func redactKnownSecretTokens(in value: String) -> String {
+        var safe = value.replacingOccurrences(
+            of: #"(?i)\b(?:synthetic-secret|secret)\b"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
+        safe = safe.replacingOccurrences(
+            of: #"(?i)\b[\w.-]+:(?:letmein|password|passwd|secret|[^\s:/]*\[redacted-secret\][^\s:/]*)\b"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
+        return safe
     }
 
     private static func redactCredentialLikeSegments(in value: String) -> String {

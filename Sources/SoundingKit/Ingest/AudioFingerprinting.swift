@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(ChromaSwift)
+import ChromaSwift
+#endif
 
 /// Context passed to audio fingerprinters for chunk-scoped song timeline extraction.
 public struct AudioFingerprintRequest: Equatable, Sendable {
@@ -57,6 +60,75 @@ public struct NoOpAudioFingerprinter: AudioFingerprinting {
         AudioFingerprintResult()
     }
 }
+
+#if canImport(ChromaSwift)
+/// Chromaprint fingerprinter that emits AcoustID-compatible `.test2` fingerprints.
+public struct ChromaSwiftAudioFingerprinter: AudioFingerprinting {
+    public static let algorithm = "chromaprint"
+    public static let algorithmVersion = "test2"
+
+    public init() {}
+
+    public func fingerprint(
+        _ chunk: DecodedAudioChunk,
+        request: AudioFingerprintRequest
+    ) async throws -> AudioFingerprintResult {
+        guard !chunk.audio.isEmpty, chunk.byteCount > 0,
+            chunk.audioFormat.payloadKind == .linearPCM
+        else {
+            return AudioFingerprintResult()
+        }
+
+        let url = try writeTemporaryAudio(chunk, provider: "chromaprint")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let fingerprint = try AudioFingerprint(from: url, algorithm: .test2, maxSampleDuration: nil)
+        guard !fingerprint.base64.isEmpty, !fingerprint.hash.isEmpty else {
+            return AudioFingerprintResult()
+        }
+
+        let hash = fingerprint.hash
+        let unknownSong = UnresolvedSongDraft(
+            songKey: "fingerprint:\(hash)",
+            displayName: "Unknown song (\(String(hash.prefix(8))))",
+            isUnknown: true
+        )
+        return AudioFingerprintResult(
+            fingerprints: [
+                AudioFingerprintDraft(
+                    algorithm: Self.algorithm,
+                    algorithmVersion: Self.algorithmVersion,
+                    fingerprint: fingerprint.base64,
+                    fingerprintHash: hash,
+                    startSeconds: chunk.startSeconds,
+                    endSeconds: chunk.endSeconds,
+                    confidence: nil
+                )
+            ],
+            songPlays: [
+                SongPlayDraft(
+                    song: unknownSong,
+                    startSeconds: chunk.startSeconds,
+                    endSeconds: chunk.endSeconds,
+                    confidence: nil,
+                    source: Self.algorithm
+                )
+            ]
+        )
+    }
+}
+#else
+public struct ChromaSwiftAudioFingerprinter: AudioFingerprinting {
+    public init() {}
+
+    public func fingerprint(
+        _ chunk: DecodedAudioChunk,
+        request: AudioFingerprintRequest
+    ) async throws -> AudioFingerprintResult {
+        AudioFingerprintResult()
+    }
+}
+#endif
 
 /// Deterministic local fingerprinter for tests and fixture-backed CLI proof runs.
 ///

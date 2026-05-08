@@ -69,7 +69,7 @@ final class SoundingAppPreferencesStorageTests: XCTestCase {
 
         XCTAssertTrue(configuration.hasBlockingIssues)
         XCTAssertTrue(configuration.issues.contains { $0.category == .model })
-        XCTAssertTrue(configuration.issues.contains { $0.category == .database })
+        XCTAssertFalse(configuration.issues.contains { $0.category == .database })
         XCTAssertFalse(String(describing: configuration.issues).contains(rawModel))
         XCTAssertFalse(String(describing: configuration.issues).contains(directory.path))
         XCTAssertFalse(String(describing: configuration.issues).contains("api_key=secret"))

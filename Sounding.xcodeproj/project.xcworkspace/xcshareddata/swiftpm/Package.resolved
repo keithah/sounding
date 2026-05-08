@@ -2,6 +2,15 @@
   "originHash" : "74560c635b09e9d26754c7dc0248480c4b182c767fe37e9caed916da00297e98",
   "pins" : [
     {
+      "identity" : "chromaswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/wallisch/ChromaSwift",
+      "state" : {
+        "revision" : "4570630752e5c9a07244df7621888363d287c1c4",
+        "version" : "1.2.0"
+      }
+    },
+    {
       "identity" : "fluidaudio",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/FluidInference/FluidAudio",

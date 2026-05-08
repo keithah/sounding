@@ -932,9 +932,17 @@ public struct StreamAppViewModel: Equatable, Sendable {
     }
 
     public mutating func applyRuntimeEvent(_ event: AppStreamRuntimeEvent) {
-        for index in streams.indices where streams[index].id == event.streamID {
-            streams[index].status = event.phase.appStatus
-            streams[index].runtimeStatusDetail = event.message
+        let isPlayerTimelineTelemetry =
+            event.result?.playerTimeline != nil
+            && event.result?.runID == nil
+            && event.result?.processedChunks == 0
+            && event.result?.diagnosticCount == 0
+
+        if !isPlayerTimelineTelemetry {
+            for index in streams.indices where streams[index].id == event.streamID {
+                streams[index].status = event.phase.appStatus
+                streams[index].runtimeStatusDetail = event.message
+            }
         }
         runtimeEventMessages[event.streamID] = event.message
         if let playerTimeline = event.result?.playerTimeline {

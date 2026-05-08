@@ -5,6 +5,32 @@ import XCTest
 @testable import SoundingKit
 
 final class AppStreamRuntimeTests: XCTestCase {
+    func testDefaultRuntimeFingerprintingUsesChromaprintAndConfiguredAcoustIDLookup() throws {
+        let temporary = try TemporarySoundingDatabase()
+
+        XCTAssertTrue(
+            SoundingAppRuntimeFactory.defaultAudioFingerprinter(environment: [:])
+                is ChromaSwiftAudioFingerprinter
+        )
+        XCTAssertTrue(
+            SoundingAppRuntimeFactory.defaultAudioFingerprinter(
+                environment: ["SOUNDING_DETERMINISTIC_FINGERPRINT": "1"]
+            ) is DeterministicAudioFingerprinter
+        )
+        XCTAssertTrue(
+            SoundingAppRuntimeFactory.defaultFingerprintEnricher(
+                database: temporary.database,
+                environment: [:]
+            ) is NoOpAudioFingerprintEnricher
+        )
+        XCTAssertTrue(
+            SoundingAppRuntimeFactory.defaultFingerprintEnricher(
+                database: temporary.database,
+                environment: ["SOUNDING_ACOUSTID_API_KEY": "fixture-key"]
+            ) is AcoustIDAudioFingerprintEnricher
+        )
+    }
+
     func testStartsManagedStreamThroughInProcessRunnerAndPublishesLifecycle() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -118,6 +144,46 @@ final class AppStreamRuntimeTests: XCTestCase {
         XCTAssertEqual(playbackActions, ["stop", "pause", "resume", "stop"])
 
         await gate.release()
+    }
+
+    func testSupersededConcurrentStartDoesNotRunDuplicateIngester() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Fixture HLS",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8"
+        )
+        let stopGate = RuntimeStopGate()
+        let ingesterGate = RuntimeGate()
+        let ingester = RecordingBlockingAppRuntimeIngester(gate: ingesterGate)
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            playbackTimeline: AppPlayerTimelineClock(),
+            playbackController: GatedStopRuntimePlaybackAdapter(gate: stopGate)
+        )
+
+        let firstStart = Task { try await runtime.start(streamID: stream.id) }
+        await stopGate.waitForStopCallCount(1)
+        let secondStart = Task { try await runtime.start(streamID: stream.id) }
+        await stopGate.waitForStopCallCount(2)
+        await stopGate.release()
+
+        try await firstStart.value
+        try await secondStart.value
+
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let callCount = await ingester.callCount()
+        XCTAssertEqual(callCount, 1)
+
+        await runtime.stop(streamID: stream.id)
+        await ingesterGate.release()
     }
 
     func testReconnectsAfterRedactedRuntimeFailure() async throws {
@@ -1078,11 +1144,28 @@ final class AppStreamRuntimeTests: XCTestCase {
             try await runner.run(request)
         }
         await decoder.waitForCalls(2)
+        for _ in 0..<50 {
+            let completedChunks = try temporary.database.read { db in
+                try Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT COUNT(ingest_chunks.id)
+                        FROM ingest_runs
+                        JOIN ingest_chunks ON ingest_chunks.run_id = ingest_runs.id
+                        WHERE ingest_runs.stream_id = ?
+                          AND ingest_runs.status = 'completed'
+                        """,
+                    arguments: [stream.id]
+                ) ?? 0
+            }
+            if completedChunks >= 2 { break }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
         task.cancel()
 
         do {
-            _ = try await task.value
-            XCTFail("Expected continuous live playback runner to run until cancelled")
+            let result = try await task.value
+            XCTAssertGreaterThanOrEqual(result.processedChunks, 2)
         } catch is CancellationError {
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -1413,6 +1496,49 @@ private actor RuntimeGate {
     }
 }
 
+private actor RuntimeStopGate {
+    private var stopCallCount = 0
+    private var stopWaiters:
+        [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+
+    func recordStopAndWait() async {
+        stopCallCount += 1
+        resumeReadyStopWaiters()
+        if isReleased { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitForStopCallCount(_ count: Int) async {
+        if stopCallCount >= count { return }
+        await withCheckedContinuation { continuation in
+            stopWaiters.append((count, continuation))
+        }
+    }
+
+    func release() {
+        isReleased = true
+        let current = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in current { waiter.resume() }
+    }
+
+    private func resumeReadyStopWaiters() {
+        var remaining: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+        for waiter in stopWaiters {
+            if stopCallCount >= waiter.count {
+                waiter.continuation.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        stopWaiters = remaining
+    }
+}
+
 private struct BlockingAppRuntimeIngester: AppStreamRuntimeIngesting {
     let gate: RuntimeGate
 
@@ -1420,6 +1546,44 @@ private struct BlockingAppRuntimeIngester: AppStreamRuntimeIngesting {
         await gate.wait()
         try Task.checkCancellation()
         return AppStreamRuntimeResult(streamID: request.streamID)
+    }
+}
+
+private actor RecordingBlockingAppRuntimeIngester: AppStreamRuntimeIngesting {
+    private let gate: RuntimeGate
+    private var requests: [AppStreamRuntimeRequest] = []
+
+    init(gate: RuntimeGate) {
+        self.gate = gate
+    }
+
+    func run(_ request: AppStreamRuntimeRequest) async throws -> AppStreamRuntimeResult {
+        requests.append(request)
+        await gate.wait()
+        try Task.checkCancellation()
+        return AppStreamRuntimeResult(streamID: request.streamID)
+    }
+
+    func callCount() -> Int {
+        requests.count
+    }
+}
+
+private struct GatedStopRuntimePlaybackAdapter: AppPCMPlaybackAdapting {
+    let gate: RuntimeStopGate
+
+    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock) async throws {}
+
+    func play(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws {}
+
+    func playReplacingScheduledBuffers(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws {}
+
+    func pause(timeline: AppPlayerTimelineClock) async {}
+
+    func resume(timeline: AppPlayerTimelineClock) async {}
+
+    func stop(timeline: AppPlayerTimelineClock) async {
+        await gate.recordStopAndWait()
     }
 }
 
@@ -1643,11 +1807,17 @@ private struct RuntimeFailure: Error, CustomStringConvertible {
 private struct FixtureDecoder: AudioDecoding {
     func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
         XCTAssertNil(request.durationSeconds)
-        XCTAssertNil(request.maxChunks)
+        XCTAssertEqual(request.maxChunks, 1)
         return [
             DecodedAudioChunk(
                 sequence: 0,
                 segmentURI: "https://user:pass@example.test/pipeline-0.ts?token=secret",
+                hlsIdentity: HLSDecodedAudioChunkIdentity(
+                    mediaSequence: 0,
+                    segmentIdentity: IngestRedaction.sourceDescription(
+                        "https://user:pass@example.test/pipeline-0.ts?token=secret"),
+                    manifestPosition: 0
+                ),
                 audio: Data([0x01, 0x02, 0x03]),
                 startSeconds: 0,
                 endSeconds: 1,
@@ -1664,14 +1834,20 @@ private actor PollingFixtureDecoder: AudioDecoding {
 
     func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
         XCTAssertNil(request.durationSeconds)
-        XCTAssertNil(request.maxChunks)
+        XCTAssertEqual(request.maxChunks, 1)
         calls += 1
         releaseSatisfiedWaiters()
         let sequence = calls - 1
+        let segmentURI = "https://example.test/continuous-\(sequence).ts"
         return [
             DecodedAudioChunk(
                 sequence: 0,
-                segmentURI: "https://example.test/continuous-\(sequence).ts",
+                segmentURI: segmentURI,
+                hlsIdentity: HLSDecodedAudioChunkIdentity(
+                    mediaSequence: sequence,
+                    segmentIdentity: IngestRedaction.sourceDescription(segmentURI),
+                    manifestPosition: 0
+                ),
                 audio: Data([0x01, 0x00, 0x02, 0x00]),
                 audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16),
                 startSeconds: Double(sequence),

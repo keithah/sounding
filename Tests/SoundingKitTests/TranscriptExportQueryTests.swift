@@ -21,8 +21,7 @@ final class TranscriptExportQueryTests: XCTestCase {
 
         let first = try XCTUnwrap(results.first)
         XCTAssertEqual(first.identity.streamType, "hls")
-        XCTAssertEqual(
-            first.identity.streamSource, "https://example.test/main.m3u8?token=fixture-secret")
+        XCTAssertEqual(first.identity.streamSource, "https://example.test/main.m3u8")
         XCTAssertEqual(first.identity.chunkID, fixture.mainChunk0ID)
         XCTAssertEqual(first.identity.speakerLabel, "host")
         XCTAssertEqual(first.startSeconds, 0)
@@ -113,7 +112,7 @@ final class TranscriptExportQueryTests: XCTestCase {
         XCTAssertTrue(text.contains("\"createdAt\":\"2026-05-01T15:00:03Z\""), text)
         XCTAssertTrue(
             text.contains(
-                "\"streamSource\":\"https:\\/\\/example.test\\/main.m3u8?token=fixture-secret\""),
+                "\"streamSource\":\"https:\\/\\/example.test\\/main.m3u8\""),
             text)
         XCTAssertTrue(text.contains("\"words\":[{"), text)
 

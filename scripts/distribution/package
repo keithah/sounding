@@ -58,6 +58,7 @@ Options:
   --help                              Show this help text.
 
 Never pass Apple passwords, API keys, Apple IDs, raw certificate names, or generated artifact paths in tracked docs or examples.
+Set ACOUSTID_CLIENT_KEY in the local environment or CI secrets to embed the public AcoustID application key.
 USAGE
 }
 
@@ -326,17 +327,23 @@ build_app() {
     fi
 
     local derived_data="$WORKSPACE/DerivedData"
+    local xcodebuild_args=(
+        -project "$REPO_ROOT/Sounding.xcodeproj"
+        -scheme Sounding
+        -configuration Release
+        -destination "platform=macOS,arch=$ARCH"
+        -derivedDataPath "$derived_data"
+        CODE_SIGNING_ALLOWED=NO
+    )
+    if [[ -n "${ACOUSTID_CLIENT_KEY:-}" ]]; then
+        xcodebuild_args+=("ACOUSTID_CLIENT_KEY=$ACOUSTID_CLIENT_KEY")
+    fi
+    xcodebuild_args+=(build)
     set +e
     run_bounded_to_log 900 "$build_log" \
         /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" \
         /usr/bin/xcodebuild \
-        -project "$REPO_ROOT/Sounding.xcodeproj" \
-        -scheme Sounding \
-        -configuration Release \
-        -destination "platform=macOS,arch=$ARCH" \
-        -derivedDataPath "$derived_data" \
-        CODE_SIGNING_ALLOWED=NO \
-        build
+        "${xcodebuild_args[@]}"
     local status=$?
     set -e
     if [[ "$status" -eq 124 ]]; then

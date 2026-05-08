@@ -31,12 +31,13 @@ final class StreamAppViewModelTimelineTests: XCTestCase {
         let selected = try XCTUnwrap(viewModel.selectedStream)
         XCTAssertEqual(selected.item.id, fixture.mainItem.id)
         XCTAssertEqual(selected.recentTranscriptParagraphs.map(\.text), ["Main opening", "Main closing"])
-        XCTAssertEqual(selected.currentMetadata?.title, "Fixture Artist — Main Song")
+        XCTAssertEqual(selected.currentMetadata?.title, "Main Song")
+        XCTAssertEqual(selected.currentMetadata?.artist, "Fixture Artist")
         XCTAssertEqual(selected.speakerDisplays.map(\.rawLabel), ["host"])
         XCTAssertTrue(selected.timelineItems.allSatisfy { $0.id != "transcript:\(fixture.otherSegmentID)" })
         XCTAssertEqual(selected.timelineDiagnostics?.refreshedAt, "2026-05-01T18:00:00Z")
         XCTAssertEqual(selected.timelineFreshnessMessage, "Timeline refreshed 2026-05-01T18:00:00Z.")
-        XCTAssertEqual(selected.timelineLagMessage, "Transcript lag 4s.")
+        XCTAssertEqual(selected.timelineLagMessage, "Transcript lag 8s.")
         XCTAssertNil(selected.timelineRefreshErrorMessage)
     }
 
@@ -130,7 +131,10 @@ final class StreamAppViewModelTimelineTests: XCTestCase {
         XCTAssertEqual(selected.recentMetadata, [])
         XCTAssertEqual(selected.timelineItems, [])
         XCTAssertEqual(selected.timelineLagMessage, "Transcript lag 9s.")
-        XCTAssertEqual(selected.bufferedSeekUnavailableMessage, "Requested https://[redacted]/live at 40s is unavailable.")
+        XCTAssertEqual(
+            selected.bufferedSeekUnavailableMessage,
+            "Requested [redacted-path] at 40s is unavailable."
+        )
         XCTAssertFalse(selected.hasSeekableTimelineItems)
         XCTAssertFalse(String(describing: selected).contains("empty-secret"))
     }

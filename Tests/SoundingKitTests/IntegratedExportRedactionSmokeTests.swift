@@ -9,7 +9,7 @@ final class IntegratedExportRedactionSmokeTests: XCTestCase {
         defer { removeDatabaseFiles(dbURL) }
 
         let streamName = "Integrated Managed"
-        let secretSource = "https://user:pass@example.test/private/integrated.m3u8?token=fixture-secret#frag"
+        let secretSource = "https://user:pass@example.test/integrated.m3u8?token=fixture-secret#frag"
         let add = try runSounding(arguments: [
             "streams", "add",
             "--db", dbURL.path,
@@ -37,7 +37,7 @@ final class IntegratedExportRedactionSmokeTests: XCTestCase {
         XCTAssertEqual(streamsPayload.streams.first?.status, "active", activeStreams.diagnosticSummary)
         XCTAssertEqual(
             streamsPayload.streams.first?.source,
-            "https://example.test/private/integrated.m3u8",
+            "https://example.test/integrated.m3u8",
             activeStreams.diagnosticSummary)
         assertRedacted(String(data: activeStreams.stdout, encoding: .utf8) ?? "", context: .success(dbURL: dbURL))
 
@@ -101,7 +101,7 @@ final class IntegratedExportRedactionSmokeTests: XCTestCase {
         XCTAssertEqual(playsReport.stderr.count, 0, playsReport.diagnosticSummary)
         let playsPayload = try decodeJSON(
             PlaysPayload.self, from: playsReport.stdout, context: playsReport.diagnosticSummary)
-        XCTAssertEqual(playsPayload.results.count, 2, playsReport.diagnosticSummary)
+        XCTAssertEqual(playsPayload.results.count, 3, playsReport.diagnosticSummary)
         XCTAssertEqual(
             Set(playsPayload.results.map { $0.song.displayLabel }),
             Set(["Integrated Artist — Repeatable", "Integrated Artist — Fresh"]),
@@ -177,7 +177,7 @@ final class IntegratedExportRedactionSmokeTests: XCTestCase {
         XCTAssertEqual(removedReport.exitCode, 0, removedReport.diagnosticSummary)
         let removedReportPayload = try decodeJSON(
             PlaysPayload.self, from: removedReport.stdout, context: removedReport.diagnosticSummary)
-        XCTAssertEqual(removedReportPayload.results.count, 2, removedReport.diagnosticSummary)
+        XCTAssertEqual(removedReportPayload.results.count, 3, removedReport.diagnosticSummary)
         assertRedacted(String(data: removedReport.stdout, encoding: .utf8) ?? "", context: .success(dbURL: dbURL))
     }
 

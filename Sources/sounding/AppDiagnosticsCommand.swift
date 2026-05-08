@@ -13,7 +13,7 @@ struct AppDiagnosticsCommand: ParsableCommand {
         name: .long, help: "Directory containing runtime-events.jsonl and runtime-errors.jsonl.")
     var logDirectory: String?
 
-    @Option(name: .long, help: "Number of recent entries to print from each log.")
+    @Option(name: .long, parsing: .unconditional, help: "Number of recent entries to print from each log.")
     var tail: Int = 40
 
     @Flag(name: .long, help: "Print raw JSONL entries instead of a compact summary.")
@@ -459,6 +459,11 @@ private enum AppDiagnosticsRedaction {
             with: "[redacted-secret]",
             options: .regularExpression
         )
+        .replacingOccurrences(
+            of: #"\[redacted-\[redacted-secret\]\]"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
     }
 
     static func bounded(_ value: String) -> String {
@@ -497,7 +502,7 @@ private struct RuntimeLogEntry: Codable {
 
     private static func sanitizeFields(_ fields: [String: String]) -> [String: String] {
         fields.sorted { $0.key < $1.key }.prefix(32).reduce(into: [:]) { partial, pair in
-            partial[sanitizeFieldKey(pair.key)] = sanitize(pair.value)
+            partial[sanitizeFieldKey(pair.key)] = sanitizeFieldValue(pair.value, key: pair.key)
         }
     }
 
@@ -511,6 +516,21 @@ private struct RuntimeLogEntry: Codable {
             return "[redacted-secret-key]"
         }
         return redacted
+    }
+
+    private static func sanitizeFieldValue(_ value: String, key: String) -> String {
+        if isSecretFieldKey(key) {
+            return "[redacted-secret]"
+        }
+        return sanitize(value)
+    }
+
+    private static func isSecretFieldKey(_ key: String) -> Bool {
+        key.range(
+            of:
+                #"(?i)\b(token|access[_-]?token|api[_-]?key|secret|password|passwd|pwd|credential|authorization)\b"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func sanitizeSource(_ value: String) -> String {

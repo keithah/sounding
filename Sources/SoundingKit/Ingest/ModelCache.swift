@@ -39,8 +39,8 @@ public enum ModelCacheError: Error, Equatable, CustomStringConvertible, IngestDi
 
     public var description: String {
         switch self {
-        case let .invalidModelName(model):
-            return "Invalid model name: \(Self.redacted(model))."
+        case .invalidModelName:
+            return "Invalid model name: [redacted-model]."
         case let .setupFailed(provider, model, reason):
             return "Model setup failed for \(Self.redacted(provider))/\(Self.redacted(model)): \(Self.redacted(reason))."
         }

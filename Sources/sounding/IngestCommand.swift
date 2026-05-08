@@ -81,7 +81,8 @@ struct IngestCommand: AsyncParsableCommand {
                     transcriber: providers.transcriber,
                     diarizer: providers.diarizer,
                     fingerprinter: fingerprinter,
-                    fingerprintEnricher: fingerprintEnricher
+                    fingerprintEnricher: fingerprintEnricher,
+                    deduplicatesHLSSegments: false
                 ).run(
                     streamID: managedStream.id,
                     source: managedStream.source,
@@ -110,7 +111,8 @@ struct IngestCommand: AsyncParsableCommand {
                     transcriber: providers.transcriber,
                     diarizer: providers.diarizer,
                     fingerprinter: fingerprinter,
-                    fingerprintEnricher: fingerprintEnricher
+                    fingerprintEnricher: fingerprintEnricher,
+                    deduplicatesHLSSegments: false
                 ).run(
                     source: normalizedSources[0],
                     streamType: streamType.value,
@@ -138,7 +140,8 @@ struct IngestCommand: AsyncParsableCommand {
                 transcriber: providers.transcriber,
                 diarizer: providers.diarizer,
                 fingerprinter: fingerprinter,
-                fingerprintEnricher: fingerprintEnricher
+                fingerprintEnricher: fingerprintEnricher,
+                deduplicatesHLSSegments: false
             )
             let outcomes = try await supervisor.run(
                 normalizedSources.map { source in
@@ -281,7 +284,16 @@ struct IngestCommand: AsyncParsableCommand {
         {
             return DeterministicAudioFingerprinter()
         }
-        return NoOpAudioFingerprinter()
+
+        let apiKey = environment["SOUNDING_ACOUSTID_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let realMode = environment["SOUNDING_ACOUSTID_MODE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard apiKey?.isEmpty == false, realMode == "real" else {
+            return NoOpAudioFingerprinter()
+        }
+        return ChromaSwiftAudioFingerprinter()
     }
 
     private func makeFingerprintEnricher(database: SoundingDatabase)
@@ -345,7 +357,7 @@ struct IngestCommand: AsyncParsableCommand {
             return NoOpAcoustIDLookup(reason: "acoustid live lookup not enabled")
         }
 
-        return NoOpAcoustIDLookup(reason: "acoustid live lookup client unavailable")
+        return AcoustIDHTTPClientLookup(clientKey: apiKey ?? "")
     }
 
     private func summaryLine(for outcome: MultiStreamIngestOutcome, index: Int) -> String {

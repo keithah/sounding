@@ -44,7 +44,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "6.29.3"),
         .package(name: "argmax-oss-swift", url: "https://github.com/argmaxinc/WhisperKit", from: "0.18.0"),
-        .package(url: "https://github.com/FluidInference/FluidAudio", from: "0.14.3")
+        .package(url: "https://github.com/FluidInference/FluidAudio", from: "0.14.3"),
+        .package(url: "https://github.com/wallisch/ChromaSwift", from: "1.2.0")
     ],
     targets: [
         .target(
@@ -52,7 +53,8 @@ let package = Package(
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "WhisperKit", package: "argmax-oss-swift", condition: .when(platforms: [.macOS])),
-                .product(name: "FluidAudio", package: "FluidAudio", condition: .when(platforms: [.macOS]))
+                .product(name: "FluidAudio", package: "FluidAudio", condition: .when(platforms: [.macOS])),
+                .product(name: "ChromaSwift", package: "ChromaSwift", condition: .when(platforms: [.macOS]))
             ],
             linkerSettings: sqliteLinkerSettings
         ),

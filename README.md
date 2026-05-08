@@ -1,36 +1,51 @@
 # Sounding
 
-Sounding is the Swift baseline for a native macOS stream-monitoring app. At the end of M001, the shipped source baseline is a `SoundingKit` package plus a thin `sounding` CLI that can build locally, monitor fixture-backed HLS/ICY/MPEGTS/UDP ad-marker paths, persist the ingest baseline schema through `ad_events`, and run local-only live stream verification when an operator supplies authorized stream sources.
+Sounding is a native macOS app and Swift CLI for monitoring live audio streams. The app can save HLS or Icecast/ICY streams, ingest bounded live chunks, play decoded PCM through a shared runtime player, project transcript and timed metadata into a timeline, search persisted transcripts, and package a Developer ID distribution with Sparkle update support.
 
-After reading this README, a future engineer or agent should be able to:
+The repository is split into:
 
-1. Build the package.
-2. Run fixture monitor smoke paths for the current marker pipeline.
-3. Run `live-verify` only with local authorized stream configuration.
-4. Understand which proof is complete for M001 and which product work is intentionally deferred to M002-M005.
+- `App/`: SwiftUI app, preferences, Keychain-backed app secrets, Sparkle update controller, and global player controls.
+- `Sources/SoundingKit/`: reusable runtime, ingest, monitor, persistence, timeline, search, live verification, and distribution-adjacent support code.
+- `Sources/sounding/`: CLI commands for monitor, ingest, stream status, app verification, search/count/export, soak proof, and diagnostics.
+- `Tests/SoundingKitTests/`: XCTest coverage for runtime, HLS/ID3/SCTE-35/ICY parsing, persistence, app timeline/search, AcoustID enrichment seams, CLI smoke tests, and distribution scripts.
+- `Docs/` and `scripts/distribution/`: shipping, notarization, appcast, soak, and live-proof runbooks.
 
-For the broader product direction, read [`sounding.md`](sounding.md). For the final M001 source inventory and caveats, read [`BASELINE-INVENTORY.md`](BASELINE-INVENTORY.md).
+For product context, read [`sounding.md`](sounding.md). For the current technical review and roadmap, read [`Docs/project-review-2026-05-07.md`](Docs/project-review-2026-05-07.md).
 
-## Current M001 baseline
+## Build And Test
 
-M001 is a source and CLI baseline, not a packaged app release. The important boundary is:
-
-- `SoundingKit` owns the reusable stream monitoring, marker decoding/classification, ingest pipeline, persistence, live verification, and redaction behavior.
-- `sounding` is the CLI shell over that package. It exposes `monitor`, `live-verify`, and the M002 `ingest` tracer path.
-- SQLite persistence is established for the ingest baseline tables: `streams`, `ingest_runs`, `ingest_chunks`, `ad_events`, `ingest_diagnostics`, transcript segments, timestamped transcript words, speaker turns, and transcript FTS.
-- Fixture-backed monitor paths cover HLS ID3, ICY metadata, MPEG-TS SCTE-35, UDP replay, marker classification, redacted diagnostics, and command smoke behavior.
-
-M001 deliberately stops short of transcripts, diarization, search, song fingerprinting, the native app UI, distribution, notarization, and long-running soak guarantees.
-
-## Build
-
-From the repository root, build the package with:
+From the repository root:
 
 ```sh
-swift build --package-path sounding
+swift build --product sounding
+swift test --filter SoundingKitTests.AppPlayerTimelineTests
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  xcodebuild -project Sounding.xcodeproj -scheme Sounding -configuration Debug build
 ```
 
-That is the primary M001 executable proof in this local environment. Generated SwiftPM output belongs under ignored package build directories and should not be committed.
+In this local environment, filtered `swift test` invocations may build without executing XCTest. When you need execution proof, run the built test bundle directly:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  xcrun xctest -XCTest SoundingKitTests.StreamAppTimelineStoreTests \
+  .build/debug/SoundingPackageTests.xctest
+```
+
+Current focused proof is tracked in [`Docs/project-review-2026-05-07.md`](Docs/project-review-2026-05-07.md). The known local gap is `HLSID3MarkerTests/testSegmentID3ExtractorDemuxesMPEGTSTimedID3Payloads`, which exits with code `-1` under direct `xcrun xctest`; do not claim the full timed-ID3 demux suite is green until that is root-caused.
+
+Generated SwiftPM, Xcode, package, DMG, appcast, live evidence, and local database outputs belong in ignored directories and should not be committed.
+
+## AcoustID
+
+The app preferences can store an AcoustID application-key override in Keychain and test that key with the lookup API. Distribution builds can also embed the operator-provided key through `SoundingBundledAcoustIDClientKey`; the app seeds `SOUNDING_ACOUSTID_API_KEY` from Keychain first and then the bundled value. CLI real lookup is enabled with:
+
+```sh
+SOUNDING_ACOUSTID_MODE=real \
+SOUNDING_ACOUSTID_API_KEY="$ACOUSTID_APPLICATION_KEY" \
+swift run sounding ingest "$SOUNDING_LIVE_URL" --db /tmp/sounding.sqlite --duration 30
+```
+
+Default app and CLI ingest use ChromaSwift/Chromaprint `.test2` fingerprints when decoded linear PCM is available, then apply the existing AcoustID lookup/cache path if an application key is configured. Timed ID3 metadata does not depend on AcoustID.
 
 ## Fixture monitor smoke paths
 
@@ -300,14 +315,9 @@ If authorized stream sources are not available on the machine, do not invent liv
 
 ## Proof status and caveats
 
-M001 evidence is source/build/smoke oriented:
+Current local proof is source/build/direct-XCTest oriented. `swift build --product sounding`, focused direct `xcrun xctest` suites for player timeline, timeline store, AVFoundation decode, AcoustID lookup/enrichment, preferences, and integrated UAT, plus the Xcode Debug app build and distribution readiness check have been run for the May 7 review. See [`Docs/project-review-2026-05-07.md`](Docs/project-review-2026-05-07.md) for exact commands and counts.
 
-- `swift build --package-path sounding` is expected to pass and proves the package and CLI compile.
-- The authored XCTest files describe the intended fixture, command-smoke, migration, and live verification behaviors.
-- The baseline migration and tests normalize the durable marker timeline to `ad_events`.
-- Redaction behavior is represented in command smoke and live verification code paths so future evidence should not echo private stream sources or output paths.
-
-The known caveat for this local environment is full XCTest execution: `swift test --package-path sounding` has been blocked by `no such module XCTest`. Treat that as an environment proof gap, not as a product feature deferral. Re-run it in an environment with XCTest available before claiming the full test suite is green.
+Full-suite status is not claimed from this machine. Filtered `swift test` can build without executing XCTest here, and the timed-ID3 MPEG-TS demux test currently exits with code `-1` under direct `xcrun xctest`.
 
 ## Deferred roadmap
 

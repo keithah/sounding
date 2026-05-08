@@ -51,7 +51,9 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         var chunks: [DecodedAudioChunk] = []
         let playableSegments = playableHLSSegments(
             segments,
-            minimumMediaSequence: request.minimumHLSMediaSequence
+            minimumMediaSequence: request.minimumHLSMediaSequence,
+            excludedSegmentKeys: request.excludedHLSSegmentKeys,
+            manifestSource: resolvedManifest.source
         )
         let limitedSegments = Array(playableSegments.prefix(max(0, request.maxChunks ?? playableSegments.count)))
         var timelineCursor = max(0, request.hlsTimelineStartSeconds ?? 0)
@@ -107,7 +109,9 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
 
     private func playableHLSSegments(
         _ segments: [HLSManifestMediaSegment],
-        minimumMediaSequence: Int?
+        minimumMediaSequence: Int?,
+        excludedSegmentKeys: Set<HLSDecodedAudioSegmentKey>,
+        manifestSource: String
     ) -> [HLSManifestMediaSegment] {
         guard let minimumMediaSequence else { return segments }
         let segmentsAtOrAboveMinimum = segments.filter { segment in
@@ -120,7 +124,14 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         let mediaSequences = segments.compactMap { Int($0.mediaSequence) }
         guard let latestPlaylistSequence = mediaSequences.max() else { return segments }
         if latestPlaylistSequence < minimumMediaSequence {
-            return segments
+            guard !excludedSegmentKeys.isEmpty else { return segments }
+            return segments.filter { segment in
+                let key = HLSDecodedAudioSegmentKey(
+                    mediaSequence: Int(segment.mediaSequence) ?? 0,
+                    segmentIdentity: resolvedSegmentDescription(segment.uri, relativeTo: manifestSource)
+                )
+                return !excludedSegmentKeys.contains(key)
+            }
         }
         return []
     }

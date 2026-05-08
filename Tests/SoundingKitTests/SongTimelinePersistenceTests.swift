@@ -102,6 +102,41 @@ final class SongTimelinePersistenceTests: XCTestCase {
         XCTAssertEqual(plays[0]["updated_at"] as String, "2026-05-01T10:00:13Z")
     }
 
+    func testAdjacentSameSongChunksWithTimelineGapRemainSeparatePlays() throws {
+        let fixture = try makeFixture()
+
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.firstChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 0, endSeconds: 10, confidence: 0.90)],
+                createdAt: "2026-05-01T10:00:03Z"
+            )
+        )
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.secondChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 22, endSeconds: 30, confidence: 0.91)],
+                createdAt: "2026-05-01T10:00:23Z"
+            )
+        )
+
+        let plays = try fixture.temporary.database.read { db in
+            try Row.fetchAll(db, sql: "SELECT first_chunk_id, last_chunk_id, start_seconds, end_seconds FROM song_plays ORDER BY start_seconds")
+        }
+
+        XCTAssertEqual(plays.count, 2)
+        XCTAssertEqual(plays[0]["first_chunk_id"] as Int64, fixture.firstChunkID)
+        XCTAssertEqual(plays[0]["last_chunk_id"] as Int64, fixture.firstChunkID)
+        XCTAssertEqual(plays[0]["start_seconds"] as Double, 0)
+        XCTAssertEqual(plays[0]["end_seconds"] as Double, 10)
+        XCTAssertEqual(plays[1]["first_chunk_id"] as Int64, fixture.secondChunkID)
+        XCTAssertEqual(plays[1]["last_chunk_id"] as Int64, fixture.secondChunkID)
+        XCTAssertEqual(plays[1]["start_seconds"] as Double, 22)
+        XCTAssertEqual(plays[1]["end_seconds"] as Double, 30)
+    }
+
     func testUnidentifiedSongUsesStableUnknownSongRow() throws {
         let fixture = try makeFixture()
 

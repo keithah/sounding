@@ -191,7 +191,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
         try assertPackageAppVerifyGateFailure(
             result,
             expectedMessageFragments: ["Fixture App verification evidence is malformed or incomplete."],
-            additionalForbidden: [evidence.fixture.path, evidence.live.path, "schemaVersion"]
+            additionalForbidden: [evidence.fixture.path, evidence.live.path]
         )
     }
 

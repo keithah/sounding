@@ -113,8 +113,7 @@ final class MultiStreamIngestSupervisorTests: XCTestCase {
             "https://user:pass@example.test/failing.m3u8?token=secret": FailingDecoder(
                 error: FakeIngestError("decoder failed at /tmp/source-token=secret.wav for https://user:pass@example.test/failing.m3u8?token=secret")
             ),
-            "https://user:pass@example.test/healthy.m3u8?token=secret": BarrierDecoder(
-                gate: DecodeBarrier(expectedSources: ["https://user:pass@example.test/healthy.m3u8?token=secret"]),
+            "https://user:pass@example.test/healthy.m3u8?token=secret": StaticDecoder(
                 chunks: [Self.chunk(sequence: 0, streamName: "healthy")]
             )
         ])
@@ -254,6 +253,14 @@ private struct FailingDecoder: AudioDecoding {
 
     func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
         throw error
+    }
+}
+
+private struct StaticDecoder: AudioDecoding {
+    let chunks: [DecodedAudioChunk]
+
+    func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+        chunks
     }
 }
 

@@ -17,6 +17,19 @@ public struct AppVerifyLiveExpectations: Codable, Equatable, Sendable {
         self.transcript = transcript
         self.metadata = metadata
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            transcript: try container.decodeIfPresent(AppVerifyLiveExpectation.self, forKey: .transcript) ?? .warn,
+            metadata: try container.decodeIfPresent(AppVerifyLiveExpectation.self, forKey: .metadata) ?? .warn
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case transcript
+        case metadata
+    }
 }
 
 public struct AppVerifyLiveStreamSpec: Codable, Equatable, Sendable {

@@ -2,7 +2,12 @@ import Foundation
 
 public protocol AppSecretStore: Sendable {
     func acoustIDKeyStatus() throws -> SoundingAppAcoustIDKeyStatus
+    func acoustIDClientKey() throws -> String?
     func saveAcoustIDKey(_ key: String?) throws
+}
+
+public extension AppSecretStore {
+    func acoustIDClientKey() throws -> String? { nil }
 }
 
 public enum SoundingAppAcoustIDKeyStatus: Equatable, Sendable {
@@ -298,7 +303,16 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
 
         let parent = url.deletingLastPathComponent()
         var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(atPath: parent.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+        if !fileManager.fileExists(atPath: parent.path, isDirectory: &isDirectory) {
+            do {
+                try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+                isDirectory = true
+            } catch {
+                issues.append(databaseIssue(detail: "Database folder is unavailable: \(parent.path)."))
+                return
+            }
+        }
+        guard isDirectory.boolValue else {
             issues.append(databaseIssue(detail: "Database folder is unavailable: \(parent.path)."))
             return
         }
@@ -340,8 +354,8 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
                     severity: .warning,
                     phase: .preferences,
                     category: .acoustID,
-                    message: "AcoustID enrichment is disabled until an API key is added.",
-                    detail: "Stream ingest can continue; only AcoustID song metadata lookup is skipped.",
+                    message: "AcoustID application key override is not configured.",
+                    detail: "Stream ingest and timed metadata can continue; fingerprint lookup requires a configured key and runtime lookup client.",
                     action: SoundingAppConfigurationAction(
                         kind: .addAcoustIDKey,
                         label: "Add AcoustID key"

@@ -34,6 +34,7 @@ public struct StreamIngestPipeline {
     private let diarizer: any SpeakerDiarization
     private let fingerprinter: any AudioFingerprinting
     private let fingerprintEnricher: any AudioFingerprintEnriching
+    private let deduplicatesHLSSegments: Bool
     private let now: TimestampProvider
 
     public init(
@@ -43,6 +44,7 @@ public struct StreamIngestPipeline {
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
+        deduplicatesHLSSegments: Bool = true,
         now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
     ) {
         self.database = database
@@ -51,6 +53,7 @@ public struct StreamIngestPipeline {
         self.diarizer = diarizer
         self.fingerprinter = fingerprinter
         self.fingerprintEnricher = fingerprintEnricher
+        self.deduplicatesHLSSegments = deduplicatesHLSSegments
         self.now = now
     }
 
@@ -160,16 +163,21 @@ public struct StreamIngestPipeline {
                     source: source,
                     streamType: streamType,
                     durationSeconds: durationSeconds,
-                    maxChunks: maxChunks,
-                    minimumHLSMediaSequence: minimumHLSMediaSequence(
-                        streamID: streamID,
-                        streamType: streamType,
-                        persistence: persistence
-                    ),
-                    hlsTimelineStartSeconds: hlsTimelineStartSeconds(
-                        streamID: streamID,
-                        streamType: streamType,
-                        persistence: persistence
+	                    maxChunks: maxChunks,
+	                    minimumHLSMediaSequence: minimumHLSMediaSequence(
+	                        streamID: streamID,
+	                        streamType: streamType,
+	                        persistence: persistence
+	                    ),
+	                    excludedHLSSegmentKeys: excludedHLSSegmentKeys(
+	                        streamID: streamID,
+	                        streamType: streamType,
+	                        persistence: persistence
+	                    ),
+	                    hlsTimelineStartSeconds: hlsTimelineStartSeconds(
+	                        streamID: streamID,
+	                        streamType: streamType,
+	                        persistence: persistence
                     )
                 )
             )
@@ -700,7 +708,7 @@ public struct StreamIngestPipeline {
         streamID: Int64,
         runID: Int64
     ) -> HLSSegmentClaim? {
-        guard let identity = chunk.hlsIdentity else { return nil }
+        guard deduplicatesHLSSegments, let identity = chunk.hlsIdentity else { return nil }
         return HLSSegmentClaim(
             streamID: streamID,
             runID: runID,
@@ -770,16 +778,25 @@ public struct StreamIngestPipeline {
         return last + 1
     }
 
-    private func hlsTimelineStartSeconds(
-        streamID: Int64,
-        streamType: StreamType,
-        persistence: IngestPersistence
-    ) -> Double? {
+	    private func hlsTimelineStartSeconds(
+	        streamID: Int64,
+	        streamType: StreamType,
+	        persistence: IngestPersistence
+	    ) -> Double? {
         guard streamType == .hls else { return nil }
-        return try? persistence.lastPersistedHLSTimelineEndSeconds(streamID: streamID)
-    }
+	        return try? persistence.lastPersistedHLSTimelineEndSeconds(streamID: streamID)
+	    }
 
-    private func diagnostic(
+	    private func excludedHLSSegmentKeys(
+	        streamID: Int64,
+	        streamType: StreamType,
+	        persistence: IngestPersistence
+	    ) -> Set<HLSDecodedAudioSegmentKey> {
+	        guard streamType == .hls else { return [] }
+	        return (try? persistence.persistedHLSSegmentKeys(streamID: streamID)) ?? []
+	    }
+
+	    private func diagnostic(
         streamID: Int64,
         phase: IngestDiagnosticPhase,
         severity: IngestDiagnosticSeverity,
@@ -838,12 +855,26 @@ public struct StreamIngestPipeline {
     }
 
     private func redactedMarkers(_ markers: [AdMarker]) -> [AdMarker] {
-        markers.map { marker in
+        var seen = Set<String>()
+        return markers.compactMap { marker in
+            let key = markerDeduplicationKey(marker)
             var redacted = marker
             redacted.segment = redactedSourceDescription(marker.segment)
             redacted.rawBase64 = marker.rawBase64 == nil ? nil : "[redacted]"
+            guard seen.insert(key).inserted else { return nil }
             return redacted
         }
+    }
+
+    private func markerDeduplicationKey(_ marker: AdMarker) -> String {
+        [
+            marker.classification.rawValue,
+            marker.type,
+            marker.pts.map { String(format: "%.6f", $0) } ?? "",
+            marker.segment ?? "",
+            marker.rawBase64 ?? "",
+            marker.tag ?? "",
+        ].joined(separator: "|")
     }
 
     private func redactedSourceDescription(_ value: String?) -> String? {

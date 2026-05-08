@@ -75,7 +75,7 @@ final class MonitorOptionsTests: XCTestCase {
     func testRelativeSourceRedactionRemovesSecretLikePathComponents() {
         let description = MonitorError.redactedSourceDescription("/tmp/output/user:pass-token=secret-api_key=hunter2/out.ndjson")
 
-        XCTAssertTrue(description.contains("/tmp/output/"), description)
+        XCTAssertTrue(description.contains("[redacted-path]/out.ndjson"), description)
         XCTAssertFalse(description.contains("user:pass"), description)
         XCTAssertFalse(description.contains("token=secret"), description)
         XCTAssertFalse(description.contains("api_key=hunter2"), description)

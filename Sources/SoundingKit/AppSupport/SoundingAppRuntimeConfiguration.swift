@@ -248,10 +248,8 @@ public struct SoundingAppRuntimeFactory {
                 queue: queue
             ),
             diarizer: NoOpSpeakerDiarizer(),
-            fingerprinter: ProcessInfo.processInfo.environment["SOUNDING_DETERMINISTIC_FINGERPRINT"] == "1"
-                ? DeterministicAudioFingerprinter()
-                : NoOpAudioFingerprinter(),
-            fingerprintEnricher: NoOpAudioFingerprintEnricher(),
+            fingerprinter: defaultAudioFingerprinter(),
+            fingerprintEnricher: defaultFingerprintEnricher(database: database),
             player: player,
             timeline: timeline,
             rollingBuffer: rollingBuffer,
@@ -264,6 +262,29 @@ public struct SoundingAppRuntimeFactory {
                     queue: queue
                 )
             }
+        )
+    }
+
+    static func defaultAudioFingerprinter(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> any AudioFingerprinting {
+        environment["SOUNDING_DETERMINISTIC_FINGERPRINT"] == "1"
+            ? DeterministicAudioFingerprinter()
+            : ChromaSwiftAudioFingerprinter()
+    }
+
+    static func defaultFingerprintEnricher(
+        database: SoundingDatabase,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> any AudioFingerprintEnriching {
+        let key = environment["SOUNDING_ACOUSTID_API_KEY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !key.isEmpty else {
+            return NoOpAudioFingerprintEnricher()
+        }
+        return AcoustIDAudioFingerprintEnricher(
+            cache: AcoustIDLookupCache(database: database),
+            lookup: AcoustIDHTTPClientLookup(clientKey: key)
         )
     }
 

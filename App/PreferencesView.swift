@@ -11,6 +11,7 @@ final class AppPreferencesController: ObservableObject {
     @Published private(set) var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
     @Published private(set) var issues: [SoundingAppConfigurationIssue]
     @Published private(set) var actionMessage: String?
+    @Published private(set) var isTestingAcoustIDKey = false
     @Published var acoustIDKeyDraft = ""
 
     private let storage: SoundingAppPreferencesStorage
@@ -91,11 +92,33 @@ final class AppPreferencesController: ObservableObject {
         refreshStatus()
     }
 
+    func testAcoustIDKey() {
+        let key = acoustIDKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            actionMessage = "Enter an AcoustID application key before testing."
+            return
+        }
+
+        isTestingAcoustIDKey = true
+        actionMessage = "Testing AcoustID key…"
+        Task {
+            do {
+                let message = try await AcoustIDApplicationKeyTester().test(apiKey: key)
+                actionMessage = message
+            } catch {
+                let redacted = IngestRedaction.redact(String(describing: error))
+                    .replacingOccurrences(of: key, with: "[redacted-key]")
+                actionMessage = redacted
+            }
+            isTestingAcoustIDKey = false
+        }
+    }
+
     func clearAcoustIDKey() {
         do {
             try secretStore.saveAcoustIDKey(nil)
             acoustIDKeyDraft = ""
-            actionMessage = "AcoustID key cleared. AcoustID enrichment is disabled."
+            actionMessage = "AcoustID key cleared. Timed stream metadata is unaffected."
         } catch {
             actionMessage = IngestRedaction.redact(String(describing: error))
         }
@@ -170,7 +193,11 @@ struct PreferencesView: View {
                 Spacer()
             }
 
-            Text("Used only for AcoustID song metadata enrichment. HLS timed ID3 metadata and transcript ingest continue without this key.")
+            Text("Used only as an AcoustID application-key override. HLS timed ID3 metadata and transcript ingest continue without this key.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Public builds can include a bundled application key. A saved Keychain key overrides the bundled key.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -184,6 +211,15 @@ struct PreferencesView: View {
                     controller.saveAcoustIDKey()
                 }
                 .buttonStyle(.borderedProminent)
+
+                Button("Test Key", systemImage: "checkmark.shield") {
+                    controller.testAcoustIDKey()
+                }
+                .buttonStyle(.bordered)
+                .disabled(
+                    controller.isTestingAcoustIDKey
+                        || controller.acoustIDKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
 
                 Button("Clear Key", systemImage: "trash") {
                     controller.clearAcoustIDKey()
@@ -281,9 +317,9 @@ struct PreferencesView: View {
     private var acoustIDStatusDetail: String {
         switch controller.acoustIDKeyStatus {
         case .missing:
-            return "Missing — metadata lookup is disabled, stream ingest can continue."
+            return "Missing — timed metadata still works; fingerprint lookup has no key override."
         case .present:
-            return "Configured — key material remains in Keychain."
+            return "Configured — key material remains in Keychain for fingerprint lookup override."
         case .unavailable(let message):
             return "Error — \(IngestRedaction.redact(message))"
         }
@@ -298,6 +334,78 @@ struct PreferencesView: View {
             Pill(text: "Configured", color: .green, systemImage: "checkmark.circle")
         case .unavailable:
             Pill(text: "Error", color: .orange, systemImage: "exclamationmark.triangle")
+        }
+    }
+}
+
+private struct AcoustIDApplicationKeyTester {
+    private let validationTrackID = "9ff43b6a-4f16-427c-93c2-92307ca505e0"
+
+    func test(apiKey: String) async throws -> String {
+        var components = URLComponents(string: "https://api.acoustid.org/v2/lookup")
+        components?.queryItems = [
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "client", value: apiKey),
+            URLQueryItem(name: "trackid", value: validationTrackID),
+            URLQueryItem(name: "meta", value: "recordingids")
+        ]
+
+        guard let url = components?.url else {
+            throw AcoustIDApplicationKeyTesterError.invalidRequest
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AcoustIDApplicationKeyTesterError.invalidResponse
+        }
+
+        let decoded = try JSONDecoder().decode(AcoustIDApplicationKeyTestResponse.self, from: data)
+        if decoded.status == "ok" {
+            return "AcoustID application key test passed. Save the key to store it as the app override."
+        }
+
+        if let message = decoded.error?.message, !message.isEmpty {
+            throw AcoustIDApplicationKeyTesterError.service(message)
+        }
+
+        guard (200 ..< 300).contains(httpResponse.statusCode) else {
+            throw AcoustIDApplicationKeyTesterError.httpStatus(httpResponse.statusCode)
+        }
+
+        throw AcoustIDApplicationKeyTesterError.service("AcoustID rejected the application key.")
+    }
+}
+
+private struct AcoustIDApplicationKeyTestResponse: Decodable {
+    var status: String
+    var error: AcoustIDApplicationKeyTestError?
+}
+
+private struct AcoustIDApplicationKeyTestError: Decodable {
+    var message: String?
+}
+
+private enum AcoustIDApplicationKeyTesterError: Error, CustomStringConvertible {
+    case invalidRequest
+    case invalidResponse
+    case httpStatus(Int)
+    case service(String)
+
+    var description: String {
+        switch self {
+        case .invalidRequest:
+            return "AcoustID key test failed: could not build the validation request."
+        case .invalidResponse:
+            return "AcoustID key test failed: the service returned an invalid response."
+        case .httpStatus(let status):
+            return "AcoustID key test failed: the service returned HTTP \(status)."
+        case .service(let message):
+            return "AcoustID key test failed: \(IngestRedaction.redact(message))"
         }
     }
 }

@@ -19,7 +19,7 @@ Follow existing Swift style: four-space indentation, `UpperCamelCase` for types,
 
 ## Testing Guidelines
 
-Use XCTest in `Tests/SoundingKitTests`. Name test files after the unit or workflow under test, ending in `Tests.swift`; CLI smoke tests use `*CommandSmokeTests.swift`. Add fixtures under `Fixtures/` only when deterministic and safe to commit. Prefer focused filters during iteration, then run broader `swift test`. Some local environments may lack usable XCTest linkage; record that as a verification gap.
+Use XCTest in `Tests/SoundingKitTests`. Name test files after the unit or workflow under test, ending in `Tests.swift`; CLI smoke tests use `*CommandSmokeTests.swift`. Add fixtures under `Fixtures/` only when deterministic and safe to commit. Prefer focused filters during iteration, then run broader `swift test`. If `swift test --filter ...` only builds, execute the bundle directly, for example `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun xctest -XCTest SoundingKitTests.AppPlayerTimelineTests .build/debug/SoundingPackageTests.xctest`.
 
 ## Commit & Pull Request Guidelines
 

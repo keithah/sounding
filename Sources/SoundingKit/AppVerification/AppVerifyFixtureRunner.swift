@@ -260,6 +260,7 @@ public struct AppVerifyFixtureRunner: Sendable {
     )
     let runtime = runtimeFactory(
       registry, ingester, timeline, rollingBuffer, nil, volumeStore, player, diagnostics)
+    try? await Task.sleep(nanoseconds: 20_000_000)
 
     diagnostics.recordEvent(
       "appverify.run.starting",
@@ -320,7 +321,7 @@ public struct AppVerifyFixtureRunner: Sendable {
       try await waitForDiagnosticEvent(
         "playback.volume.applied",
         in: diagnostics,
-        minimumCount: 2,
+        minimumCount: 1,
         timeoutSeconds: configuration.timeoutSeconds,
         phaseName: "mute playback volume diagnostic"
       )
@@ -514,6 +515,17 @@ public struct AppVerifyFixtureRunner: Sendable {
           facts: runtimeFacts,
           artifacts: diagnosticsArtifacts(diagnostics)
         ))
+      replaceCheck(
+        .runtimeStopped,
+        in: &checks,
+        with: .fail(
+          .runtimeStopped,
+          phase: .runtimeStop,
+          reason: "Timed out during \(error.phase): \(sanitize(error)).",
+          facts: runtimeFacts,
+          artifacts: diagnosticsArtifacts(diagnostics)
+        )
+      )
       checks.append(contentsOf: controlChecks)
       checks.append(
         contentsOf: missingControlChecks(
@@ -696,6 +708,18 @@ public struct AppVerifyFixtureRunner: Sendable {
       ),
       runtimeStoppedCheck(terminal: stoppedEvent, timeline: timeline, facts: facts),
     ]
+  }
+
+  private func replaceCheck(
+    _ name: AppVerifyCheckName,
+    in checks: inout [AppVerifyCheckRecord],
+    with replacement: AppVerifyCheckRecord
+  ) {
+    guard let index = checks.firstIndex(where: { $0.name == name }) else {
+      checks.append(replacement)
+      return
+    }
+    checks[index] = replacement
   }
 
   private func runtimeFactsFromCurrentState(

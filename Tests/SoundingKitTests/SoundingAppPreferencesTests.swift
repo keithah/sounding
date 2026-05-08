@@ -110,7 +110,7 @@ final class SoundingAppPreferencesTests: XCTestCase {
         XCTAssertFalse(String(describing: issue).contains("/Users/example"))
     }
 
-    func testDatabaseValidationFailsBeforeRuntimeAndRedactsAbsolutePaths() throws {
+    func testDatabaseValidationCreatesMissingParentFolderForSavedAppLocation() throws {
         let directory = try makeTemporaryDirectory()
         let missingParent = directory.appendingPathComponent("missing", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -121,15 +121,10 @@ final class SoundingAppPreferencesTests: XCTestCase {
         )
 
         let configuration = SoundingAppConfiguration.validated(preferences: preferences)
-        let issue = try XCTUnwrap(configuration.issues.first { $0.category == .database })
 
-        XCTAssertEqual(issue.severity, .blocking)
-        XCTAssertEqual(issue.phase, .startup)
-        XCTAssertEqual(issue.action.kind, .chooseDatabaseLocation)
-        XCTAssertTrue(configuration.hasBlockingIssues)
-        XCTAssertFalse(issue.message.contains(directory.path), issue.message)
-        XCTAssertFalse(issue.detail?.contains(directory.path) ?? true, issue.detail ?? "")
-        XCTAssertTrue(issue.detail?.contains("[redacted-path]") ?? false, issue.detail ?? "")
+        XCTAssertFalse(configuration.hasBlockingIssues)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: missingParent.path))
+        XCTAssertFalse(configuration.issues.contains { $0.category == .database })
     }
 
     func testDirectoryDatabasePathIsBlockingAndRedacted() throws {

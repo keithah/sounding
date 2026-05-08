@@ -296,7 +296,7 @@ final class IngestPersistenceTests: XCTestCase {
         XCTAssertEqual(gapDiagnostics.map(\.reason), ["hls-media-sequence-gap"])
         XCTAssertEqual(gapDiagnostics.first?.severity, .warning)
 
-        let conflict = try writer.claimHLSSegment(
+        let reset = try writer.claimHLSSegment(
             HLSSegmentClaim(
                 streamID: streamID,
                 runID: secondRunID,
@@ -305,13 +305,11 @@ final class IngestPersistenceTests: XCTestCase {
                 claimedAt: "2026-05-01T10:01:04Z"
             )
         )
-        guard case let .conflict(conflictRunID, conflictChunkID, conflictDiagnostic) = conflict else {
-            return XCTFail("Expected conflict classification, got \(conflict)")
+        guard case let .claimed(resetDiagnostics) = reset else {
+            return XCTFail("Expected sequence reset claim classification, got \(reset)")
         }
-        XCTAssertEqual(conflictRunID, firstRunID)
-        XCTAssertEqual(conflictChunkID, chunkID)
-        XCTAssertEqual(conflictDiagnostic.severity, .error)
-        XCTAssertEqual(conflictDiagnostic.reason, "hls-segment-identity-conflict")
+        XCTAssertEqual(resetDiagnostics.map(\.reason), ["hls-media-sequence-reset"])
+        XCTAssertEqual(resetDiagnostics.first?.severity, .warning)
 
         let diagnostics = try temporary.database.read { db in
             try Row.fetchAll(db, sql: """
@@ -324,9 +322,9 @@ final class IngestPersistenceTests: XCTestCase {
         XCTAssertEqual(diagnostics.map { $0["reason"] as String? }, [
             "hls-segment-duplicate",
             "hls-media-sequence-gap",
-            "hls-segment-identity-conflict"
+            "hls-media-sequence-reset"
         ])
-        XCTAssertEqual(diagnostics.map { $0["severity"] as String? }, ["info", "warning", "error"])
+        XCTAssertEqual(diagnostics.map { $0["severity"] as String? }, ["info", "warning", "warning"])
         let contexts = diagnostics.compactMap { $0["context_json"] as String? }.joined(separator: "\n")
         XCTAssertTrue(contexts.contains("mediaSequence"))
         XCTAssertTrue(contexts.contains("expectedMediaSequence"))
@@ -338,6 +336,18 @@ final class IngestPersistenceTests: XCTestCase {
         XCTAssertFalse(contexts.contains("token="))
         XCTAssertFalse(contexts.contains("api_key="))
         XCTAssertFalse(contexts.contains("password="))
+
+        let currentClaim = try temporary.database.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT segment_identity, claimed_run_id, chunk_id, finalized_at
+                FROM hls_ingest_segments
+                WHERE stream_id = ? AND media_sequence = 7
+                """, arguments: [streamID])
+        }
+        XCTAssertEqual(currentClaim?["segment_identity"] as String?, "https://cdn.example.test/changed-7.ts")
+        XCTAssertEqual(currentClaim?["claimed_run_id"] as Int64?, secondRunID)
+        XCTAssertNil(currentClaim?["chunk_id"] as Int64?)
+        XCTAssertNil(currentClaim?["finalized_at"] as String?)
     }
 
     func testHLSSegmentAbandonUnfinalizedClaimAllowsRetryWithoutDuplicateClassification() throws {

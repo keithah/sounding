@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
@@ -29,6 +29,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>SoundingBundledAcoustIDClientKey</key>
+	<string>$(ACOUSTID_CLIENT_KEY)</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Sounding uses speech recognition to transcribe audio from configured streams.</string>
 	<key>SUEnableDownloaderSystemProfiling</key>

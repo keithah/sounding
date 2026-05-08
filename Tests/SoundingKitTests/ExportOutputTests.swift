@@ -93,7 +93,9 @@ final class ExportOutputTests: XCTestCase {
         let markerHuman = try ExportOutput.formatMarkersHuman(result)
         let reportHuman = try ReportOutput.formatAdsHuman(result)
         XCTAssertEqual(markerHuman, reportHuman)
-        XCTAssertTrue(markerHuman.contains("source=https://ads.example.test/start segment=/private/ad.ts"), markerHuman)
+        XCTAssertTrue(
+            markerHuman.contains("source=https://ads.example.test/start segment=[redacted-path]/ad.ts"),
+            markerHuman)
         assertNoSecretLeak(markerHuman)
     }
 

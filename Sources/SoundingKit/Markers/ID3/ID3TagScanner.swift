@@ -65,7 +65,9 @@ public struct ID3TagScanner: Sendable {
                 tags.append(tag)
                 cursor = tag.byteRange.upperBound
             } catch {
-                guard magicOffset > 0 else { throw error }
+                guard magicOffset > 0, case ID3DecodeError.unsupportedVersion = error else {
+                    throw error
+                }
                 cursor = magicOffset + 3
             }
         }

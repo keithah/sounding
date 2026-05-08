@@ -99,6 +99,216 @@ public protocol AcoustIDLookuping: Sendable {
     func lookup(_ request: AcoustIDLookupRequest) async -> AcoustIDLookupOutcome
 }
 
+public struct AcoustIDHTTPResponse: Equatable, Sendable {
+    public var statusCode: Int
+    public var data: Data
+
+    public init(statusCode: Int, data: Data) {
+        self.statusCode = statusCode
+        self.data = data
+    }
+}
+
+public protocol AcoustIDHTTPTransporting: Sendable {
+    func data(for request: URLRequest) async throws -> AcoustIDHTTPResponse
+}
+
+public struct URLSessionAcoustIDHTTPTransport: AcoustIDHTTPTransporting {
+    private let session: URLSession
+
+    public init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    public func data(for request: URLRequest) async throws -> AcoustIDHTTPResponse {
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            return AcoustIDHTTPResponse(statusCode: 0, data: data)
+        }
+        return AcoustIDHTTPResponse(statusCode: httpResponse.statusCode, data: data)
+    }
+}
+
+/// Real AcoustID lookup client for operator-enabled fingerprint enrichment.
+///
+/// The client key is only placed in the outbound request. Diagnostics produced from failures redact
+/// the key before returning an outcome so callers can persist diagnostics without leaking it.
+public struct AcoustIDHTTPClientLookup: AcoustIDLookuping {
+    private let clientKey: String
+    private let endpoint: URL
+    private let transport: any AcoustIDHTTPTransporting
+
+    public init(
+        clientKey: String,
+        endpoint: URL = URL(string: "https://api.acoustid.org/v2/lookup")!,
+        transport: any AcoustIDHTTPTransporting = URLSessionAcoustIDHTTPTransport()
+    ) {
+        self.clientKey = clientKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.endpoint = endpoint
+        self.transport = transport
+    }
+
+    public func lookup(_ request: AcoustIDLookupRequest) async -> AcoustIDLookupOutcome {
+        guard !clientKey.isEmpty else {
+            return .disabled(reason: "acoustid api key missing")
+        }
+        guard let urlRequest = makeRequest(for: request) else {
+            return .malformedResponse(reason: "could not build acoustid lookup request")
+        }
+
+        do {
+            let response = try await transport.data(for: urlRequest)
+            guard (200 ..< 300).contains(response.statusCode) else {
+                return .transientFailure(
+                    reason: sanitized("acoustid http \(response.statusCode): \(responseBodySummary(response.data))")
+                )
+            }
+            return decode(response.data)
+        } catch {
+            return .transientFailure(reason: sanitized("acoustid request failed: \(error)"))
+        }
+    }
+
+    private func makeRequest(for request: AcoustIDLookupRequest) -> URLRequest? {
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        var queryItems = [
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "client", value: clientKey),
+            URLQueryItem(name: "fingerprint", value: request.fingerprint),
+            URLQueryItem(name: "meta", value: "recordings releasegroups compress")
+        ]
+        if let duration = request.durationSeconds, duration.isFinite, duration > 0 {
+            queryItems.append(URLQueryItem(name: "duration", value: String(Int(duration))))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else { return nil }
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "GET"
+        urlRequest.timeoutInterval = 15
+        urlRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        return urlRequest
+    }
+
+    private func decode(_ data: Data) -> AcoustIDLookupOutcome {
+        do {
+            let decoded = try JSONDecoder().decode(AcoustIDLookupResponse.self, from: data)
+            guard decoded.status == "ok" else {
+                return .transientFailure(reason: sanitized(decoded.error?.message ?? "acoustid lookup failed"))
+            }
+            guard let match = bestMatch(from: decoded, responseJSON: minifiedJSON(data)) else {
+                return .notFound(reason: "acoustid returned no usable recordings")
+            }
+            return .matched(match)
+        } catch {
+            return .malformedResponse(reason: sanitized("acoustid response decode failed: \(error)"))
+        }
+    }
+
+    private func bestMatch(
+        from response: AcoustIDLookupResponse,
+        responseJSON: String?
+    ) -> AcoustIDMatch? {
+        response.results
+            .sorted { ($0.score ?? 0) > ($1.score ?? 0) }
+            .compactMap { result -> AcoustIDMatch? in
+                guard let recording = result.recordings?.first else { return nil }
+                let match = AcoustIDMatch(
+                    acoustID: normalized(result.id),
+                    recordingID: normalized(recording.id),
+                    title: normalized(recording.title),
+                    artist: normalized(recording.artists?.compactMap { normalized($0.name) }.joined(separator: ", ")),
+                    album: normalized(recording.releasegroups?.compactMap { normalized($0.title) }.first),
+                    isrc: normalized(recording.isrcs?.first),
+                    durationSeconds: recording.duration,
+                    score: result.score,
+                    responseJSON: responseJSON
+                )
+                return isUsable(match) ? match : nil
+            }
+            .first
+    }
+
+    private func isUsable(_ match: AcoustIDMatch) -> Bool {
+        [match.acoustID, match.recordingID, match.title, match.artist, match.album, match.isrc].contains {
+            normalized($0) != nil
+        }
+    }
+
+    private func normalized(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func responseBodySummary(_ data: Data) -> String {
+        guard let body = String(data: data, encoding: .utf8), !body.isEmpty else {
+            return "empty response body"
+        }
+        return body
+    }
+
+    private func sanitized(_ reason: String) -> String {
+        AcoustIDLookupOutcome.sanitizedReason(
+            reason.replacingOccurrences(of: clientKey, with: "[redacted-key]")
+        )
+    }
+
+    private func minifiedJSON(_ data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let minified = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return String(data: data, encoding: .utf8)
+        }
+        return String(data: minified, encoding: .utf8)
+    }
+}
+
+private struct AcoustIDLookupResponse: Decodable {
+    var status: String
+    var error: AcoustIDLookupErrorResponse?
+    var results: [AcoustIDLookupResult]
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case error
+        case results
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(String.self, forKey: .status)
+        error = try container.decodeIfPresent(AcoustIDLookupErrorResponse.self, forKey: .error)
+        results = try container.decodeIfPresent([AcoustIDLookupResult].self, forKey: .results) ?? []
+    }
+}
+
+private struct AcoustIDLookupErrorResponse: Decodable {
+    var message: String?
+}
+
+private struct AcoustIDLookupResult: Decodable {
+    var id: String?
+    var score: Double?
+    var recordings: [AcoustIDRecording]?
+}
+
+private struct AcoustIDRecording: Decodable {
+    var id: String?
+    var title: String?
+    var duration: Double?
+    var artists: [AcoustIDArtist]?
+    var releasegroups: [AcoustIDReleaseGroup]?
+    var isrcs: [String]?
+}
+
+private struct AcoustIDArtist: Decodable {
+    var name: String?
+}
+
+private struct AcoustIDReleaseGroup: Decodable {
+    var title: String?
+}
+
 /// Production-safe placeholder for disabled or unconfigured AcoustID lookup.
 public struct NoOpAcoustIDLookup: AcoustIDLookuping {
     private let reason: String
