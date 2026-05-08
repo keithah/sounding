@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 - 2026-05-08
+
+- Moved the selected-stream player back to the bottom of the app and removed duplicated stream identity text from the detail pane.
+- Added stream editing from the sidebar context menu while keeping raw stream URLs private in list and diagnostics surfaces.
+- Simplified transcript search by removing the speaker filter and clearing speaker filters before search execution.
+- Added transcript timeline context actions for copy text, copy with timestamp, save to text file, and play from the row when buffered.
+- Hid fingerprint-only unknown song misses from the user-facing timeline and player metadata.
+- Tightened transcript paragraph grouping so same-speaker rows do not merge into oversized blocks.
+
 ## 0.2.0 - 2026-05-07
 
 - Reworked live HLS ingest and playback around a shared rolling PCM buffer, including live restart handling and transcript click-to-play support for buffered audio.

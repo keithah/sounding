@@ -105,6 +105,36 @@ final class StreamRegistryTests: XCTestCase {
         XCTAssertEqual(reconnect.sourceDescription, "https://example.test/private/live.m3u8")
     }
 
+    func testUpdateChangesEditableStreamFieldsAndKeepsRawSourcePrivate() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let record = try registry.add(
+            name: "Main",
+            streamType: "hls",
+            source: "https://example.test/old.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+
+        let result = try registry.update(
+            id: record.id,
+            name: "  Renamed  ",
+            streamType: " icy ",
+            source: "https://user:pass@example.test/private/live?token=secret",
+            updatedAt: "2026-05-01T10:05:00Z"
+        )
+
+        XCTAssertTrue(result.changed)
+        XCTAssertEqual(result.record.name, "Renamed")
+        XCTAssertEqual(result.record.streamType, "icy")
+        XCTAssertEqual(result.record.sourceDescription, "https://example.test/private/live")
+        XCTAssertEqual(result.record.updatedAt, "2026-05-01T10:05:00Z")
+        XCTAssertEqual(try registry.list().map(\.name), ["Renamed"])
+        XCTAssertEqual(
+            try registry.reconnectSource(id: record.id)?.source,
+            "https://user:pass@example.test/private/live?token=secret"
+        )
+    }
+
     func testReconnectSourceFallsBackToRedactedCompatibilitySourceForLegacyRows() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

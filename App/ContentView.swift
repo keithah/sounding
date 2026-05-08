@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var streamVolumes: [Int64: Double] = [:]
     @State private var mutedStreamIDs: Set<Int64> = []
     @State private var isAddingStream = false
+    @State private var editingStreamID: Int64?
 
     init(preferences: SoundingAppPreferences? = nil) {
         let initial = Self.makeInitialState(preferences: preferences)
@@ -75,6 +76,10 @@ struct ContentView: View {
                         StreamRow(item: stream)
                             .tag(stream.id)
                             .contextMenu {
+                                Button("Edit Stream", systemImage: "pencil") {
+                                    editStream(stream.id)
+                                }
+                                Divider()
                                 Button("Remove Stream", systemImage: "trash", role: .destructive) {
                                     removeStream(stream.id)
                                 }
@@ -128,11 +133,16 @@ struct ContentView: View {
     private var addStreamForm: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Add Stream", systemImage: "plus.circle")
+                Label(
+                    editingStreamID == nil ? "Add Stream" : "Edit Stream",
+                    systemImage: editingStreamID == nil ? "plus.circle" : "pencil"
+                )
                     .font(.headline)
                 Spacer()
                 Button("Cancel") {
                     isAddingStream = false
+                    editingStreamID = nil
+                    viewModel.addDraft = StreamAppAddDraft(transport: viewModel.addDraft.transport)
                 }
             }
 
@@ -189,9 +199,9 @@ struct ContentView: View {
             }
 
             Button {
-                addStream()
+                saveStreamDraft()
             } label: {
-                Label("Save Stream", systemImage: "tray.and.arrow.down")
+                Label(editingStreamID == nil ? "Save Stream" : "Update Stream", systemImage: "tray.and.arrow.down")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -209,31 +219,6 @@ struct ContentView: View {
     private var detail: some View {
         if let selected = viewModel.selectedStream {
             VStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 12) {
-                    GlobalPlayerBar(
-                        selected: selected,
-                        seekToLive: { seekToLive() },
-                        scrubBackward: { scrubBackward(seconds: 30) },
-                        startRuntime: { startRuntime(for: selected.item.id) },
-                        pauseRuntime: { pauseRuntime(for: selected.item.id) },
-                        resumeRuntime: { resumeRuntime(for: selected.item.id) },
-                        stopRuntime: { stopRuntime(for: selected.item.id) },
-                        volume: Binding(
-                            get: { streamVolumes[selected.item.id] ?? 1.0 },
-                            set: { updateVolume(for: selected.item.id, volume: $0) }
-                        ),
-                        isMuted: Binding(
-                            get: { mutedStreamIDs.contains(selected.item.id) },
-                            set: { updateMuted(for: selected.item.id, isMuted: $0) }
-                        )
-                    )
-                    Divider()
-                    StreamHeader(selected: selected)
-                }
-                .padding(.horizontal, 28)
-                .padding(.top, 24)
-                .padding(.bottom, 12)
-                Divider()
                 StreamDetail(
                     selected: selected,
                     timelineActionMessage: timelineActionMessage,
@@ -254,6 +239,24 @@ struct ContentView: View {
                         updateSpeakerDisplay(
                             rawLabel: rawLabel, displayLabel: displayLabel, colorToken: colorToken)
                     }
+                )
+                Divider()
+                GlobalPlayerBar(
+                    selected: selected,
+                    seekToLive: { seekToLive() },
+                    scrubBackward: { scrubBackward(seconds: 30) },
+                    startRuntime: { startRuntime(for: selected.item.id) },
+                    pauseRuntime: { pauseRuntime(for: selected.item.id) },
+                    resumeRuntime: { resumeRuntime(for: selected.item.id) },
+                    stopRuntime: { stopRuntime(for: selected.item.id) },
+                    volume: Binding(
+                        get: { streamVolumes[selected.item.id] ?? 1.0 },
+                        set: { updateVolume(for: selected.item.id, volume: $0) }
+                    ),
+                    isMuted: Binding(
+                        get: { mutedStreamIDs.contains(selected.item.id) },
+                        set: { updateMuted(for: selected.item.id, isMuted: $0) }
+                    )
                 )
             }
         } else {
@@ -287,10 +290,59 @@ struct ContentView: View {
             persistenceError = nil
             timelineActionMessage = nil
             isAddingStream = false
+            editingStreamID = nil
             refreshRuntimeStatuses()
             refreshSelectedTimeline()
         } catch {
             // The view model stores redacted, user-facing validation errors.
+        }
+    }
+
+    private func saveStreamDraft() {
+        if let editingStreamID {
+            updateStream(editingStreamID)
+        } else {
+            addStream()
+        }
+    }
+
+    private func editStream(_ streamID: Int64) {
+        guard let registry else { return }
+        do {
+            let source = try registry.reconnectSource(id: streamID)
+            guard let source else { return }
+            viewModel.addDraft = StreamAppAddDraft(
+                name: source.name,
+                source: source.source,
+                transport: StreamAppTransport.fromRegistryStreamType(source.streamType) ?? .hls
+            )
+            editingStreamID = streamID
+            isAddingStream = true
+        } catch {
+            persistenceError = IngestRedaction.redact(String(describing: error))
+        }
+    }
+
+    private func updateStream(_ streamID: Int64) {
+        guard let registry else { return }
+        do {
+            let request = try StreamAppViewModel.validateAddDraft(viewModel.addDraft)
+            _ = try registry.update(
+                id: streamID,
+                name: request.name,
+                streamType: request.registryStreamType,
+                source: request.source
+            )
+            try viewModel.reload(from: registry)
+            viewModel.selectedStreamID = streamID
+            viewModel.addDraft = StreamAppAddDraft(transport: request.transport)
+            editingStreamID = nil
+            isAddingStream = false
+            persistenceError = nil
+        } catch let error as StreamAppValidationError {
+            persistenceError = error.description
+        } catch {
+            persistenceError = IngestRedaction.redact(String(describing: error))
         }
     }
 
@@ -561,6 +613,9 @@ struct ContentView: View {
             return
         }
         do {
+            var draft = viewModel.searchDraft
+            draft.speakerLabels = []
+            viewModel.updateSearchDraft(draft)
             _ = try viewModel.runSearch(using: searchStore)
             timelineActionMessage = nil
         } catch {
@@ -1248,17 +1303,6 @@ private struct SearchCard: View {
 
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                     GridRow {
-                        Text("Speaker")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        TextField("host, guest", text: speakerLabelsText)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Speaker filter")
-                            .accessibilityHint(
-                                "Optional comma-separated raw speaker labels to filter search results."
-                            )
-                    }
-                    GridRow {
                         Text("Run from")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
@@ -1305,7 +1349,7 @@ private struct SearchCard: View {
                             "No search results",
                             systemImage: "doc.text.magnifyingglass",
                             description: Text(
-                                "Try a different phrase, speaker, scope, or run date filter.")
+                                "Try a different phrase, scope, or run date filter.")
                         )
                         .frame(minHeight: 96)
                     }
@@ -1325,18 +1369,6 @@ private struct SearchCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
         }
-    }
-
-    private var speakerLabelsText: Binding<String> {
-        Binding(
-            get: { draft.speakerLabels.joined(separator: ", ") },
-            set: { value in
-                draft.speakerLabels =
-                    value
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            }
-        )
     }
 
     private func optionalText(_ keyPath: WritableKeyPath<StreamAppSearchDraft, String?>)
@@ -1750,6 +1782,25 @@ private struct TimelineItemButton: View {
             .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button("Copy Text", systemImage: "doc.on.doc") {
+                copyTimelineText(copyText)
+            }
+            Button("Copy All", systemImage: "doc.on.clipboard") {
+                copyTimelineText(copyAllText)
+            }
+            Button("Save", systemImage: "square.and.arrow.down") {
+                saveTimelineText()
+            }
+            Button("Play From Here", systemImage: "play.fill") {
+                if item.isSeekable {
+                    seekToSeconds(item.startSeconds)
+                } else {
+                    seekUnavailable(item.startSeconds)
+                }
+            }
+            .disabled(!item.isSeekable)
+        }
         .accessibilityLabel(
             "\(item.kind.title) at \(timeRange(item: item)): \(primaryText)"
         )
@@ -1757,6 +1808,54 @@ private struct TimelineItemButton: View {
             item.isSeekable
                 ? "Seeks playback to this buffered timeline item."
                 : "This item is outside the current buffered audio range.")
+    }
+
+    private func copyTimelineText(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    private func saveTimelineText() {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = defaultSaveName
+        panel.allowedFileTypes = ["txt"]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? copyAllText.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private var copyText: String {
+        switch item.kind {
+        case .transcript:
+            return item.subtitle ?? item.title
+        case .song, .event:
+            if let subtitle = item.subtitle, !subtitle.isEmpty {
+                return "\(item.title)\n\(subtitle)"
+            }
+            return item.title
+        }
+    }
+
+    private var copyAllText: String {
+        let timestamp = timeRange(item: item)
+        switch item.kind {
+        case .transcript:
+            return "\(timestamp)\n\(item.subtitle ?? item.title)"
+        case .song, .event:
+            if let subtitle = item.subtitle, !subtitle.isEmpty {
+                return "\(timestamp)\n\(item.title)\n\(subtitle)"
+            }
+            return "\(timestamp)\n\(item.title)"
+        }
+    }
+
+    private var defaultSaveName: String {
+        let base = item.kind == .transcript ? "transcript" : "timeline"
+        let id = item.id
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+        return "\(base)-\(id).txt"
     }
 }
 

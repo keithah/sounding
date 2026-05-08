@@ -708,7 +708,7 @@ public struct StreamAppTimelineStore: Sendable {
         if request.hideDeterministicUnknownSongs {
             unknownFilterClause = """
                 AND NOT (
-                  song_plays.source = 'deterministic_fingerprint'
+                  song_plays.source IN ('deterministic_fingerprint', 'chromaprint')
                   AND songs.is_unknown = 1
                   AND songs.song_key LIKE 'fingerprint:%'
                 )
@@ -1098,7 +1098,7 @@ public struct StreamAppTimelineStore: Sendable {
             }
             let sameSpeaker = last.speakerDisplay == paragraph.speakerDisplay
             let smallGap = paragraph.startSeconds - last.endSeconds <= 12
-            let boundedDuration = paragraph.endSeconds - last.startSeconds <= 90
+            let boundedDuration = paragraph.endSeconds - last.startSeconds <= 60
             let noMetadataBoundary = !hasMetadataBoundary(
                 after: last.endSeconds,
                 before: paragraph.startSeconds,

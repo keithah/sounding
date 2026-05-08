@@ -244,7 +244,7 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.recentMetadata, [])
     }
 
-    func testTimelineDoesNotSurfaceDeterministicUnknownSongsAsMetadata() throws {
+    func testTimelineDoesNotSurfaceFingerprintUnknownSongsAsMetadata() throws {
         let fixture = try makeFixture()
         let writer = IngestPersistence(database: fixture.temporary.database)
         let runID = try writer.createRun(
@@ -275,6 +275,18 @@ final class StreamAppTimelineStoreTests: XCTestCase {
                         startSeconds: 31,
                         endSeconds: 37,
                         source: "deterministic_fingerprint"
+                    ),
+                    SongPlayDraft(
+                        song: UnresolvedSongDraft(
+                            songKey: "fingerprint:def456",
+                            title: nil,
+                            artist: nil,
+                            displayName: "Unknown song (def456)",
+                            isUnknown: true
+                        ),
+                        startSeconds: 37,
+                        endSeconds: 43,
+                        source: "chromaprint"
                     )
                 ],
                 createdAt: "2026-05-01T15:10:02Z"
@@ -360,6 +372,59 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(
             snapshot.timelineItems.filter { $0.kind == .song }.map(\.title),
             ["Fixture Song", "Current chunk song"]
+        )
+    }
+
+    func testTimelineTranscriptParagraphsStayBoundedWhenSpeakerDoesNotChange() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Long Talk",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T15:00:00Z"
+        )
+        let writer = IngestPersistence(database: temporary.database)
+        let runID = try writer.createRun(
+            streamID: stream.id,
+            startedAt: "2026-05-01T15:00:01Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 0,
+            segmentURI: "main-000.ts",
+            startedAt: "2026-05-01T15:00:02Z",
+            endedAt: "2026-05-01T15:02:02Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(0, "speaker", 0, 30, "first long thought"),
+                    segment(1, "speaker", 30, 60, "second long thought"),
+                    segment(2, "speaker", 60, 90, "third long thought"),
+                ],
+                createdAt: "2026-05-01T15:00:03Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: stream.id,
+                paragraphLimit: 5,
+                wordLimitPerParagraph: 5,
+                metadataLimit: 5,
+                timelineLimit: 10,
+                lookbackSeconds: 120,
+                refreshedAt: "2026-05-01T16:00:00Z"
+            )
+        )
+
+        XCTAssertEqual(
+            snapshot.timelineItems.filter { $0.kind == .transcript }.map(\.subtitle),
+            ["first long thought second long thought", "third long thought"]
         )
     }
 

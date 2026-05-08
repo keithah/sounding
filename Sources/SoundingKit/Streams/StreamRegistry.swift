@@ -260,6 +260,55 @@ public final class StreamRegistry {
         }
     }
 
+    public func update(
+        id: Int64,
+        name: String,
+        streamType: String,
+        source: String,
+        updatedAt: String? = nil
+    ) throws -> StreamMutationResult {
+        let id = try validatedID(id)
+        let name = try validatedName(name)
+        let streamType = try validatedStreamType(streamType)
+        let source = try validatedReconnectSource(source)
+        let sourceDescription = IngestRedaction.sourceDescription(source)
+        let updatedAt = updatedAt ?? Self.nowString()
+
+        do {
+            return try database.write { db in
+                guard let before = try fetchStream(id: id, includeRemoved: false, db: db) else {
+                    throw StreamRegistryError.streamNotFound
+                }
+                if try activeStreamExists(named: name, excluding: id, db: db) {
+                    throw StreamRegistryError.duplicateName
+                }
+                let reconnect = try fetchReconnectSource(id: id, includeRemoved: false, db: db)
+                let changed =
+                    before.name != name
+                    || before.streamType != streamType
+                    || before.sourceDescription != sourceDescription
+                    || reconnect?.source != source
+                guard changed else {
+                    return StreamMutationResult(record: before, changed: false)
+                }
+                try db.execute(
+                    sql: """
+                    UPDATE streams
+                    SET name = ?, stream_type = ?, source = ?, source_url = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    arguments: [name, streamType, sourceDescription, source, updatedAt, id]
+                )
+                let after = try fetchStream(id: id, includeRemoved: false, db: db) ?? before
+                return StreamMutationResult(record: after, changed: true)
+            }
+        } catch let error as StreamRegistryError {
+            throw error
+        } catch {
+            throw StreamRegistryError.databaseWriteFailed(message: Self.redactedDatabaseMessage(error))
+        }
+    }
+
     public func setDiarizationEnabled(
         id: Int64,
         isEnabled: Bool,
@@ -327,7 +376,17 @@ public final class StreamRegistry {
     }
 
     private func activeStreamExists(named name: String, db: Database) throws -> Bool {
-        try Bool.fetchOne(
+        try activeStreamExists(named: name, excluding: nil, db: db)
+    }
+
+    private func activeStreamExists(named name: String, excluding excludedID: Int64?, db: Database) throws -> Bool {
+        var arguments: StatementArguments = [name]
+        var excludedClause = ""
+        if let excludedID {
+            excludedClause = "AND id <> ?"
+            arguments += [excludedID]
+        }
+        return try Bool.fetchOne(
             db,
             sql: """
             SELECT EXISTS(
@@ -335,9 +394,10 @@ public final class StreamRegistry {
                 FROM streams
                 WHERE name = ?
                   AND removed_at IS NULL
+                  \(excludedClause)
             )
             """,
-            arguments: [name]
+            arguments: arguments
         ) ?? false
     }
 

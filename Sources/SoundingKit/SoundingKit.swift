@@ -3,7 +3,7 @@ public struct SoundingKitVersion: Equatable, Sendable {
     public let name: String
     public let string: String
 
-    public static let current = SoundingKitVersion(name: "Sounding", string: "0.2.0")
+    public static let current = SoundingKitVersion(name: "Sounding", string: "0.2.1")
 
     public init(name: String, string: String) {
         self.name = name
