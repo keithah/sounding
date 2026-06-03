@@ -95,10 +95,28 @@ public enum StreamAppTimelineRailProjection {
 
     private static func markerSource(for item: StreamAppTimelineItem) -> StreamAppTimelineMarkerSource {
         let text = [item.id, item.title, item.subtitle ?? ""].joined(separator: " ").lowercased()
-        if text.contains("scte") { return .scte35 }
-        if text.contains("id3") { return .timedID3 }
+        if scte35Markers.contains(where: { text.contains($0) }) { return .scte35 }
+        if timedID3Markers.contains(where: { text.contains($0) }) { return .timedID3 }
         return .unknown
     }
+
+    private static let scte35Markers = [
+        "scte",
+        "splice_insert",
+        "splice insert",
+        "ext-x-cue-out",
+        "ext-x-cue-in",
+        "cue-out",
+        "cue-in",
+        "cue out",
+        "cue in",
+    ]
+
+    private static let timedID3Markers = [
+        "id3",
+        "timed id3",
+        "timed-id3",
+    ]
 
     private static func markerColorToken(for source: StreamAppTimelineMarkerSource) -> String {
         switch source {

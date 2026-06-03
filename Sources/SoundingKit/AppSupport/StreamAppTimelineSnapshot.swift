@@ -263,6 +263,28 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
     public var normalizedEnd: Double
     public var colorToken: String
     public var isSeekable: Bool
+
+    public init(
+        id: String,
+        title: String,
+        subtitle: String?,
+        startSeconds: Double,
+        endSeconds: Double,
+        normalizedStart: Double,
+        normalizedEnd: Double,
+        colorToken: String,
+        isSeekable: Bool
+    ) {
+        self.id = id
+        self.title = title
+        self.subtitle = subtitle
+        self.startSeconds = startSeconds
+        self.endSeconds = endSeconds
+        self.normalizedStart = normalizedStart
+        self.normalizedEnd = normalizedEnd
+        self.colorToken = colorToken
+        self.isSeekable = isSeekable
+    }
 }
 
 public struct StreamAppTimelineRailMarker: Equatable, Identifiable, Sendable {
@@ -273,6 +295,24 @@ public struct StreamAppTimelineRailMarker: Equatable, Identifiable, Sendable {
     public var normalizedPosition: Double
     public var colorToken: String
     public var isSeekable: Bool
+
+    public init(
+        id: String,
+        title: String,
+        source: StreamAppTimelineMarkerSource,
+        seconds: Double,
+        normalizedPosition: Double,
+        colorToken: String,
+        isSeekable: Bool
+    ) {
+        self.id = id
+        self.title = title
+        self.source = source
+        self.seconds = seconds
+        self.normalizedPosition = normalizedPosition
+        self.colorToken = colorToken
+        self.isSeekable = isSeekable
+    }
 }
 
 public struct StreamAppTimelineRailSnapshot: Equatable, Sendable {

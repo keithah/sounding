@@ -39,6 +39,45 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertEqual(span.normalizedEnd, 1.0, accuracy: 0.001)
     }
 
+    func testPublicRailModelsCanBeConstructed() {
+        let span = StreamAppTimelineRailSpan(
+            id: "song:1",
+            title: "Song",
+            subtitle: "Artist",
+            startSeconds: 10,
+            endSeconds: 20,
+            normalizedStart: 0.1,
+            normalizedEnd: 0.2,
+            colorToken: "orange",
+            isSeekable: true
+        )
+        let marker = StreamAppTimelineRailMarker(
+            id: "event:1",
+            title: "Cue",
+            source: .scte35,
+            seconds: 15,
+            normalizedPosition: 0.15,
+            colorToken: "red",
+            isSeekable: false
+        )
+
+        XCTAssertEqual(span.id, "song:1")
+        XCTAssertEqual(marker.source, .scte35)
+    }
+
+    func testClassifiesSCTEMarkerAliases() {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline("event:splice:1", kind: .event, start: 10, end: 10, title: "splice_insert", subtitle: nil),
+                timeline("event:cue:1", kind: .event, start: 20, end: 20, title: "EXT-X-CUE-OUT", subtitle: nil)
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 30
+        )
+
+        XCTAssertEqual(rail.markers.map(\.source), [.scte35, .scte35])
+    }
+
     private func timeline(
         _ id: String,
         kind: StreamAppTimelineItemKind,
