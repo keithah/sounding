@@ -7,6 +7,9 @@ final class AppPreferencesController: ObservableObject {
     @Published var databasePath: String
     @Published var whisperModelName: String
     @Published var rollingBufferMinutes: Double
+    @Published var audioArchivePath: String
+    @Published var audioArchiveMaximumGB: Double
+    @Published var audioArchiveRetentionHours: Double
     @Published var isDiarizationEnabled: Bool
     @Published private(set) var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
     @Published private(set) var issues: [SoundingAppConfigurationIssue]
@@ -27,6 +30,9 @@ final class AppPreferencesController: ObservableObject {
         databasePath = preferences.databaseURL.path
         whisperModelName = preferences.whisperModelName
         rollingBufferMinutes = preferences.rollingBufferTargetSeconds / 60
+        audioArchivePath = preferences.audioArchiveDirectory?.path ?? ""
+        audioArchiveMaximumGB = Double(preferences.audioArchiveMaximumBytes) / 1_073_741_824
+        audioArchiveRetentionHours = preferences.audioArchiveDefaultRetentionSeconds / 3_600
         isDiarizationEnabled = preferences.isDiarizationEnabled
         acoustIDKeyStatus = preferences.acoustIDKeyStatus
         issues = SoundingAppConfiguration.validated(preferences: preferences).issues
@@ -41,6 +47,9 @@ final class AppPreferencesController: ObservableObject {
         databasePath = preferences.databaseURL.path
         whisperModelName = preferences.whisperModelName
         rollingBufferMinutes = preferences.rollingBufferTargetSeconds / 60
+        audioArchivePath = preferences.audioArchiveDirectory?.path ?? ""
+        audioArchiveMaximumGB = Double(preferences.audioArchiveMaximumBytes) / 1_073_741_824
+        audioArchiveRetentionHours = preferences.audioArchiveDefaultRetentionSeconds / 3_600
         isDiarizationEnabled = preferences.isDiarizationEnabled
         acoustIDKeyStatus = preferences.acoustIDKeyStatus
         issues = SoundingAppConfiguration.validated(preferences: preferences).issues
@@ -52,6 +61,9 @@ final class AppPreferencesController: ObservableObject {
             databaseURL: databaseURL,
             whisperModelName: whisperModelName,
             rollingBufferTargetSeconds: rollingBufferMinutes * 60,
+            audioArchiveDirectory: archiveDirectory(),
+            audioArchiveMaximumBytes: Int64(max(0.01, audioArchiveMaximumGB) * 1_073_741_824),
+            audioArchiveDefaultRetentionSeconds: max(0.01, audioArchiveRetentionHours) * 3_600,
             isDiarizationEnabled: isDiarizationEnabled
         )
         actionMessage = "Preferences saved. Restart the app runtime to apply startup settings."
@@ -78,6 +90,22 @@ final class AppPreferencesController: ObservableObject {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
         databasePath = url.path
+        saveNonSecretPreferences()
+    }
+
+    func chooseAudioArchiveLocation() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Audio Archive Folder"
+        panel.prompt = "Use Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        if !audioArchivePath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: audioArchivePath, isDirectory: true)
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        audioArchivePath = url.path
         saveNonSecretPreferences()
     }
 
@@ -124,6 +152,12 @@ final class AppPreferencesController: ObservableObject {
         }
         refreshStatus()
     }
+
+    private func archiveDirectory() -> URL? {
+        let trimmed = audioArchivePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(fileURLWithPath: trimmed, isDirectory: true)
+    }
 }
 
 struct PreferencesView: View {
@@ -138,6 +172,7 @@ struct PreferencesView: View {
                 acoustIDEnrichmentSection
                 whisperSection
                 rollingBufferSection
+                audioArchiveSection
                 databaseSection
                 diagnosticsSection
             }
@@ -286,6 +321,48 @@ struct PreferencesView: View {
                 }
                 Button("Reset Defaults", systemImage: "arrow.counterclockwise") {
                     controller.resetNonSecretPreferences()
+                }
+            }
+        }
+    }
+
+    private var audioArchiveSection: some View {
+        SettingsSection(title: "Audio Archive", systemImage: "externaldrive") {
+            Text("Per-stream replay/export archive settings. Streams must opt in from their stream options.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextField("Audio archive folder", text: $controller.audioArchivePath)
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+                .accessibilityLabel("Audio archive folder")
+
+            HStack {
+                TextField(
+                    "Maximum archive GB",
+                    value: $controller.audioArchiveMaximumGB,
+                    format: .number.precision(.fractionLength(1))
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 160)
+                .accessibilityLabel("Maximum archive gigabytes")
+
+                TextField(
+                    "Default retention hours",
+                    value: $controller.audioArchiveRetentionHours,
+                    format: .number.precision(.fractionLength(1))
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 190)
+                .accessibilityLabel("Default archive retention hours")
+            }
+
+            HStack {
+                Button("Choose Folder…", systemImage: "folder") {
+                    controller.chooseAudioArchiveLocation()
+                }
+                Button("Save Archive Settings", systemImage: "checkmark.circle") {
+                    controller.saveNonSecretPreferences()
                 }
             }
         }

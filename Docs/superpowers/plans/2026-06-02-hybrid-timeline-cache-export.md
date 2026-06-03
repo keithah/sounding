@@ -1312,7 +1312,7 @@ git commit -m "feat: show hybrid timeline rail"
 - Modify: `App/ContentView.swift`
 - Test: `Tests/SoundingKitTests/TimelineExportServiceTests.swift`
 
-- [ ] **Step 1: Extend export tests for copy text**
+- [x] **Step 1: Extend export tests for copy text**
 
 Add to `TimelineExportServiceTests`:
 
@@ -1336,7 +1336,7 @@ func testCopyWithTimeIncludesKindAndTimestamp() {
 }
 ```
 
-- [ ] **Step 2: Implement copy helper**
+- [x] **Step 2: Implement copy helper**
 
 Add to `TimelineExportService`:
 
@@ -1357,7 +1357,7 @@ public static func copyText(item: StreamAppTimelineItem, includesTime: Bool) -> 
 }
 ```
 
-- [ ] **Step 3: Update context menu**
+- [x] **Step 3: Update context menu**
 
 In `TimelineItemButton.contextMenu`, replace current items with:
 
@@ -1391,7 +1391,7 @@ var exportTimelineItem: (StreamAppTimelineItem) -> Void
 var exportTimelineRange: (StreamAppTimelineItem) -> Void
 ```
 
-- [ ] **Step 4: Add no-op app wiring with visible message**
+- [x] **Step 4: Add no-op app wiring with visible message**
 
 In `ContentView`, implement export callbacks by setting `timelineActionMessage`:
 
@@ -1401,7 +1401,7 @@ timelineActionMessage = "Export queued for \(item.kind.title.lowercased()) at \(
 
 This keeps the UI path wired before file panels are added.
 
-- [ ] **Step 5: Test, build, commit**
+- [x] **Step 5: Test, build, commit**
 
 Run:
 
@@ -1430,7 +1430,7 @@ git commit -m "feat: add timeline copy and export actions"
 - Modify: `Sources/SoundingKit/AppSupport/SoundingAppPreferencesStorage.swift`
 - Test: `Tests/SoundingKitTests/SoundingAppRuntimeFactoryTests.swift`
 
-- [ ] **Step 1: Add preference storage test**
+- [x] **Step 1: Add preference storage test**
 
 Add to `SoundingAppRuntimeFactoryTests` or a focused preferences test:
 
@@ -1459,7 +1459,7 @@ func testAudioArchivePreferencesRoundTrip() {
 }
 ```
 
-- [ ] **Step 2: Run failing preference test**
+- [x] **Step 2: Run failing preference test**
 
 Run:
 
@@ -1469,7 +1469,7 @@ swift test --filter SoundingKitTests.SoundingAppRuntimeFactoryTests/testAudioArc
 
 Expected: compile failure until preference arguments exist.
 
-- [ ] **Step 3: Add UI controls**
+- [x] **Step 3: Add UI controls**
 
 In the stream options/edit menu under the existing remove/edit actions, add:
 
@@ -1490,7 +1490,7 @@ TextField("Default retention hours", value: $audioArchiveRetentionHoursDraft, fo
 
 Keep labels explicit: archive is opt-in and can use disk.
 
-- [ ] **Step 4: Test, build, commit**
+- [x] **Step 4: Test, build, commit**
 
 Run:
 
@@ -1515,7 +1515,7 @@ git commit -m "feat: add audio archive controls"
 **Files:**
 - No planned source edits unless verification exposes failures.
 
-- [ ] **Step 1: Run focused suites**
+- [x] **Step 1: Run focused suites**
 
 Run:
 
@@ -1530,7 +1530,7 @@ swift test --filter SoundingKitTests.StreamAppViewModelTests
 
 Expected: all pass.
 
-- [ ] **Step 2: Run full direct XCTest**
+- [x] **Step 2: Run full direct XCTest**
 
 Run:
 
@@ -1541,7 +1541,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun xctest .build/deb
 
 Expected: `swift test` builds the suite and direct XCTest reports zero failures.
 
-- [ ] **Step 3: Build app**
+- [x] **Step 3: Build app**
 
 Run:
 

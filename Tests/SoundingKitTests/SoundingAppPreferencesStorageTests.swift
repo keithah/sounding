@@ -9,12 +9,16 @@ final class SoundingAppPreferencesStorageTests: XCTestCase {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let databaseURL = directory.appendingPathComponent("Configured.sqlite", isDirectory: false)
+        let archiveDirectory = directory.appendingPathComponent("Archive", isDirectory: true)
         let storage = SoundingAppPreferencesStorage(defaults: defaults)
 
         storage.saveNonSecretPreferences(
             databaseURL: databaseURL,
             whisperModelName: " base.en ",
             rollingBufferTargetSeconds: 120,
+            audioArchiveDirectory: archiveDirectory,
+            audioArchiveMaximumBytes: 123_456,
+            audioArchiveDefaultRetentionSeconds: 3_600,
             isDiarizationEnabled: true
         )
         let preferences = storage.load(secretStore: StatusSecretStore(status: .present))
@@ -22,6 +26,9 @@ final class SoundingAppPreferencesStorageTests: XCTestCase {
         XCTAssertEqual(preferences.databaseURL, databaseURL)
         XCTAssertEqual(preferences.whisperModelName, "base.en")
         XCTAssertEqual(preferences.rollingBufferTargetSeconds, 120)
+        XCTAssertEqual(preferences.audioArchiveDirectory, archiveDirectory)
+        XCTAssertEqual(preferences.audioArchiveMaximumBytes, 123_456)
+        XCTAssertEqual(preferences.audioArchiveDefaultRetentionSeconds, 3_600)
         XCTAssertEqual(preferences.isDiarizationEnabled, true)
         XCTAssertEqual(preferences.acoustIDKeyStatus, .present)
         XCTAssertFalse(String(describing: preferences).contains("acoustid-secret"))

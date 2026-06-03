@@ -34,8 +34,14 @@ public struct StreamIngestPipeline {
     private let diarizer: any SpeakerDiarization
     private let fingerprinter: any AudioFingerprinting
     private let fingerprintEnricher: any AudioFingerprintEnriching
+    private let audioArchiveStore: AudioArchiveStore?
+    private let audioArchiveEnabled: Bool
     private let deduplicatesHLSSegments: Bool
     private let now: TimestampProvider
+
+    public static func defaultTimestamp() -> String {
+        SoundingTimestampClock.timestamp()
+    }
 
     public init(
         database: SoundingDatabase,
@@ -44,8 +50,10 @@ public struct StreamIngestPipeline {
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
+        audioArchiveStore: AudioArchiveStore? = nil,
+        audioArchiveEnabled: Bool = false,
         deduplicatesHLSSegments: Bool = true,
-        now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
+        now: @escaping TimestampProvider = { StreamIngestPipeline.defaultTimestamp() }
     ) {
         self.database = database
         self.decoder = decoder
@@ -53,6 +61,8 @@ public struct StreamIngestPipeline {
         self.diarizer = diarizer
         self.fingerprinter = fingerprinter
         self.fingerprintEnricher = fingerprintEnricher
+        self.audioArchiveStore = audioArchiveStore
+        self.audioArchiveEnabled = audioArchiveEnabled
         self.deduplicatesHLSSegments = deduplicatesHLSSegments
         self.now = now
     }
@@ -263,6 +273,33 @@ public struct StreamIngestPipeline {
                 )
 
                 var chunkDiagnostics: [IngestDiagnosticDraft] = []
+                if audioArchiveEnabled,
+                    let audioArchiveStore,
+                    chunk.audioFormat.payloadKind == .linearPCM
+                {
+                    do {
+                        _ = try audioArchiveStore.archive(
+                            frame: SharedPCMFrame(streamID: streamID, chunk: chunk),
+                            runID: runID,
+                            chunkID: chunkID
+                        )
+                    } catch {
+                        chunkDiagnostics.append(
+                            diagnostic(
+                                streamID: streamID,
+                                phase: .persist,
+                                severity: .warning,
+                                reason: "audio-archive-write-failed",
+                                source: redactedSource,
+                                streamType: streamType,
+                                context: [
+                                    "archiveError": .string(
+                                        IngestRedaction.redact(String(describing: error)))
+                                ]
+                            )
+                        )
+                    }
+                }
                 var segments: [TranscriptSegmentDraft] = []
                 do {
                     try Task.checkCancellation()
@@ -649,14 +686,16 @@ public struct StreamIngestPipeline {
         }) {
             return containing.speakerLabel
         }
-        return turns
-            .map { turn -> (label: String, overlap: Double) in
-                let overlap = max(0, min(endSeconds, turn.endSeconds) - max(startSeconds, turn.startSeconds))
-                return (turn.speakerLabel, overlap)
+        var bestLabel: String?
+        var bestOverlap = 0.0
+        for turn in turns {
+            let overlap = max(0, min(endSeconds, turn.endSeconds) - max(startSeconds, turn.startSeconds))
+            if overlap > bestOverlap {
+                bestOverlap = overlap
+                bestLabel = turn.speakerLabel
             }
-            .filter { $0.overlap > 0 }
-            .max { $0.overlap < $1.overlap }?
-            .label
+        }
+        return bestLabel
     }
 
     private func validate(_ fingerprintResult: AudioFingerprintResult) throws {

@@ -3,6 +3,62 @@ import XCTest
 @testable import SoundingKit
 
 final class StreamAppViewModelTests: XCTestCase {
+    func testAddDraftDefaultsToAutoTransport() {
+        XCTAssertEqual(StreamAppAddDraft().transport, .auto)
+    }
+
+    func testAutoTransportResolvesMP3URLToIcecastWithoutManualType() throws {
+        let request = try StreamAppViewModel.validateAddDraft(
+            StreamAppAddDraft(
+                name: "TuneIn",
+                source: "https://tunein-live-e.cdnstream1.com/11361_128.mp3"
+            )
+        )
+
+        XCTAssertEqual(request.transport, .auto)
+        XCTAssertEqual(request.resolvedTransport, .icecast)
+        XCTAssertEqual(request.registryStreamType, "icy")
+    }
+
+    func testAutoTransportResolvesM3U8URLToHLSWithoutManualType() throws {
+        let request = try StreamAppViewModel.validateAddDraft(
+            StreamAppAddDraft(
+                name: "JFL",
+                source: "https://lotus-music.stingray.com/manifest/TIN-242677/tunein_music/master.m3u8?token=secret"
+            )
+        )
+
+        XCTAssertEqual(request.transport, .auto)
+        XCTAssertEqual(request.resolvedTransport, .hls)
+        XCTAssertEqual(request.registryStreamType, "hls")
+    }
+
+    func testTransportDetectorUsesICYAndAudioHeadersForExtensionlessURLs() async throws {
+        let detector = StreamAppTransportDetector { _ in
+            StreamAppTransportProbe(
+                contentType: "audio/mpeg",
+                headers: ["icy-br": "128"]
+            )
+        }
+
+        let resolved = try await detector.detect(source: "https://radio.example.test/live")
+
+        XCTAssertEqual(resolved, .icecast)
+    }
+
+    func testAsyncAutoValidationUsesHeaderDetectorWhenURLHasNoTypeExtension() async throws {
+        let request = try await StreamAppViewModel.validateAddDraft(
+            StreamAppAddDraft(name: "Radio", source: "https://radio.example.test/live"),
+            detector: StreamAppTransportDetector { _ in
+                StreamAppTransportProbe(contentType: "audio/mpeg")
+            }
+        )
+
+        XCTAssertEqual(request.transport, .auto)
+        XCTAssertEqual(request.resolvedTransport, .icecast)
+        XCTAssertEqual(request.registryStreamType, "icy")
+    }
+
     func testValidateAddDraftAcceptsHLSAndRedactsSource() throws {
         let request = try StreamAppViewModel.validateAddDraft(
             StreamAppAddDraft(
@@ -14,6 +70,7 @@ final class StreamAppViewModelTests: XCTestCase {
 
         XCTAssertEqual(request.name, "Morning News")
         XCTAssertEqual(request.transport, .hls)
+        XCTAssertEqual(request.resolvedTransport, .hls)
         XCTAssertEqual(request.registryStreamType, "hls")
         XCTAssertEqual(request.redactedSourceDescription, "https://example.test/private/live.m3u8")
         XCTAssertFalse(request.redactedSourceDescription.contains("user:pass"))
@@ -30,6 +87,7 @@ final class StreamAppViewModelTests: XCTestCase {
         )
 
         XCTAssertEqual(request.transport, .icecast)
+        XCTAssertEqual(request.resolvedTransport, .icecast)
         XCTAssertEqual(request.registryStreamType, "icy")
         XCTAssertEqual(request.redactedSourceDescription, "http://radio.example.test:8000/live")
     }
@@ -109,6 +167,33 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(stored[0].sourceDescription, "https://example.test/live.m3u8")
     }
 
+    func testAudioArchiveSettingMapsAndRefreshesStreamItem() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "JFL",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8"
+        )
+        var viewModel = StreamAppViewModel()
+
+        try viewModel.reload(from: registry)
+        XCTAssertFalse(
+            try XCTUnwrap(viewModel.streams.first { $0.id == stream.id }).audioArchiveEnabled)
+        XCTAssertFalse(try XCTUnwrap(viewModel.selectedStream).item.audioArchiveEnabled)
+
+        let updated = try viewModel.updateAudioArchive(
+            streamID: stream.id,
+            isEnabled: true,
+            using: registry
+        )
+
+        XCTAssertTrue(updated.audioArchiveEnabled)
+        XCTAssertTrue(
+            try XCTUnwrap(viewModel.streams.first { $0.id == stream.id }).audioArchiveEnabled)
+        XCTAssertTrue(try XCTUnwrap(viewModel.selectedStream).item.audioArchiveEnabled)
+    }
+
     func testRuntimeEventsUpdateSelectedStatusAndControls() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -158,6 +243,7 @@ final class StreamAppViewModelTests: XCTestCase {
         viewModel.applyRuntimeEvent(
             AppStreamRuntimeEvent(
                 streamID: item.id,
+                kind: .playerTelemetry,
                 phase: .stopped,
                 message: "Buffered 0-136s.",
                 result: AppStreamRuntimeResult(
@@ -181,6 +267,75 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(selected.playerStateTitle, "Buffering")
         XCTAssertEqual(selected.canStartRuntime, false)
         XCTAssertEqual(selected.canStopRuntime, true)
+    }
+
+    func testPlayerTelemetryKindDoesNotDependOnResultShape() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        var viewModel = StreamAppViewModel()
+        viewModel.addDraft = StreamAppAddDraft(
+            name: "Fixture HLS",
+            source: "https://example.test/live.m3u8",
+            transport: .hls
+        )
+        let item = try viewModel.addStream(using: registry)
+
+        viewModel.applyRuntimeEvent(
+            AppStreamRuntimeEvent(
+                streamID: item.id,
+                phase: .running,
+                message: "Live ingest and playback are active."
+            )
+        )
+
+        viewModel.applyRuntimeEvent(
+            AppStreamRuntimeEvent(
+                streamID: item.id,
+                kind: .playerTelemetry,
+                phase: .stopped,
+                message: "Buffered playback telemetry.",
+                result: AppStreamRuntimeResult(
+                    streamID: item.id,
+                    runID: 99,
+                    processedChunks: 12,
+                    diagnosticCount: 1,
+                    playerTimeline: AppPlayerTimelineSnapshot(
+                        streamID: item.id,
+                        state: .buffering,
+                        lastMessage: "Buffered playback telemetry."
+                    )
+                )
+            )
+        )
+
+        XCTAssertEqual(viewModel.streams.first?.status, .running)
+        XCTAssertEqual(viewModel.selectedStream?.playerStateTitle, "Buffering")
+    }
+
+    func testPlayerControlDraftsClampAndPruneOnReload() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Drafts",
+            streamType: "hls",
+            source: "https://example.test/drafts.m3u8"
+        )
+        var viewModel = StreamAppViewModel()
+        try viewModel.reload(from: registry)
+
+        XCTAssertEqual(viewModel.volume(for: stream.id), 1.0)
+        XCTAssertFalse(viewModel.isMuted(streamID: stream.id))
+
+        viewModel.updateVolume(streamID: stream.id, volume: 1.5)
+        viewModel.updateMuted(streamID: stream.id, isMuted: true)
+        XCTAssertEqual(viewModel.volume(for: stream.id), 1.0)
+        XCTAssertTrue(viewModel.isMuted(streamID: stream.id))
+
+        _ = try registry.remove(id: stream.id)
+        try viewModel.reload(from: registry)
+
+        XCTAssertEqual(viewModel.volumeDrafts, [:])
+        XCTAssertEqual(viewModel.mutedStreamIDs, [])
     }
 
     func testRuntimeReconnectIssueProjectsLastRedactedMessageForVisibleStatus() throws {

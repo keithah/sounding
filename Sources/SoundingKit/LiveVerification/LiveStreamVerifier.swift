@@ -2,32 +2,70 @@ import Foundation
 
 /// SoundingKit-owned executor for live stream verification.
 public struct LiveStreamVerifier: Sendable {
+    private static let defaultMaxConcurrentStreams = 4
+
     public init() {}
 
-    /// Runs every stream sequentially to preserve deterministic evidence ordering.
+    /// Runs every stream concurrently while preserving deterministic evidence ordering.
     public func verify(config: LiveStreamVerificationConfig) async -> LiveStreamVerificationSummary {
-        let results = await verify(streams: config.streams)
+        let results = await verify(
+            streams: config.streams,
+            maxConcurrentStreams: config.maxConcurrentStreams
+        )
         return LiveStreamVerificationSummary(results: results)
     }
 
-    /// Runs stream specs sequentially to preserve deterministic evidence ordering.
-    public func verify(streams: [LiveStreamSpec]) async -> [LiveStreamVerificationResult] {
-        var results = [LiveStreamVerificationResult]()
-        results.reserveCapacity(streams.count)
+    /// Runs stream specs concurrently while preserving deterministic evidence ordering.
+    public func verify(
+        streams: [LiveStreamSpec],
+        maxConcurrentStreams requestedMaxConcurrentStreams: Int? = nil
+    ) async -> [LiveStreamVerificationResult] {
+        guard !streams.isEmpty else { return [] }
+        let maxConcurrentStreams = max(
+            1,
+            min(
+                requestedMaxConcurrentStreams ?? Self.defaultMaxConcurrentStreams,
+                streams.count
+            )
+        )
 
-        for stream in streams {
-            results.append(await verify(stream: stream))
+        return await withTaskGroup(of: (Int, LiveStreamVerificationResult).self) { group in
+            var nextIndex = 0
+            for _ in 0..<maxConcurrentStreams {
+                addVerificationTask(to: &group, streams: streams, index: nextIndex)
+                nextIndex += 1
+            }
+
+            var indexedResults: [(Int, LiveStreamVerificationResult)] = []
+            indexedResults.reserveCapacity(streams.count)
+            while let result = await group.next() {
+                indexedResults.append(result)
+                if nextIndex < streams.count {
+                    addVerificationTask(to: &group, streams: streams, index: nextIndex)
+                    nextIndex += 1
+                }
+            }
+            return indexedResults
+                .sorted { $0.0 < $1.0 }
+                .map(\.1)
         }
+    }
 
-        return results
+    private func addVerificationTask(
+        to group: inout TaskGroup<(Int, LiveStreamVerificationResult)>,
+        streams: [LiveStreamSpec],
+        index: Int
+    ) {
+        let stream = streams[index]
+        group.addTask {
+            (index, await verify(stream: stream))
+        }
     }
 
     /// Encodes evidence as one pretty-printed JSON summary document.
     public func encodeSummaryJSON(_ summary: LiveStreamVerificationSummary) throws -> Data {
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            return try encoder.encode(summary)
+            return try SoundingJSONCoding.prettySortedEncoder().encode(summary)
         } catch {
             throw LiveStreamVerificationError.outputFailed(String(describing: error))
         }
@@ -36,8 +74,7 @@ public struct LiveStreamVerifier: Sendable {
     /// Encodes evidence as newline-delimited JSON, one per-stream result per line.
     public func encodeResultsNDJSON(_ results: [LiveStreamVerificationResult]) throws -> Data {
         do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
+            let encoder = SoundingJSONCoding.sortedEncoder()
             var lines = [String]()
             lines.reserveCapacity(results.count)
 

@@ -96,6 +96,109 @@ final class LiveStreamVerifierTests: XCTestCase {
         XCTAssertFalse(json.contains(source), json)
     }
 
+    func testVerifiesIndependentStreamsConcurrentlyWhilePreservingResultOrder() async throws {
+        let gate = LiveVerificationConcurrencyGate()
+        MonitorPipeline.icyAdapterFactory = { source, streamType in
+            ICYMonitorAdapter(source: source, streamType: streamType) { _, _ in
+                await gate.begin(source: source)
+                try await Task.sleep(nanoseconds: 50_000_000)
+                await gate.end()
+                return ICYMonitorAdapter.OpenedStream(responseHeaders: [:], streamBytes: Data())
+            }
+        }
+        let verifier = LiveStreamVerifier()
+
+        let results = await verifier.verify(streams: [
+            LiveStreamSpec(
+                id: "first",
+                source: "https://example.test/first",
+                streamType: .icy,
+                filter: "all",
+                timeoutSeconds: 1,
+                minimumMarkers: 0
+            ),
+            LiveStreamSpec(
+                id: "second",
+                source: "https://example.test/second",
+                streamType: .icy,
+                filter: "all",
+                timeoutSeconds: 1,
+                minimumMarkers: 0
+            )
+        ])
+
+        let maxActive = await gate.maxActive()
+        XCTAssertEqual(results.map(\.id), ["first", "second"])
+        XCTAssertEqual(results.map(\.category), [.passed, .passed])
+        XCTAssertEqual(maxActive, 2)
+    }
+
+    func testConfigMaxConcurrentStreamsBoundsVerificationWork() async throws {
+        let gate = LiveVerificationConcurrencyGate()
+        MonitorPipeline.icyAdapterFactory = { source, streamType in
+            ICYMonitorAdapter(source: source, streamType: streamType) { _, _ in
+                await gate.begin(source: source)
+                try await Task.sleep(nanoseconds: 50_000_000)
+                await gate.end()
+                return ICYMonitorAdapter.OpenedStream(responseHeaders: [:], streamBytes: Data())
+            }
+        }
+        let configJSON = """
+        {
+          "maxConcurrentStreams": 2,
+          "streams": [
+            {"id":"stream-0","source":"https://example.test/stream-0","streamType":"icy","filter":"all","minimumMarkers":0,"required":true},
+            {"id":"stream-1","source":"https://example.test/stream-1","streamType":"icy","filter":"all","minimumMarkers":0,"required":true},
+            {"id":"stream-2","source":"https://example.test/stream-2","streamType":"icy","filter":"all","minimumMarkers":0,"required":true},
+            {"id":"stream-3","source":"https://example.test/stream-3","streamType":"icy","filter":"all","minimumMarkers":0,"required":true}
+          ]
+        }
+        """
+        let config = try JSONDecoder().decode(
+            LiveStreamVerificationConfig.self,
+            from: Data(configJSON.utf8)
+        )
+        XCTAssertEqual(config.maxConcurrentStreams, 2)
+        let verifier = LiveStreamVerifier()
+
+        let summary = await verifier.verify(config: config)
+
+        let maxActive = await gate.maxActive()
+        XCTAssertTrue(summary.passed)
+        XCTAssertEqual(summary.results.map(\.id), ["stream-0", "stream-1", "stream-2", "stream-3"])
+        XCTAssertLessThanOrEqual(maxActive, 2)
+    }
+
+    func testVerifyStreamsHonorsExplicitConcurrencyLimitWhilePreservingResultOrder() async throws {
+        let gate = LiveVerificationConcurrencyGate()
+        MonitorPipeline.icyAdapterFactory = { source, streamType in
+            ICYMonitorAdapter(source: source, streamType: streamType) { _, _ in
+                await gate.begin(source: source)
+                try await Task.sleep(nanoseconds: 50_000_000)
+                await gate.end()
+                return ICYMonitorAdapter.OpenedStream(responseHeaders: [:], streamBytes: Data())
+            }
+        }
+        let verifier = LiveStreamVerifier()
+        let streams = (0..<5).map { index in
+            LiveStreamSpec(
+                id: "stream-\(index)",
+                source: "https://example.test/stream-\(index)",
+                streamType: .icy,
+                filter: "all",
+                timeoutSeconds: 1,
+                minimumMarkers: 0
+            )
+        }
+
+        let results = await verifier.verify(streams: streams, maxConcurrentStreams: 2)
+
+        let maxActive = await gate.maxActive()
+        XCTAssertEqual(results.map(\.id), ["stream-0", "stream-1", "stream-2", "stream-3", "stream-4"])
+        XCTAssertEqual(results.map(\.category), Array(repeating: .passed, count: 5))
+        XCTAssertLessThanOrEqual(maxActive, 2)
+    }
+
     func testTimeoutClassifiesTimeoutWithSanitizedDiagnostic() async throws {
         MonitorPipeline.icyAdapterFactory = { source, streamType in
             ICYMonitorAdapter(source: source, streamType: streamType) { _, _ in
@@ -202,6 +305,22 @@ final class LiveStreamVerifierTests: XCTestCase {
             )
         }
     }
+}
+
+private actor LiveVerificationConcurrencyGate {
+    private var active = 0
+    private var maxActiveValue = 0
+
+    func begin(source: String) {
+        active += 1
+        maxActiveValue = max(maxActiveValue, active)
+    }
+
+    func end() {
+        active -= 1
+    }
+
+    func maxActive() -> Int { maxActiveValue }
 }
 
 private extension Optional where Wrapped == String {

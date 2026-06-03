@@ -5,6 +5,74 @@ import XCTest
 @testable import SoundingKit
 
 final class IntegratedAppUATTests: XCTestCase {
+    func testRuntimeArchivesDecodedAudioWhenStreamArchiveIsEnabled() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let archiveDirectory = temporary.fileURL.deletingLastPathComponent()
+            .appendingPathComponent("SoundingArchive-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: archiveDirectory) }
+
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "JFL",
+            streamType: .hls,
+            source: "https://example.test/live.m3u8"
+        )
+        _ = try registry.updateAudioArchive(streamID: stream.id, isEnabled: true)
+
+        let timeline = AppPlayerTimelineClock()
+        let rollingBuffer = RollingPCMBuffer(configuration: RollingBufferConfiguration.appDefault())
+        let player = DeterministicAppPCMPlayerAdapter()
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: PipelineFakeDecoder(chunks: [
+                DecodedAudioChunk(
+                    sequence: 0,
+                    segmentURI: "https://example.test/segment-0.ts",
+                    audio: Data([1, 2, 3, 4]),
+                    audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16),
+                    startSeconds: 0,
+                    endSeconds: 4,
+                    startedAt: "2026-06-02T12:00:00Z",
+                    endedAt: "2026-06-02T12:00:04Z"
+                )
+            ]),
+            transcriber: PipelineFakeTranscriber(segmentsBySequence: [
+                0: [StreamIngestPipelineTestCase.segment(text: "hello", startSeconds: 0, endSeconds: 4)]
+            ]),
+            diarizer: PipelineFakeDiarizer(),
+            player: player,
+            timeline: timeline,
+            rollingBuffer: rollingBuffer,
+            audioArchiveStore: AudioArchiveStore(
+                database: temporary.database,
+                archiveDirectory: archiveDirectory
+            ),
+            ingestMode: .singlePass
+        )
+
+        _ = try await runner.run(
+            AppStreamRuntimeRequest(
+                streamID: stream.id,
+                name: stream.name,
+                source: "https://example.test/live.m3u8",
+                sourceDescription: stream.sourceDescription,
+                streamType: .hls,
+                isDiarizationEnabled: false,
+                isAudioArchiveEnabled: true
+            )
+        )
+
+        let archived = try XCTUnwrap(
+            try AudioArchiveStore(
+                database: temporary.database,
+                archiveDirectory: archiveDirectory
+            ).frame(streamID: stream.id, seconds: 1)
+        )
+        XCTAssertEqual(archived.frame.audio, Data([1, 2, 3, 4]))
+        XCTAssertEqual(archived.frame.format.sampleRate, 44_100)
+        XCTAssertEqual(archived.frame.format.channelCount, 1)
+    }
+
     func testSyntheticTimedID3HLSFixtureProjectsPlaybackBufferMetadataAndTranscriptTimeline()
         async throws
     {
@@ -35,7 +103,7 @@ final class IntegratedAppUATTests: XCTestCase {
             player: player,
             timeline: timeline,
             rollingBuffer: rollingBuffer,
-            keepPlaybackRunningAfterIngestCompletes: true,
+            ingestMode: .livePolling(maxChunksPerPass: 1),
             livePollIntervalNanoseconds: 1_000_000,
             diarizerFactory: { enabled -> any SpeakerDiarization in
                 enabled ? SyntheticTimedID3Diarizer() : NoOpSpeakerDiarizer()
@@ -165,7 +233,7 @@ final class IntegratedAppUATTests: XCTestCase {
                 XCTAssertEqual(url, temporary.fileURL)
                 return temporary.database
             },
-            ingesterFactory: { database, configuration, timeline, rollingBuffer, _, _ in
+            ingesterFactory: { database, configuration, timeline, rollingBuffer, _, _, _ in
                 awaitOrRecord(configuration.issues, recorder: recorder)
                 return IntegratedUATIngester(
                     database: database,
@@ -175,7 +243,7 @@ final class IntegratedAppUATTests: XCTestCase {
                     recorder: recorder
                 )
             },
-            runtimeFactory: { registry, ingester, timeline, rollingBuffer, statusStore, volumeStore, player in
+            runtimeFactory: { registry, ingester, timeline, rollingBuffer, audioArchiveStore, statusStore, volumeStore, player in
                 AppStreamRuntimeService(
                     registry: registry,
                     ingester: ingester,
@@ -184,6 +252,7 @@ final class IntegratedAppUATTests: XCTestCase {
                     volumeStore: volumeStore,
                     playbackTimeline: timeline,
                     rollingBuffer: rollingBuffer,
+                    audioArchiveStore: audioArchiveStore,
                     playbackController: RecordingDeterministicPlayer(recorder: recorder)
                 )
             }
@@ -259,7 +328,7 @@ final class IntegratedAppUATTests: XCTestCase {
             String(describing: initialTimeline), temporary: temporary,
             spillDirectory: spillDirectory)
 
-        await runtime.scrubBackward(seconds: 4)
+        await runtime.scrubBackward(seconds: 4, streamID: added.id)
         let scrubbed = try await nextEvent(from: &iterator)
         state.viewModel.applyRuntimeEvent(scrubbed)
         XCTAssertEqual(scrubbed.result?.playerTimeline?.positionSeconds, 30)
@@ -269,13 +338,13 @@ final class IntegratedAppUATTests: XCTestCase {
             scrubbed.result?.playerTimeline?.lastMessage ?? ""
         )
 
-        await runtime.seekToLive()
+        await runtime.seekToLive(streamID: added.id)
         let live = try await nextEvent(from: &iterator)
         state.viewModel.applyRuntimeEvent(live)
         XCTAssertEqual(live.result?.playerTimeline?.positionSeconds, 30)
         XCTAssertEqual(live.result?.playerTimeline?.liveEdgeSeconds, 34)
 
-        await runtime.seek(to: 99)
+        await runtime.seek(to: 99, streamID: added.id)
         let unavailable = try await nextEvent(from: &iterator)
         state.viewModel.applyRuntimeEvent(unavailable)
         XCTAssertEqual(
@@ -312,7 +381,7 @@ final class IntegratedAppUATTests: XCTestCase {
         )
         XCTAssertTrue(bufferedAction.shouldSeek)
         XCTAssertEqual(bufferedAction.seekSeconds, 10)
-        await runtime.seek(to: try XCTUnwrap(bufferedAction.seekSeconds))
+        await runtime.seek(to: try XCTUnwrap(bufferedAction.seekSeconds), streamID: added.id)
         let searchSeek = try await nextEvent(from: &iterator)
         state.viewModel.applyRuntimeEvent(searchSeek)
         XCTAssertEqual(searchSeek.result?.playerTimeline?.positionSeconds, 10)

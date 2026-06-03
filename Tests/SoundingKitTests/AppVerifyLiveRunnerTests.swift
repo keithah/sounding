@@ -435,9 +435,9 @@ private struct FakeRuntimeController: AppStreamRuntimeControlling {
     func recoverFromSystemWake(reason: String) async {}
     func setVolume(streamID: Int64, volume: Double) async {}
     func setMuted(streamID: Int64, isMuted: Bool) async {}
-    func seek(to seconds: Double) async {}
-    func seekToLive() async {}
-    func scrubBackward(seconds: Double) async {}
+    func seek(to seconds: Double, streamID: Int64) async {}
+    func seekToLive(streamID: Int64) async {}
+    func scrubBackward(seconds: Double, streamID: Int64) async {}
     func snapshot() async -> AppStreamRuntimeEvent? { nil }
     func snapshot(streamID: Int64) async -> AppStreamRuntimeEvent? { nil }
     func snapshots() async -> [AppStreamRuntimeEvent] { [] }

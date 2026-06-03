@@ -117,31 +117,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-run_bounded() {
-    local timeout_seconds="$1"
-    shift
-    /usr/bin/python3 - "$timeout_seconds" "$@" <<'PY'
-import subprocess
-import sys
-
-timeout = float(sys.argv[1])
-cmd = sys.argv[2:]
-try:
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
-    sys.stdout.buffer.write(result.stdout)
-    sys.stdout.buffer.write(result.stderr)
-    sys.exit(result.returncode)
-except subprocess.TimeoutExpired as exc:
-    if exc.stdout:
-        sys.stdout.buffer.write(exc.stdout)
-    if exc.stderr:
-        sys.stdout.buffer.write(exc.stderr)
-    sys.exit(124)
-except Exception:
-    sys.exit(127)
-PY
-}
-
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -161,7 +136,7 @@ check_required_tools() {
 
     local output status
     set +e
-    output=$(run_bounded 8 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun -f notarytool 2>&1)
+    output=$(distribution_run_bounded 8 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun -f notarytool 2>&1)
     status=$?
     set -e
     if [[ "$status" -eq 124 ]]; then
@@ -173,7 +148,7 @@ check_required_tools() {
     fi
 
     set +e
-    output=$(run_bounded 8 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun -f stapler 2>&1)
+    output=$(distribution_run_bounded 8 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun -f stapler 2>&1)
     status=$?
     set -e
     if [[ "$status" -eq 124 ]]; then
@@ -190,7 +165,7 @@ check_required_tools() {
 check_xcode_project() {
     local output status
     set +e
-    output=$(run_bounded 20 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcodebuild -project "$REPO_ROOT/Sounding.xcodeproj" -list 2>&1)
+    output=$(distribution_run_bounded 20 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcodebuild -project "$REPO_ROOT/Sounding.xcodeproj" -list 2>&1)
     status=$?
     set -e
 
@@ -232,7 +207,7 @@ check_identity() {
 
     local output status
     set +e
-    output=$(run_bounded 10 /usr/bin/security find-identity -v -p codesigning 2>&1)
+    output=$(distribution_run_bounded 10 /usr/bin/security find-identity -v -p codesigning 2>&1)
     status=$?
     set -e
     if [[ "$status" -eq 124 ]]; then
@@ -258,7 +233,7 @@ check_notary_profile() {
 
     local output status
     set +e
-    output=$(run_bounded 30 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" --output-format json 2>&1)
+    output=$(distribution_run_bounded 30 /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" /usr/bin/xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" --output-format json 2>&1)
     status=$?
     set -e
     if [[ "$status" -eq 124 ]]; then

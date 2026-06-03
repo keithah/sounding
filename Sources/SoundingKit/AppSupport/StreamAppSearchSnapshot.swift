@@ -33,8 +33,8 @@ public struct StreamAppSearchRequest: Equatable, Sendable {
         self.refreshedAt = refreshedAt ?? Self.defaultRefreshTimestamp()
     }
 
-    private static func defaultRefreshTimestamp() -> String {
-        ISO8601DateFormatter().string(from: Date())
+    public static func defaultRefreshTimestamp() -> String {
+        SoundingTimestampClock.timestamp()
     }
 }
 

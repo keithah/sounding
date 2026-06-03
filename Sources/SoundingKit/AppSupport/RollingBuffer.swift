@@ -88,6 +88,15 @@ public struct RollingBufferSnapshot: Equatable, Sendable {
 public enum RollingBufferSeekResult: Equatable, Sendable {
     case available(SharedPCMFrame)
     case unavailable(requestedSeconds: Double, bufferedRange: RollingBufferRange?)
+
+    var availableStreamID: Int64? {
+        switch self {
+        case .available(let frame):
+            return frame.streamID
+        case .unavailable:
+            return nil
+        }
+    }
 }
 
 private enum RollingBufferStorage: Equatable, Sendable {
@@ -112,11 +121,39 @@ private struct RollingBufferEntry: Equatable, Sendable {
     }
 }
 
+private enum RollingBufferFrameKey: Hashable, Sendable {
+    case hls(streamID: Int64, mediaSequence: Int, segmentIdentity: String)
+    case pcm(streamID: Int64, sequence: Int, startMilliseconds: Int64, endMilliseconds: Int64)
+
+    init(_ frame: SharedPCMFrame) {
+        if let hlsIdentity = frame.hlsIdentity {
+            self = .hls(
+                streamID: frame.streamID,
+                mediaSequence: hlsIdentity.mediaSequence,
+                segmentIdentity: hlsIdentity.segmentIdentity
+            )
+            return
+        }
+
+        self = .pcm(
+            streamID: frame.streamID,
+            sequence: frame.sequence,
+            startMilliseconds: Self.milliseconds(frame.startSeconds),
+            endMilliseconds: Self.milliseconds(frame.endSeconds)
+        )
+    }
+
+    private static func milliseconds(_ seconds: Double) -> Int64 {
+        Int64((seconds * 1_000).rounded())
+    }
+}
+
 public actor RollingPCMBuffer {
     private let configuration: RollingBufferConfiguration
     private let fileManager: FileManager
     private let runID: UUID
     private var entries: [RollingBufferEntry] = []
+    private var retainedFrameKeys: Set<RollingBufferFrameKey> = []
     private var spillRoot: URL?
     private var spillAvailable = false
     private var memoryOnlyFallback = false
@@ -137,6 +174,7 @@ public actor RollingPCMBuffer {
 
     public func start(streamID: Int64? = nil) {
         entries.removeAll()
+        retainedFrameKeys.removeAll(keepingCapacity: true)
         spillBytes = 0
         evictionCount = 0
         cleanupCount = 0
@@ -158,7 +196,8 @@ public actor RollingPCMBuffer {
 
         var retainedFrameCount = 0
         for frame in frames.sorted(by: { $0.startSeconds < $1.startSeconds }) {
-            guard !containsEquivalentFrame(frame) else { continue }
+            let key = RollingBufferFrameKey(frame)
+            guard retainedFrameKeys.insert(key).inserted else { continue }
             entries.append(RollingBufferEntry(frame: frame, storage: .memory(frame.audio)))
             retainedFrameCount += 1
         }
@@ -171,20 +210,6 @@ public actor RollingPCMBuffer {
             lastMessage = "Rolling buffer stored \(retainedFrameCount) frame(s); \(entries.count) retained."
         }
         return snapshot()
-    }
-
-    private func containsEquivalentFrame(_ frame: SharedPCMFrame) -> Bool {
-        entries.contains { entry in
-            let existing = entry.frame
-            guard existing.streamID == frame.streamID else { return false }
-            if let existingHLS = existing.hlsIdentity, let frameHLS = frame.hlsIdentity {
-                return existingHLS.mediaSequence == frameHLS.mediaSequence
-                    && existingHLS.segmentIdentity == frameHLS.segmentIdentity
-            }
-            return existing.sequence == frame.sequence
-                && abs(existing.startSeconds - frame.startSeconds) < 0.001
-                && abs(existing.endSeconds - frame.endSeconds) < 0.001
-        }
     }
 
     public func seek(to seconds: Double) -> RollingBufferSeekResult {
@@ -245,6 +270,7 @@ public actor RollingPCMBuffer {
             try? fileManager.removeItem(at: spillRoot)
         }
         entries.removeAll()
+        retainedFrameKeys.removeAll(keepingCapacity: true)
         spillBytes = 0
         spillAvailable = false
         cleanupCount += removed
@@ -327,6 +353,7 @@ public actor RollingPCMBuffer {
     private func removeFirstEntry() {
         guard !entries.isEmpty else { return }
         let removed = entries.removeFirst()
+        retainedFrameKeys.remove(RollingBufferFrameKey(removed.frame))
         if case .spill(let url, let bytes) = removed.storage {
             try? fileManager.removeItem(at: url)
             spillBytes = max(0, spillBytes - bytes)

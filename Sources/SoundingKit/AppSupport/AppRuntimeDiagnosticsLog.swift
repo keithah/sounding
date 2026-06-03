@@ -8,6 +8,8 @@ import Foundation
 ///
 /// Logging is best-effort and must never break runtime recovery or playback.
 public struct AppRuntimeDiagnosticsLog: Sendable {
+    private static let writerCache = AppRuntimeDiagnosticsWriterCache()
+
     public var eventLogURL: URL
     public var failureLogURL: URL
     public var now: @Sendable () -> String
@@ -15,7 +17,7 @@ public struct AppRuntimeDiagnosticsLog: Sendable {
     public init(
         eventLogURL: URL = AppRuntimeDiagnosticsLog.defaultEventLogURL(),
         failureLogURL: URL = AppRuntimeDiagnosticsLog.defaultFailureLogURL(),
-        now: @escaping @Sendable () -> String = { ISO8601DateFormatter().string(from: Date()) }
+        now: @escaping @Sendable () -> String = { AppRuntimeDiagnosticsLog.timestampNow() }
     ) {
         self.eventLogURL = eventLogURL
         self.failureLogURL = failureLogURL
@@ -25,7 +27,7 @@ public struct AppRuntimeDiagnosticsLog: Sendable {
     /// Compatibility initializer for older tests/callers that provided a single error log URL.
     public init(
         logURL: URL,
-        now: @escaping @Sendable () -> String = { ISO8601DateFormatter().string(from: Date()) }
+        now: @escaping @Sendable () -> String = { AppRuntimeDiagnosticsLog.timestampNow() }
     ) {
         self.eventLogURL = logURL.deletingLastPathComponent()
             .appendingPathComponent("runtime-events.jsonl")
@@ -54,6 +56,14 @@ public struct AppRuntimeDiagnosticsLog: Sendable {
 
     public static func defaultLogURL() -> URL {
         defaultFailureLogURL()
+    }
+
+    public static func timestampNow() -> String {
+        SoundingTimestampClock.timestamp()
+    }
+
+    public static func closeCachedWriters() {
+        writerCache.closeAll()
     }
 
     public func recordEvent(
@@ -128,14 +138,7 @@ public struct AppRuntimeDiagnosticsLog: Sendable {
                 withIntermediateDirectories: true
             )
             let data = try JSONEncoder.sorted.encode(entry) + Data("\n".utf8)
-            if FileManager.default.fileExists(atPath: url.path) {
-                let handle = try FileHandle(forWritingTo: url)
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                try handle.write(contentsOf: data)
-            } else {
-                try data.write(to: url, options: .atomic)
-            }
+            try Self.writerCache.write(data, to: url)
         } catch {
             // Logging must never break runtime recovery or user playback.
         }
@@ -155,10 +158,44 @@ public struct AppRuntimeDiagnosticsLog: Sendable {
     }
 }
 
+private final class AppRuntimeDiagnosticsWriterCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handlesByPath: [String: FileHandle] = [:]
+
+    func write(_ data: Data, to url: URL) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let key = url.standardizedFileURL.path
+        let handle: FileHandle
+        if let cached = handlesByPath[key] {
+            handle = cached
+        } else {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            handle = try FileHandle(forWritingTo: url)
+            handlesByPath[key] = handle
+        }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+    }
+
+    func closeAll() {
+        lock.lock()
+        let handles = Array(handlesByPath.values)
+        handlesByPath.removeAll()
+        lock.unlock()
+
+        for handle in handles {
+            try? handle.synchronize()
+            try? handle.close()
+        }
+    }
+}
+
 private extension JSONEncoder {
     static var sorted: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return encoder
+        SoundingJSONCoding.sortedEncoder()
     }
 }

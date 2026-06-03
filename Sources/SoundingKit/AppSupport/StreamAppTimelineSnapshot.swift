@@ -37,7 +37,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
     }
 
     private static func defaultRefreshTimestamp() -> String {
-        ISO8601DateFormatter().string(from: Date())
+        SoundingTimestampClock.timestamp()
     }
 }
 
@@ -48,6 +48,7 @@ public struct StreamAppTimelineSnapshot: Equatable, Sendable {
     public var currentMetadata: StreamAppMetadataItem?
     public var recentMetadata: [StreamAppMetadataItem]
     public var timelineItems: [StreamAppTimelineItem]
+    public var timelineRail: StreamAppTimelineRailSnapshot
     public var diagnostics: StreamAppTimelineDiagnostics
 
     public init(
@@ -57,6 +58,10 @@ public struct StreamAppTimelineSnapshot: Equatable, Sendable {
         currentMetadata: StreamAppMetadataItem? = nil,
         recentMetadata: [StreamAppMetadataItem] = [],
         timelineItems: [StreamAppTimelineItem] = [],
+        timelineRail: StreamAppTimelineRailSnapshot = StreamAppTimelineRailSnapshot(
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 0
+        ),
         diagnostics: StreamAppTimelineDiagnostics
     ) {
         self.streamID = streamID
@@ -65,6 +70,7 @@ public struct StreamAppTimelineSnapshot: Equatable, Sendable {
         self.currentMetadata = currentMetadata
         self.recentMetadata = recentMetadata
         self.timelineItems = timelineItems
+        self.timelineRail = timelineRail
         self.diagnostics = diagnostics
     }
 }

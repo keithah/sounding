@@ -188,35 +188,6 @@ if [[ -z "$APP_VERIFY_FIXTURE_EVIDENCE" || -z "$APP_VERIFY_LIVE_EVIDENCE" ]]; th
     exit 64
 fi
 
-run_bounded_to_log() {
-    local timeout_seconds="$1"
-    local log_path="$2"
-    shift 2
-    /usr/bin/python3 - "$timeout_seconds" "$log_path" "$@" <<'PY'
-import subprocess
-import sys
-
-timeout = float(sys.argv[1])
-log_path = sys.argv[2]
-cmd = sys.argv[3:]
-try:
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, check=False)
-    with open(log_path, "ab") as handle:
-        handle.write(result.stdout)
-    sys.exit(result.returncode)
-except subprocess.TimeoutExpired as exc:
-    with open(log_path, "ab") as handle:
-        if exc.stdout:
-            handle.write(exc.stdout)
-        handle.write(b"\n[distribution-package-timeout]\n")
-    sys.exit(124)
-except Exception as exc:
-    with open(log_path, "ab") as handle:
-        handle.write(("[distribution-package-error] " + exc.__class__.__name__ + "\n").encode("utf-8"))
-    sys.exit(127)
-PY
-}
-
 prepare_workspace() {
     if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
         add_step "$DISTRIBUTION_PHASE_OUTPUT" "$DISTRIBUTION_STATUS_FAILED" "Distribution output workspace could not be created." "$DISTRIBUTION_GUIDANCE_OUTPUT"
@@ -340,7 +311,7 @@ build_app() {
     fi
     xcodebuild_args+=(build)
     set +e
-    run_bounded_to_log 900 "$build_log" \
+    distribution_run_bounded_to_log 900 "$build_log" \
         /usr/bin/env "DEVELOPER_DIR=$FULL_XCODE_DEVELOPER_DIR" \
         /usr/bin/xcodebuild \
         "${xcodebuild_args[@]}"
@@ -375,7 +346,7 @@ sign_app() {
 
     local sign_log="$LOG_DIR/codesign.log"
     set +e
-    run_bounded_to_log 120 "$sign_log" /usr/bin/codesign --force --deep --options runtime --timestamp --sign "$IDENTITY_SELECTOR" "$APP_STAGE"
+    distribution_run_bounded_to_log 120 "$sign_log" /usr/bin/codesign --force --deep --options runtime --timestamp --sign "$IDENTITY_SELECTOR" "$APP_STAGE"
     local sign_status=$?
     set -e
     if [[ "$sign_status" -ne 0 ]]; then
@@ -384,7 +355,7 @@ sign_app() {
     fi
 
     set +e
-    run_bounded_to_log 60 "$sign_log" /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_STAGE"
+    distribution_run_bounded_to_log 60 "$sign_log" /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_STAGE"
     local verify_status=$?
     set -e
     if [[ "$verify_status" -ne 0 ]]; then
@@ -405,7 +376,7 @@ notarize_and_staple_app() {
     local stapler_log="$LOG_DIR/staple-app.log"
     rm -f "$APP_ZIP_STAGE"
     set +e
-    run_bounded_to_log 180 "$notary_log" /usr/bin/ditto -c -k --keepParent "$APP_STAGE" "$APP_ZIP_STAGE"
+    distribution_run_bounded_to_log 180 "$notary_log" /usr/bin/ditto -c -k --keepParent "$APP_STAGE" "$APP_ZIP_STAGE"
     local zip_status=$?
     set -e
     if [[ "$zip_status" -ne 0 ]]; then
@@ -414,7 +385,7 @@ notarize_and_staple_app() {
     fi
 
     set +e
-    run_bounded_to_log 1800 "$notary_log" /usr/bin/xcrun notarytool submit "$APP_ZIP_STAGE" --keychain-profile "$NOTARY_PROFILE" --wait
+    distribution_run_bounded_to_log 1800 "$notary_log" /usr/bin/xcrun notarytool submit "$APP_ZIP_STAGE" --keychain-profile "$NOTARY_PROFILE" --wait
     local notary_status=$?
     set -e
     if [[ "$notary_status" -eq 124 ]]; then
@@ -429,7 +400,7 @@ notarize_and_staple_app() {
     add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "App notarization completed." "Continue with app stapling."
 
     set +e
-    run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$APP_STAGE"
+    distribution_run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$APP_STAGE"
     local staple_status=$?
     set -e
     if [[ "$staple_status" -ne 0 ]]; then
@@ -457,7 +428,7 @@ create_dmg() {
         return 1
     fi
     set +e
-    run_bounded_to_log 180 "$dmg_log" /usr/bin/hdiutil create -volname Sounding -srcfolder "$DMG_PAYLOAD" -ov -format UDZO "$DMG_STAGE"
+    distribution_run_bounded_to_log 180 "$dmg_log" /usr/bin/hdiutil create -volname Sounding -srcfolder "$DMG_PAYLOAD" -ov -format UDZO "$DMG_STAGE"
     local create_status=$?
     set -e
     if [[ "$create_status" -ne 0 ]]; then
@@ -465,7 +436,7 @@ create_dmg() {
         return 1
     fi
     set +e
-    run_bounded_to_log 60 "$dmg_log" /usr/bin/hdiutil verify "$DMG_STAGE"
+    distribution_run_bounded_to_log 60 "$dmg_log" /usr/bin/hdiutil verify "$DMG_STAGE"
     local verify_status=$?
     set -e
     if [[ "$verify_status" -ne 0 ]]; then
@@ -474,9 +445,9 @@ create_dmg() {
     fi
     if [[ "$DRY_RUN" -eq 0 ]]; then
         set +e
-        run_bounded_to_log 120 "$dmg_log" /usr/bin/codesign --force --timestamp --sign "$IDENTITY_SELECTOR" "$DMG_STAGE"
+        distribution_run_bounded_to_log 120 "$dmg_log" /usr/bin/codesign --force --timestamp --sign "$IDENTITY_SELECTOR" "$DMG_STAGE"
         local dmg_sign_status=$?
-        run_bounded_to_log 60 "$dmg_log" /usr/bin/codesign --verify --verbose=2 "$DMG_STAGE"
+        distribution_run_bounded_to_log 60 "$dmg_log" /usr/bin/codesign --verify --verbose=2 "$DMG_STAGE"
         local dmg_verify_status=$?
         set -e
         if [[ "$dmg_sign_status" -ne 0 || "$dmg_verify_status" -ne 0 ]]; then
@@ -502,7 +473,7 @@ notarize_dmg_and_assess() {
     local gatekeeper_log="$LOG_DIR/gatekeeper.log"
 
     set +e
-    run_bounded_to_log 1800 "$notary_log" /usr/bin/xcrun notarytool submit "$DMG_STAGE" --keychain-profile "$NOTARY_PROFILE" --wait
+    distribution_run_bounded_to_log 1800 "$notary_log" /usr/bin/xcrun notarytool submit "$DMG_STAGE" --keychain-profile "$NOTARY_PROFILE" --wait
     local notary_status=$?
     set -e
     if [[ "$notary_status" -eq 124 ]]; then
@@ -517,7 +488,7 @@ notarize_dmg_and_assess() {
     add_step "$DISTRIBUTION_PHASE_NOTARY_SUBMIT" "$DISTRIBUTION_STATUS_READY" "DMG notarization completed." "Continue with DMG stapling and assessment."
 
     set +e
-    run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$DMG_STAGE"
+    distribution_run_bounded_to_log 180 "$stapler_log" /usr/bin/xcrun stapler staple "$DMG_STAGE"
     local staple_dmg_status=$?
     set -e
     if [[ "$staple_dmg_status" -ne 0 ]]; then
@@ -527,9 +498,9 @@ notarize_dmg_and_assess() {
     add_step "$DISTRIBUTION_PHASE_STAPLE" "$DISTRIBUTION_STATUS_READY" "DMG stapling completed." "Continue with Gatekeeper assessment."
 
     set +e
-    run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type execute --verbose=2 "$APP_STAGE"
+    distribution_run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type execute --verbose=2 "$APP_STAGE"
     local app_assess_status=$?
-    run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_STAGE"
+    distribution_run_bounded_to_log 120 "$gatekeeper_log" /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG_STAGE"
     local dmg_assess_status=$?
     set -e
     if [[ "$app_assess_status" -ne 0 || "$dmg_assess_status" -ne 0 ]]; then

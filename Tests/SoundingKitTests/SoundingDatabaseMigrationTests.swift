@@ -48,6 +48,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "stream_app_speaker_overrides",
                 "stream_runtime_status",
                 "hls_ingest_segments",
+                "audio_archive_segments",
                 "grdb_migrations"
             ]
         )
@@ -73,7 +74,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "acoustid_lookup_cache": columnNames(in: "acoustid_lookup_cache", db),
                 "stream_app_speaker_overrides": columnNames(in: "stream_app_speaker_overrides", db),
                 "stream_runtime_status": columnNames(in: "stream_runtime_status", db),
-                "hls_ingest_segments": columnNames(in: "hls_ingest_segments", db)
+                "hls_ingest_segments": columnNames(in: "hls_ingest_segments", db),
+                "audio_archive_segments": columnNames(in: "audio_archive_segments", db)
             ]
         }
 
@@ -89,7 +91,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "resumed_at",
             "removed_at",
             "source_url",
-            "diarization_enabled"
+            "diarization_enabled",
+            "audio_archive_enabled"
         ])
         XCTAssertEqual(columnsByTable["ingest_runs"], [
             "id",
@@ -263,6 +266,21 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "finalized_at",
             "updated_at"
         ])
+        XCTAssertEqual(columnsByTable["audio_archive_segments"], [
+            "id",
+            "stream_id",
+            "run_id",
+            "chunk_id",
+            "sequence",
+            "start_seconds",
+            "end_seconds",
+            "sample_rate",
+            "channel_count",
+            "byte_count",
+            "sha256",
+            "relative_path",
+            "created_at"
+        ])
     }
 
     func testTimelineAndStreamManagementMigrationsCreateIndexes() throws {
@@ -273,7 +291,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 SELECT name
                 FROM sqlite_master
                 WHERE type = 'index'
-                  AND tbl_name IN ('streams', 'ingest_diagnostics', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides', 'stream_runtime_status', 'hls_ingest_segments')
+                  AND tbl_name IN ('streams', 'ingest_diagnostics', 'audio_fingerprints', 'songs', 'song_plays', 'acoustid_lookup_cache', 'stream_app_speaker_overrides', 'stream_runtime_status', 'hls_ingest_segments', 'audio_archive_segments', 'transcript_segments', 'transcript_words', 'speaker_turns', 'ad_events')
                 ORDER BY name
                 """))
         }
@@ -292,9 +310,15 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "songs_on_isrc",
             "songs_on_display_name",
             "song_plays_on_stream_run_time",
+            "song_plays_on_stream_start_id",
             "song_plays_on_run_time",
             "song_plays_on_song_id",
             "song_plays_on_last_chunk_id",
+            "transcript_segments_on_run_end_start_id",
+            "transcript_segments_on_run_start_id",
+            "transcript_words_on_segment_sequence_id",
+            "speaker_turns_on_chunk_start_end",
+            "ad_events_on_run_pts_observed_id",
             "stream_app_speaker_overrides_on_stream_label",
             "stream_app_speaker_overrides_on_stream_id",
             "stream_runtime_status_on_phase",
@@ -306,7 +330,9 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "hls_ingest_segments_on_stream_sequence",
             "hls_ingest_segments_on_claimed_run_id",
             "hls_ingest_segments_on_chunk_id",
-            "hls_ingest_segments_on_updated_at"
+            "hls_ingest_segments_on_updated_at",
+            "audio_archive_segments_on_stream_time",
+            "audio_archive_segments_on_run_chunk"
         ]))
     }
 
@@ -342,25 +368,34 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
     func testNewMigratedDatabaseStartsWithEmptyBaselineTables() throws {
         let temporary = try TemporarySoundingDatabase()
 
-        let rowCounts = try temporary.database.read { db in
-            try [
-                "streams": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM streams"),
-                "ingest_runs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_runs"),
-                "ingest_chunks": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_chunks"),
-                "ad_events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
-                "ingest_diagnostics": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ingest_diagnostics"),
-                "transcript_segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
-                "transcript_words": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_words"),
-                "speaker_turns": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM speaker_turns"),
-                "transcript_segments_fts": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments_fts"),
-                "audio_fingerprints": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM audio_fingerprints"),
-                "songs": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM songs"),
-                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
-                "acoustid_lookup_cache": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM acoustid_lookup_cache"),
-                "stream_app_speaker_overrides": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_app_speaker_overrides"),
-                "stream_runtime_status": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stream_runtime_status"),
-                "hls_ingest_segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM hls_ingest_segments")
-            ]
+        let tableNames = [
+            "streams",
+            "ingest_runs",
+            "ingest_chunks",
+            "ad_events",
+            "ingest_diagnostics",
+            "transcript_segments",
+            "transcript_words",
+            "speaker_turns",
+            "transcript_segments_fts",
+            "audio_fingerprints",
+            "songs",
+            "song_plays",
+            "acoustid_lookup_cache",
+            "stream_app_speaker_overrides",
+            "stream_runtime_status",
+            "hls_ingest_segments",
+            "audio_archive_segments",
+        ]
+        let rowCounts = try temporary.database.read { db -> [String: Int?] in
+            var counts: [String: Int?] = [:]
+            for tableName in tableNames {
+                counts[tableName] = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM \(tableName)"
+                )
+            }
+            return counts
         }
 
         XCTAssertEqual(rowCounts, [
@@ -379,7 +414,8 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
             "acoustid_lookup_cache": 0,
             "stream_app_speaker_overrides": 0,
             "stream_runtime_status": 0,
-            "hls_ingest_segments": 0
+            "hls_ingest_segments": 0,
+            "audio_archive_segments": 0
         ])
     }
 

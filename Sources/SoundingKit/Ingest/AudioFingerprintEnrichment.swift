@@ -66,7 +66,7 @@ public struct AcoustIDAudioFingerprintEnricher: AudioFingerprintEnriching {
     public init(
         cache: any AcoustIDLookupCaching,
         lookup: any AcoustIDLookuping,
-        now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
+        now: @escaping TimestampProvider = { SoundingTimestampClock.timestamp() }
     ) {
         self.cache = cache
         self.lookup = lookup

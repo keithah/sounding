@@ -14,6 +14,7 @@ public struct StreamRecord: Equatable, Sendable {
     public var sourceDescription: String
     public var status: StreamStatus
     public var diarizationEnabled: Bool
+    public var audioArchiveEnabled: Bool
     public var createdAt: String
     public var updatedAt: String
     public var pausedAt: String?
@@ -27,6 +28,7 @@ public struct StreamRecord: Equatable, Sendable {
         sourceDescription: String,
         status: StreamStatus,
         diarizationEnabled: Bool = false,
+        audioArchiveEnabled: Bool = false,
         createdAt: String,
         updatedAt: String,
         pausedAt: String?,
@@ -39,11 +41,16 @@ public struct StreamRecord: Equatable, Sendable {
         self.sourceDescription = sourceDescription
         self.status = status
         self.diarizationEnabled = diarizationEnabled
+        self.audioArchiveEnabled = audioArchiveEnabled
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.pausedAt = pausedAt
         self.resumedAt = resumedAt
         self.removedAt = removedAt
+    }
+
+    public var resolvedStreamType: StreamType? {
+        StreamType(rawValue: streamType)
     }
 }
 
@@ -54,6 +61,29 @@ public struct StreamReconnectSource: Equatable, Sendable {
     public var source: String
     public var sourceDescription: String
     public var diarizationEnabled: Bool
+    public var audioArchiveEnabled: Bool
+
+    public init(
+        streamID: Int64,
+        name: String,
+        streamType: String,
+        source: String,
+        sourceDescription: String,
+        diarizationEnabled: Bool = false,
+        audioArchiveEnabled: Bool = false
+    ) {
+        self.streamID = streamID
+        self.name = name
+        self.streamType = streamType
+        self.source = source
+        self.sourceDescription = sourceDescription
+        self.diarizationEnabled = diarizationEnabled
+        self.audioArchiveEnabled = audioArchiveEnabled
+    }
+
+    public var resolvedStreamType: StreamType? {
+        StreamType(rawValue: streamType)
+    }
 }
 
 public struct StreamMutationResult: Equatable, Sendable {
@@ -134,6 +164,20 @@ public final class StreamRegistry {
         }
     }
 
+    public func add(
+        name: String,
+        streamType: StreamType,
+        source: String,
+        createdAt: String? = nil
+    ) throws -> StreamRecord {
+        try add(
+            name: name,
+            streamType: streamType.rawValue,
+            source: source,
+            createdAt: createdAt
+        )
+    }
+
     public func list(includeRemoved: Bool = false) throws -> [StreamRecord] {
         do {
             return try database.read { db in
@@ -142,8 +186,10 @@ public final class StreamRegistry {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                        SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
-                               paused_at, resumed_at, removed_at
+                        SELECT id, name, stream_type, source, status,
+                               COALESCE(diarization_enabled, 0) AS diarization_enabled,
+                               COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                               created_at, updated_at, paused_at, resumed_at, removed_at
                         FROM streams
                         WHERE name IS NOT NULL
                         ORDER BY name COLLATE NOCASE, id
@@ -153,8 +199,10 @@ public final class StreamRegistry {
                     rows = try Row.fetchAll(
                         db,
                         sql: """
-                        SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
-                               paused_at, resumed_at, removed_at
+                        SELECT id, name, stream_type, source, status,
+                               COALESCE(diarization_enabled, 0) AS diarization_enabled,
+                               COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                               created_at, updated_at, paused_at, resumed_at, removed_at
                         FROM streams
                         WHERE name IS NOT NULL
                           AND removed_at IS NULL
@@ -309,6 +357,22 @@ public final class StreamRegistry {
         }
     }
 
+    public func update(
+        id: Int64,
+        name: String,
+        streamType: StreamType,
+        source: String,
+        updatedAt: String? = nil
+    ) throws -> StreamMutationResult {
+        try update(
+            id: id,
+            name: name,
+            streamType: streamType.rawValue,
+            source: source,
+            updatedAt: updatedAt
+        )
+    }
+
     public func setDiarizationEnabled(
         id: Int64,
         isEnabled: Bool,
@@ -321,6 +385,26 @@ public final class StreamRegistry {
                 sql: """
                 UPDATE streams
                 SET diarization_enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                arguments: [isEnabled, updatedAt, record.id]
+            )
+            return true
+        }
+    }
+
+    public func updateAudioArchive(
+        streamID: Int64,
+        isEnabled: Bool,
+        updatedAt: String? = nil
+    ) throws -> StreamMutationResult {
+        let updatedAt = updatedAt ?? Self.nowString()
+        return try transition(id: streamID, at: updatedAt, includeRemoved: false) { record, db in
+            guard record.audioArchiveEnabled != isEnabled else { return false }
+            try db.execute(
+                sql: """
+                UPDATE streams
+                SET audio_archive_enabled = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 arguments: [isEnabled, updatedAt, record.id]
@@ -406,8 +490,10 @@ public final class StreamRegistry {
         return try Row.fetchOne(
             db,
             sql: """
-            SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
-                   paused_at, resumed_at, removed_at
+            SELECT id, name, stream_type, source, status,
+                   COALESCE(diarization_enabled, 0) AS diarization_enabled,
+                   COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                   created_at, updated_at, paused_at, resumed_at, removed_at
             FROM streams
             WHERE id = ?
               AND name IS NOT NULL
@@ -423,8 +509,10 @@ public final class StreamRegistry {
         return try Row.fetchOne(
             db,
             sql: """
-            SELECT id, name, stream_type, source, status, diarization_enabled, created_at, updated_at,
-                   paused_at, resumed_at, removed_at
+            SELECT id, name, stream_type, source, status,
+                   COALESCE(diarization_enabled, 0) AS diarization_enabled,
+                   COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                   created_at, updated_at, paused_at, resumed_at, removed_at
             FROM streams
             WHERE name = ?
               \(removedClause)
@@ -440,7 +528,9 @@ public final class StreamRegistry {
         return try Row.fetchOne(
             db,
             sql: """
-            SELECT id, name, stream_type, source, source_url, status, diarization_enabled
+            SELECT id, name, stream_type, source, source_url, status,
+                   COALESCE(diarization_enabled, 0) AS diarization_enabled,
+                   COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled
             FROM streams
             WHERE id = ?
               AND name IS NOT NULL
@@ -463,6 +553,7 @@ public final class StreamRegistry {
             sourceDescription: row["source"],
             status: status,
             diarizationEnabled: row["diarization_enabled"],
+            audioArchiveEnabled: row["audio_archive_enabled"],
             createdAt: row["created_at"],
             updatedAt: row["updated_at"],
             pausedAt: row["paused_at"],
@@ -484,7 +575,8 @@ public final class StreamRegistry {
             streamType: row["stream_type"],
             source: sourceURL ?? sourceDescription,
             sourceDescription: sourceDescription,
-            diarizationEnabled: row["diarization_enabled"]
+            diarizationEnabled: row["diarization_enabled"],
+            audioArchiveEnabled: row["audio_archive_enabled"]
         )
     }
 
@@ -493,7 +585,7 @@ public final class StreamRegistry {
     }
 
     private static func nowString() -> String {
-        ISO8601DateFormatter().string(from: Date())
+        SoundingTimestampClock.timestamp()
     }
 }
 

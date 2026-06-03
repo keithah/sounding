@@ -133,15 +133,25 @@ final class MultiStreamIngestSupervisorTests: XCTestCase {
             StreamIngestRequest(source: "https://user:pass@example.test/healthy.m3u8?token=secret", streamType: .hls, maxChunks: 1)
         ])
 
-        XCTAssertEqual(outcomes.map(\.status), [.failed, .completed])
-        XCTAssertEqual(outcomes[0].processedChunks, 0)
-        XCTAssertEqual(outcomes[0].diagnosticCount, 1)
-        XCTAssertNotNil(outcomes[0].streamID)
-        XCTAssertNotNil(outcomes[0].runID)
-        XCTAssertTrue(outcomes[0].errorDescription?.contains("[redacted-path]") ?? false, outcomes[0].errorDescription ?? "nil")
-        XCTAssertFalse(outcomes[0].errorDescription?.contains("user:pass") ?? true, outcomes[0].errorDescription ?? "nil")
-        XCTAssertFalse(outcomes[0].errorDescription?.contains("token=secret") ?? true, outcomes[0].errorDescription ?? "nil")
-        XCTAssertEqual(outcomes[1].processedChunks, 1)
+        let failedOutcome = try XCTUnwrap(outcomes.first { $0.status == .failed })
+        let completedOutcome = try XCTUnwrap(outcomes.first { $0.status == .completed })
+        XCTAssertEqual(failedOutcome.processedChunks, 0)
+        XCTAssertEqual(failedOutcome.diagnosticCount, 1)
+        XCTAssertNotNil(failedOutcome.streamID)
+        XCTAssertNotNil(failedOutcome.runID)
+        XCTAssertTrue(
+            failedOutcome.errorDescription?.contains("[redacted-path]") ?? false,
+            failedOutcome.errorDescription ?? "nil"
+        )
+        XCTAssertFalse(
+            failedOutcome.errorDescription?.contains("user:pass") ?? true,
+            failedOutcome.errorDescription ?? "nil"
+        )
+        XCTAssertFalse(
+            failedOutcome.errorDescription?.contains("token=secret") ?? true,
+            failedOutcome.errorDescription ?? "nil"
+        )
+        XCTAssertEqual(completedOutcome.processedChunks, 1)
 
         let persisted = try temporary.database.read { db in
             try Row.fetchAll(
@@ -167,6 +177,38 @@ final class MultiStreamIngestSupervisorTests: XCTestCase {
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first?.identity.streamSource, "https://example.test/healthy.m3u8")
         XCTAssertEqual(results.first?.identity.speakerLabel, "healthy-speaker")
+    }
+
+    func testSupervisorLimitsConcurrentRequestExecutionWhenMaximumAllowsMoreStreams() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let factory = DelayedDecoderFactory()
+        let supervisor = MultiStreamIngestSupervisor(
+            database: temporary.database,
+            maximumRequests: 3,
+            maxConcurrentRequests: 1,
+            decoderFactory: { request in try await factory.decoder(for: request) },
+            transcriber: TrackingTranscriber(gate: MLGate()),
+            diarizer: TrackingDiarizer(gate: MLGate()),
+            now: { "2026-05-01T00:00:00Z" }
+        )
+
+        let outcomes = try await supervisor.run([
+            StreamIngestRequest(source: "https://example.test/one.m3u8", streamType: .hls, maxChunks: 1),
+            StreamIngestRequest(source: "https://example.test/two.m3u8", streamType: .hls, maxChunks: 1),
+            StreamIngestRequest(source: "https://example.test/three.m3u8", streamType: .hls, maxChunks: 1)
+        ])
+
+        let statuses: [IngestRunStatus] = outcomes.map(\.status)
+        let maxActive = await factory.maxActive()
+        let requestedSources = await factory.requestedSources()
+
+        XCTAssertEqual(statuses, [.completed, .completed, .completed])
+        XCTAssertEqual(maxActive, 1)
+        XCTAssertEqual(requestedSources, [
+            "https://example.test/one.m3u8",
+            "https://example.test/two.m3u8",
+            "https://example.test/three.m3u8"
+        ])
     }
 
     func testValidationRejectsEmptyTooManyAndUnboundedRequestsBeforeFactoryStarts() async throws {
@@ -411,6 +453,33 @@ private actor CountingDecoderFactory {
     }
 
     func requestCount() -> Int { count }
+}
+
+private actor DelayedDecoderFactory {
+    private var active = 0
+    private var maxActiveValue = 0
+    private var sources: [String] = []
+
+    func decoder(for request: StreamIngestRequest) async throws -> any AudioDecoding {
+        sources.append(request.source)
+        active += 1
+        maxActiveValue = max(maxActiveValue, active)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        active -= 1
+        return StaticDecoder(chunks: [
+            DecodedAudioChunk(
+                sequence: 0,
+                audio: Data([0x01]),
+                startSeconds: 0,
+                endSeconds: 1,
+                startedAt: "2026-05-01T00:00:00Z",
+                endedAt: "2026-05-01T00:00:01Z"
+            )
+        ])
+    }
+
+    func maxActive() -> Int { maxActiveValue }
+    func requestedSources() -> [String] { sources }
 }
 
 private struct FakeIngestError: Error, CustomStringConvertible {

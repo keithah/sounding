@@ -77,6 +77,10 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.currentMetadata?.title, "Fixture Song")
         XCTAssertEqual(snapshot.currentMetadata?.artist, "Fixture Artist")
         XCTAssertEqual(snapshot.recentMetadata.map(\.title), ["Fixture Song"])
+        XCTAssertEqual(snapshot.timelineRail.visibleStartSeconds, 0)
+        XCTAssertEqual(snapshot.timelineRail.visibleEndSeconds, 35)
+        XCTAssertEqual(snapshot.timelineRail.spans.map(\.title), ["Fixture Song"])
+        XCTAssertEqual(snapshot.timelineRail.markers.map(\.title), ["AD_START", "AD_END"])
         XCTAssertEqual(snapshot.diagnostics.bufferedSeekUnavailableMessage, "Requested 40s is unavailable (available range 10-30s).")
     }
 
@@ -315,7 +319,7 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertFalse(snapshot.timelineItems.contains { $0.title.hasPrefix("Unknown song") })
     }
 
-    func testTimelineCollapsesConsecutiveSongMetadataToLatestVisibleChange() throws {
+    func testTimelineKeepsDistinctConsecutiveSongMetadataChanges() throws {
         let fixture = try makeFixture()
         let writer = IngestPersistence(database: fixture.temporary.database)
         let runID = try writer.createRun(
@@ -371,7 +375,7 @@ final class StreamAppTimelineStoreTests: XCTestCase {
 
         XCTAssertEqual(
             snapshot.timelineItems.filter { $0.kind == .song }.map(\.title),
-            ["Fixture Song", "Current chunk song"]
+            ["Fixture Song", "First stale", "Second stale", "Current chunk song"]
         )
     }
 

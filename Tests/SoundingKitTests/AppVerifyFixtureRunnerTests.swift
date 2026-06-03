@@ -379,7 +379,6 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
                     timeline: timeline,
                     rollingBuffer: rollingBuffer,
                     diagnosticsLog: diagnosticsLog,
-                    keepPlaybackRunningAfterIngestCompletes: false,
                     now: now
                 )
             }
@@ -442,7 +441,6 @@ final class AppVerifyFixtureRunnerTests: XCTestCase {
                     timeline: timeline,
                     rollingBuffer: rollingBuffer,
                     diagnosticsLog: diagnosticsLog,
-                    keepPlaybackRunningAfterIngestCompletes: false,
                     now: now
                 ),
                 database: database,

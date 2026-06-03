@@ -122,22 +122,17 @@ public struct StreamAppTimelineStore: Sendable {
                     request: request, lowerBound: lowerBound, db: db)
                 let eventMetadata = try fetchEventMetadata(
                     request: request, lowerBound: lowerBound, db: db)
-                let metadata = coalescedMetadataChanges(songMetadata + eventMetadata)
-                let recentMetadata = Array(
-                    metadata
-                        .filter { $0.kind == .song }
-                        .sorted(by: metadataSort)
-                        .prefix(request.metadataLimit)
-                )
-                let currentMetadata = currentMetadataItem(
-                    in: metadata.filter { $0.kind == .song },
-                    playerPosition: request.player?.positionSeconds
-                )
-                let timelineItems = makeTimelineItems(
+                let projection = StreamAppTimelineProjection(
                     paragraphs: paragraphs,
-                    metadata: metadata,
-                    player: request.player,
-                    limit: request.timelineLimit
+                    metadata: songMetadata + eventMetadata,
+                    player: request.player
+                )
+                let recentMetadata = projection.recentMetadata(limit: request.metadataLimit)
+                let currentMetadata = projection.currentMetadata()
+                let timelineItems = projection.timelineItems(limit: request.timelineLimit)
+                let timelineRail = makeTimelineRail(
+                    request: request,
+                    timelineItems: timelineItems
                 )
                 let latestSegmentEnd = try latestSegmentEndSeconds(
                     streamID: request.streamID, db: db)
@@ -153,6 +148,7 @@ public struct StreamAppTimelineStore: Sendable {
                     currentMetadata: currentMetadata,
                     recentMetadata: recentMetadata,
                     timelineItems: timelineItems,
+                    timelineRail: timelineRail,
                     diagnostics: diagnostics
                 )
             }
@@ -170,121 +166,7 @@ public struct StreamAppTimelineStore: Sendable {
 
     @discardableResult
     public func clearTimeline(streamID: Int64) throws -> Int {
-        guard streamID > 0 else { throw StreamAppTimelineStoreError.invalidStreamID }
-
-        do {
-            return try database.write { db in
-                guard try streamExists(streamID, db: db) else {
-                    throw StreamAppTimelineStoreError.streamNotFound
-                }
-
-                let runIDs = try Int64.fetchAll(
-                    db,
-                    sql: "SELECT id FROM ingest_runs WHERE stream_id = ?",
-                    arguments: [streamID]
-                )
-                let segmentIDs = try Int64.fetchAll(
-                    db,
-                    sql: """
-                        SELECT transcript_segments.id
-                        FROM transcript_segments
-                        JOIN ingest_runs ON ingest_runs.id = transcript_segments.run_id
-                        WHERE ingest_runs.stream_id = ?
-                    """,
-                    arguments: [streamID]
-                )
-                var deletedCount = 0
-
-                if !segmentIDs.isEmpty {
-                    let placeholders = sqlPlaceholders(count: segmentIDs.count)
-                    let arguments = StatementArguments(segmentIDs)
-                    deletedCount += try Int.fetchOne(
-                        db,
-                        sql: "SELECT COUNT(*) FROM transcript_words WHERE segment_id IN (\(placeholders))",
-                        arguments: arguments
-                    ) ?? 0
-                    try db.execute(
-                        sql: "DELETE FROM transcript_words WHERE segment_id IN (\(placeholders))",
-                        arguments: arguments
-                    )
-                    deletedCount += try Int.fetchOne(
-                        db,
-                        sql: "SELECT COUNT(*) FROM transcript_segments_fts WHERE rowid IN (\(placeholders))",
-                        arguments: arguments
-                    ) ?? 0
-                    try db.execute(
-                        sql: "DELETE FROM transcript_segments_fts WHERE rowid IN (\(placeholders))",
-                        arguments: arguments
-                    )
-                    deletedCount += segmentIDs.count
-                    try db.execute(
-                        sql: "DELETE FROM transcript_segments WHERE id IN (\(placeholders))",
-                        arguments: arguments
-                    )
-                }
-
-                if !runIDs.isEmpty {
-                    let placeholders = sqlPlaceholders(count: runIDs.count)
-                    let arguments = StatementArguments(runIDs)
-                    deletedCount += try deleteCounted(
-                        table: "speaker_turns",
-                        whereClause: "run_id IN (\(placeholders))",
-                        arguments: arguments,
-                        db: db
-                    )
-                    deletedCount += try deleteCounted(
-                        table: "ad_events",
-                        whereClause: "run_id IN (\(placeholders))",
-                        arguments: arguments,
-                        db: db
-                    )
-                }
-
-                deletedCount += try deleteCounted(
-                    table: "song_plays",
-                    whereClause: "stream_id = ?",
-                    arguments: [streamID],
-                    db: db
-                )
-                deletedCount += try deleteCounted(
-                    table: "audio_fingerprints",
-                    whereClause: "stream_id = ?",
-                    arguments: [streamID],
-                    db: db
-                )
-                deletedCount += try deleteCounted(
-                    table: "hls_ingest_segments",
-                    whereClause: "stream_id = ?",
-                    arguments: [streamID],
-                    db: db
-                )
-
-                return deletedCount
-            }
-        } catch let error as StreamAppTimelineStoreError {
-            throw error
-        } catch {
-            throw StreamAppTimelineStoreError.databaseWriteFailed
-        }
-    }
-
-    private func deleteCounted(
-        table: String,
-        whereClause: String,
-        arguments: StatementArguments,
-        db: Database
-    ) throws -> Int {
-        let count = try Int.fetchOne(
-            db,
-            sql: "SELECT COUNT(*) FROM \(table) WHERE \(whereClause)",
-            arguments: arguments
-        ) ?? 0
-        guard count > 0 else { return 0 }
-        try db.execute(
-            sql: "DELETE FROM \(table) WHERE \(whereClause)",
-            arguments: arguments
-        )
-        return count
+        try StreamAppTimelineMutationStore(database: database).clearTimeline(streamID: streamID)
     }
 
     public func updateSpeakerDisplay(
@@ -294,35 +176,13 @@ public struct StreamAppTimelineStore: Sendable {
         colorToken: String? = nil,
         updatedAt: String? = nil
     ) throws {
-        guard streamID > 0 else { throw StreamAppTimelineStoreError.invalidStreamID }
-        let rawLabel = try validateRawSpeakerLabel(rawLabel)
-        let displayLabel = try validateDisplayLabel(displayLabel)
-        let colorToken = try validateColorToken(colorToken ?? fallbackColorToken(for: rawLabel))
-        let updatedAt = updatedAt ?? ISO8601DateFormatter().string(from: Date())
-
-        do {
-            try database.write { db in
-                guard try streamExists(streamID, db: db) else {
-                    throw StreamAppTimelineStoreError.streamNotFound
-                }
-                try db.execute(
-                    sql: """
-                        INSERT INTO stream_app_speaker_overrides (
-                            stream_id, raw_label, display_label, color_token, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(stream_id, raw_label) DO UPDATE SET
-                            display_label = excluded.display_label,
-                            color_token = excluded.color_token,
-                            updated_at = excluded.updated_at
-                        """,
-                    arguments: [streamID, rawLabel, displayLabel, colorToken, updatedAt, updatedAt]
-                )
-            }
-        } catch let error as StreamAppTimelineStoreError {
-            throw error
-        } catch {
-            throw StreamAppTimelineStoreError.databaseWriteFailed
-        }
+        try StreamAppTimelineMutationStore(database: database).updateSpeakerDisplay(
+            streamID: streamID,
+            rawLabel: rawLabel,
+            displayLabel: displayLabel,
+            colorToken: colorToken,
+            updatedAt: updatedAt
+        )
     }
 
     private func validate(_ request: StreamAppTimelineRequest) throws {
@@ -345,30 +205,6 @@ public struct StreamAppTimelineStore: Sendable {
         if let focusedSegmentID = request.focusedSegmentID, focusedSegmentID <= 0 {
             throw StreamAppTimelineStoreError.invalidFocusedSegmentID
         }
-    }
-
-    private func validateRawSpeakerLabel(_ value: String) throws -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw StreamAppTimelineStoreError.emptyRawSpeakerLabel }
-        return trimmed
-    }
-
-    private func validateDisplayLabel(_ value: String) throws -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw StreamAppTimelineStoreError.emptyDisplayLabel }
-        guard trimmed.count <= Self.maximumDisplayLabelLength else {
-            throw StreamAppTimelineStoreError.displayLabelTooLong(
-                max: Self.maximumDisplayLabelLength)
-        }
-        return trimmed
-    }
-
-    private func validateColorToken(_ value: String) throws -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard Self.allowedColorTokens.contains(trimmed) else {
-            throw StreamAppTimelineStoreError.invalidColorToken(value)
-        }
-        return trimmed
     }
 
     private func streamExists(_ streamID: Int64, db: Database) throws -> Bool {
@@ -729,7 +565,7 @@ public struct StreamAppTimelineStore: Sendable {
                     songs.artist,
                     songs.display_name,
                     songs.album
-                FROM song_plays INDEXED BY song_plays_on_stream_run_time
+                FROM song_plays INDEXED BY song_plays_on_stream_start_id
                 JOIN ingest_runs ON ingest_runs.id = song_plays.run_id
                 JOIN songs ON songs.id = song_plays.song_id
                 WHERE song_plays.stream_id = ?
@@ -854,8 +690,10 @@ public struct StreamAppTimelineStore: Sendable {
 
     private func timestamp(runStartedAt: String, offsetSeconds: Double) -> String? {
         guard offsetSeconds.isFinite else { return nil }
-        guard let runStart = ISO8601DateFormatter().date(from: runStartedAt) else { return nil }
-        return ISO8601DateFormatter().string(from: runStart.addingTimeInterval(offsetSeconds))
+        return StreamAppTimelineTimestampFormatter.timestamp(
+            runStartedAt: runStartedAt,
+            offsetSeconds: offsetSeconds
+        )
     }
 
     private func sqlPlaceholders(count: Int) -> String {
@@ -872,6 +710,25 @@ public struct StreamAppTimelineStore: Sendable {
                 WHERE ingest_runs.stream_id = ?
                 """,
             arguments: [streamID]
+        )
+    }
+
+    private func makeTimelineRail(
+        request: StreamAppTimelineRequest,
+        timelineItems: [StreamAppTimelineItem]
+    ) -> StreamAppTimelineRailSnapshot {
+        let itemEnd = timelineItems
+            .map { $0.endSeconds ?? $0.startSeconds }
+            .max()
+        let itemStart = timelineItems.map(\.startSeconds).min()
+        let visibleEnd = request.player?.liveEdgeSeconds ?? itemEnd ?? 0
+        let visibleStart = request.lookbackSeconds.map { max(0, visibleEnd - $0) }
+            ?? itemStart
+            ?? 0
+        return StreamAppTimelineRailProjection.project(
+            items: timelineItems,
+            visibleStartSeconds: visibleStart,
+            visibleEndSeconds: visibleEnd
         )
     }
 
@@ -920,304 +777,20 @@ public struct StreamAppTimelineStore: Sendable {
         }) {
             return containing.speakerLabel
         }
-        return turns
-            .map { turn -> (label: String, overlap: Double) in
-                let overlap = max(0, min(endSeconds, turn.endSeconds) - max(startSeconds, turn.startSeconds))
-                return (turn.speakerLabel, overlap)
+        var bestLabel: String?
+        var bestOverlap = 0.0
+        for turn in turns {
+            let overlap = max(0, min(endSeconds, turn.endSeconds) - max(startSeconds, turn.startSeconds))
+            if overlap > bestOverlap {
+                bestOverlap = overlap
+                bestLabel = turn.speakerLabel
             }
-            .filter { $0.overlap > 0 }
-            .max { $0.overlap < $1.overlap }?
-            .label
+        }
+        return bestLabel
     }
 
     private func fallbackColorToken(for rawLabel: String) -> String {
         StreamAppSpeakerDisplayProjection.fallbackColorToken(for: rawLabel)
-    }
-
-    private func metadataSort(_ lhs: StreamAppMetadataItem, _ rhs: StreamAppMetadataItem) -> Bool {
-        if lhs.startSeconds != rhs.startSeconds { return lhs.startSeconds > rhs.startSeconds }
-        return lhs.id < rhs.id
-    }
-
-    private func coalescedMetadataChanges(_ items: [StreamAppMetadataItem]) -> [StreamAppMetadataItem] {
-        let eventItems = items.filter { $0.kind != .song }
-        let songItems = items.filter { $0.kind == .song }
-        let samplesByTimestamp = Dictionary(grouping: songItems) { item in
-            Int((item.startSeconds * 10).rounded())
-        }
-        let sorted = (samplesByTimestamp.values.compactMap(preferredMetadataSample) + eventItems).sorted {
-            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
-            return $0.id < $1.id
-        }
-        var coalesced: [StreamAppMetadataItem] = []
-        for item in sorted {
-            if item.kind != .song {
-                coalesced.append(item)
-                continue
-            }
-            if let last = coalesced.last {
-                if isSameMetadataChange(last, item) {
-                    coalesced[coalesced.count - 1].endSeconds = max(
-                        coalesced[coalesced.count - 1].endSeconds ?? last.startSeconds,
-                        item.endSeconds ?? item.startSeconds
-                    )
-                    coalesced[coalesced.count - 1].endTimestamp = item.endTimestamp
-                    continue
-                }
-                coalesced[coalesced.count - 1].endSeconds = item.startSeconds
-                coalesced[coalesced.count - 1].endTimestamp = item.startTimestamp
-            }
-            var next = item
-            next.endSeconds = item.endSeconds ?? item.startSeconds + 8
-            coalesced.append(next)
-        }
-        return coalesced
-    }
-
-    private func preferredMetadataSample(_ items: [StreamAppMetadataItem]) -> StreamAppMetadataItem? {
-        items.max { lhs, rhs in
-            let lhsScore = metadataPreferenceScore(lhs)
-            let rhsScore = metadataPreferenceScore(rhs)
-            if lhsScore != rhsScore { return lhsScore < rhsScore }
-            if lhs.startSeconds != rhs.startSeconds { return lhs.startSeconds < rhs.startSeconds }
-            return metadataIDNumber(lhs.id) < metadataIDNumber(rhs.id)
-        }
-    }
-
-    private func metadataPreferenceScore(_ item: StreamAppMetadataItem) -> Int {
-        var score = item.kind == .song ? 100 : 0
-        if firstNonEmpty([item.artist]) != nil { score += 20 }
-        if !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { score += 10 }
-        if firstNonEmpty([item.subtitle]) != nil { score += 1 }
-        return score
-    }
-
-    private func metadataIDNumber(_ id: String) -> Int64 {
-        Int64(id.split(separator: ":").last ?? "") ?? 0
-    }
-
-    private func isSameMetadataChange(
-        _ lhs: StreamAppMetadataItem,
-        _ rhs: StreamAppMetadataItem
-    ) -> Bool {
-        lhs.kind == rhs.kind
-            && lhs.title == rhs.title
-            && lhs.artist == rhs.artist
-            && lhs.subtitle == rhs.subtitle
-    }
-
-    private func currentMetadataItem(
-        in items: [StreamAppMetadataItem],
-        playerPosition: Double?
-    ) -> StreamAppMetadataItem? {
-        guard let playerPosition else {
-            return items.sorted(by: metadataSort).first
-        }
-        return
-            items
-            .filter { item in
-                item.startSeconds <= playerPosition
-                    && (item.endSeconds ?? item.startSeconds) >= playerPosition
-            }
-            .sorted(by: metadataSort)
-            .first
-    }
-
-    private func makeTimelineItems(
-        paragraphs: [StreamAppTranscriptParagraph],
-        metadata: [StreamAppMetadataItem],
-        player: AppPlayerTimelineSnapshot?,
-        limit: Int
-    ) -> [StreamAppTimelineItem] {
-        let transcriptItems = coalescedTranscriptParagraphs(
-            transcriptParagraphsWithMetadataSpeakers(paragraphs, metadata: metadata),
-            metadata: metadata
-        ).map { paragraph in
-            StreamAppTimelineItem(
-                id: "transcript:\(paragraph.id)",
-                kind: .transcript,
-                startSeconds: paragraph.startSeconds,
-                endSeconds: paragraph.endSeconds,
-                startTimestamp: paragraph.startTimestamp,
-                endTimestamp: paragraph.endTimestamp,
-                title: paragraph.speakerDisplay.displayLabel,
-                subtitle: paragraph.text,
-                speakerDisplay: paragraph.speakerDisplay,
-                isSeekable: isSeekable(paragraph.startSeconds, player: player)
-            )
-        }
-        let metadataItems = metadata.map { item in
-            StreamAppTimelineItem(
-                id: item.id,
-                kind: item.kind == .song ? .song : .event,
-                startSeconds: item.startSeconds,
-                endSeconds: item.endSeconds,
-                startTimestamp: item.startTimestamp,
-                endTimestamp: item.endTimestamp,
-                title: item.title,
-                subtitle: item.subtitle,
-                speakerDisplay: metadataSpeakerDisplay(for: item),
-                isSeekable: isSeekable(item.startSeconds, player: player)
-            )
-        }
-        return Array(
-            coalescedTimelineMetadataRuns(transcriptItems + metadataItems)
-                .sorted(by: timelineSort)
-                .prefix(limit)
-        )
-    }
-
-    private func coalescedTimelineMetadataRuns(
-        _ items: [StreamAppTimelineItem]
-    ) -> [StreamAppTimelineItem] {
-        let sorted = items.sorted(by: timelineSort)
-        var result: [StreamAppTimelineItem] = []
-        for item in sorted {
-            if item.kind == .song, result.last?.kind == .song {
-                result[result.count - 1] = item
-            } else {
-                result.append(item)
-            }
-        }
-        return result
-    }
-
-    private func coalescedTranscriptParagraphs(
-        _ paragraphs: [StreamAppTranscriptParagraph],
-        metadata: [StreamAppMetadataItem]
-    ) -> [StreamAppTranscriptParagraph] {
-        let sorted = paragraphs.sorted {
-            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
-            return $0.id < $1.id
-        }
-        var result: [StreamAppTranscriptParagraph] = []
-        for paragraph in sorted {
-            guard let last = result.last else {
-                result.append(paragraph)
-                continue
-            }
-            let sameSpeaker = last.speakerDisplay == paragraph.speakerDisplay
-            let smallGap = paragraph.startSeconds - last.endSeconds <= 12
-            let boundedDuration = paragraph.endSeconds - last.startSeconds <= 60
-            let noMetadataBoundary = !hasMetadataBoundary(
-                after: last.endSeconds,
-                before: paragraph.startSeconds,
-                metadata: metadata
-            )
-            if sameSpeaker && smallGap && boundedDuration && noMetadataBoundary {
-                result[result.count - 1] = mergedTranscriptParagraph(last, paragraph)
-            } else {
-                result.append(paragraph)
-            }
-        }
-        return result
-    }
-
-    private func hasMetadataBoundary(
-        after lowerBound: Double,
-        before upperBound: Double,
-        metadata: [StreamAppMetadataItem]
-    ) -> Bool {
-        metadata.contains { item in
-            item.kind == .song
-                && item.startSeconds > lowerBound
-                && item.startSeconds <= upperBound
-        }
-    }
-
-    private func transcriptParagraphsWithMetadataSpeakers(
-        _ paragraphs: [StreamAppTranscriptParagraph],
-        metadata: [StreamAppMetadataItem]
-    ) -> [StreamAppTranscriptParagraph] {
-        paragraphs.map { paragraph in
-            guard let metadataItem = metadataSpeakerMetadata(for: paragraph, metadata: metadata),
-                  let speaker = metadataSpeakerDisplay(for: metadataItem) else {
-                return paragraph
-            }
-            var updated = paragraph
-            updated.speakerDisplay = speaker
-            updated.words = updated.words.map { word in
-                var updatedWord = word
-                updatedWord.speakerDisplay = speaker
-                return updatedWord
-            }
-            return updated
-        }
-    }
-
-    private func metadataSpeakerMetadata(
-        for paragraph: StreamAppTranscriptParagraph,
-        metadata: [StreamAppMetadataItem]
-    ) -> StreamAppMetadataItem? {
-        let midpoint = (paragraph.startSeconds + paragraph.endSeconds) / 2
-        let songMetadata = metadata.filter { $0.kind == .song && firstNonEmpty([$0.artist]) != nil }
-        return songMetadata
-            .filter({ item in
-                let endSeconds = item.endSeconds ?? item.startSeconds + 8
-                return item.startSeconds <= midpoint && endSeconds >= midpoint
-            })
-            .sorted(by: metadataSort)
-            .first
-    }
-
-    private func isUnknownSpeaker(_ speaker: StreamAppSpeakerDisplay) -> Bool {
-        speaker.rawLabel == StreamAppSpeakerDisplayProjection.unknownSpeakerLabel
-            || speaker.displayLabel == StreamAppSpeakerDisplayProjection.unknownSpeakerLabel
-    }
-
-    private func mergedTranscriptParagraph(
-        _ lhs: StreamAppTranscriptParagraph,
-        _ rhs: StreamAppTranscriptParagraph
-    ) -> StreamAppTranscriptParagraph {
-        StreamAppTranscriptParagraph(
-            id: lhs.id,
-            streamID: lhs.streamID,
-            runID: lhs.runID,
-            chunkID: lhs.chunkID,
-            sequence: lhs.sequence,
-            speakerDisplay: lhs.speakerDisplay,
-            startSeconds: lhs.startSeconds,
-            endSeconds: rhs.endSeconds,
-            startTimestamp: lhs.startTimestamp,
-            endTimestamp: rhs.endTimestamp,
-            text: joinedTranscriptText(lhs.text, rhs.text),
-            confidence: [lhs.confidence, rhs.confidence].compactMap { $0 }.min(),
-            words: lhs.words + rhs.words
-        )
-    }
-
-    private func joinedTranscriptText(_ lhs: String, _ rhs: String) -> String {
-        let left = lhs.trimmingCharacters(in: .whitespacesAndNewlines)
-        let right = rhs.trimmingCharacters(in: .whitespacesAndNewlines)
-        if left.isEmpty { return right }
-        if right.isEmpty { return left }
-        return left + " " + right
-    }
-
-    private func metadataSpeakerDisplay(for item: StreamAppMetadataItem) -> StreamAppSpeakerDisplay? {
-        guard item.kind == .song, let artist = firstNonEmpty([item.artist]) else { return nil }
-        return StreamAppSpeakerDisplay(
-            rawLabel: artist,
-            displayLabel: artist,
-            colorToken: fallbackColorToken(for: artist)
-        )
-    }
-
-    private func timelineSort(_ lhs: StreamAppTimelineItem, _ rhs: StreamAppTimelineItem) -> Bool {
-        if lhs.startSeconds != rhs.startSeconds { return lhs.startSeconds < rhs.startSeconds }
-        if lhs.kind.rawValue != rhs.kind.rawValue { return lhs.kind.rawValue < rhs.kind.rawValue }
-        return lhs.id < rhs.id
-    }
-
-    private func isSeekable(_ seconds: Double, player: AppPlayerTimelineSnapshot?) -> Bool {
-        guard let player, player.streamID != nil else { return false }
-        if let start = player.bufferedStartSeconds, let end = player.bufferedEndSeconds {
-            return seconds >= start && seconds <= end
-        }
-        if let range = player.rollingBuffer?.bufferedRange {
-            return seconds >= range.startSeconds && seconds <= range.endSeconds
-        }
-        return false
     }
 
     private func makeDiagnostics(
@@ -1247,5 +820,23 @@ public struct StreamAppTimelineStore: Sendable {
             validationErrors: [],
             bufferedSeekUnavailableMessage: player?.unavailableRangeMessage
         )
+    }
+}
+
+private final class StreamAppTimelineTimestampFormatter: @unchecked Sendable {
+    private static let shared = StreamAppTimelineTimestampFormatter()
+
+    private let lock = NSLock()
+    private let formatter = ISO8601DateFormatter()
+
+    static func timestamp(runStartedAt: String, offsetSeconds: Double) -> String? {
+        shared.timestamp(runStartedAt: runStartedAt, offsetSeconds: offsetSeconds)
+    }
+
+    private func timestamp(runStartedAt: String, offsetSeconds: Double) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let runStart = formatter.date(from: runStartedAt) else { return nil }
+        return formatter.string(from: runStart.addingTimeInterval(offsetSeconds))
     }
 }

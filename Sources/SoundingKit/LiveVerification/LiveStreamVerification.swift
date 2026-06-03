@@ -31,32 +31,51 @@ public struct LiveStreamSpec: Codable, Equatable, Sendable {
 
 /// Local-only live verification configuration decoded by the CLI and executed by SoundingKit.
 public struct LiveStreamVerificationConfig: Codable, Equatable, Sendable {
-    public var streams: [LiveStreamSpec]
+    public static let maximumAllowedConcurrentStreams = 64
 
-    public init(streams: [LiveStreamSpec]) throws {
-        try Self.validate(streams: streams)
+    public var streams: [LiveStreamSpec]
+    public var maxConcurrentStreams: Int?
+
+    public init(streams: [LiveStreamSpec], maxConcurrentStreams: Int? = nil) throws {
+        try Self.validate(streams: streams, maxConcurrentStreams: maxConcurrentStreams)
         self.streams = streams
+        self.maxConcurrentStreams = maxConcurrentStreams
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let streams = try container.decode([LiveStreamSpec].self, forKey: .streams)
-        try Self.validate(streams: streams)
+        let maxConcurrentStreams = try container.decodeIfPresent(
+            Int.self,
+            forKey: .maxConcurrentStreams
+        )
+        try Self.validate(streams: streams, maxConcurrentStreams: maxConcurrentStreams)
         self.streams = streams
+        self.maxConcurrentStreams = maxConcurrentStreams
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(streams, forKey: .streams)
+        try container.encodeIfPresent(maxConcurrentStreams, forKey: .maxConcurrentStreams)
     }
 
     private enum CodingKeys: String, CodingKey {
+        case maxConcurrentStreams
         case streams
     }
 
-    private static func validate(streams: [LiveStreamSpec]) throws {
+    private static func validate(streams: [LiveStreamSpec], maxConcurrentStreams: Int?) throws {
         guard !streams.isEmpty else {
             throw LiveStreamVerificationError.configurationFailed("live verification requires at least one stream")
+        }
+        if let maxConcurrentStreams {
+            guard maxConcurrentStreams > 0 else {
+                throw LiveStreamVerificationError.configurationFailed("maxConcurrentStreams must be positive")
+            }
+            guard maxConcurrentStreams <= maximumAllowedConcurrentStreams else {
+                throw LiveStreamVerificationError.configurationFailed("maxConcurrentStreams must be \(maximumAllowedConcurrentStreams) or less")
+            }
         }
 
         for stream in streams {

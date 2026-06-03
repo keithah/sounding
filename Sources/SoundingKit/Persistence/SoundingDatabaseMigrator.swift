@@ -423,6 +423,83 @@ enum SoundingDatabaseMigrator {
             }
         }
 
+        migrator.registerMigration("addStreamAudioArchiveSetting") { db in
+            try db.alter(table: "streams") { table in
+                table.add(column: "audio_archive_enabled", .boolean)
+                    .notNull()
+                    .defaults(to: false)
+            }
+        }
+
+        migrator.registerMigration("addAudioArchiveSegments") { db in
+            try db.create(table: "audio_archive_segments") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("stream_id", .integer)
+                    .notNull()
+                    .references("streams", onDelete: .cascade)
+                table.column("run_id", .integer)
+                    .notNull()
+                    .references("ingest_runs", onDelete: .cascade)
+                table.column("chunk_id", .integer)
+                    .notNull()
+                    .references("ingest_chunks", onDelete: .cascade)
+                table.column("sequence", .integer).notNull()
+                table.column("start_seconds", .double).notNull()
+                table.column("end_seconds", .double).notNull()
+                table.column("sample_rate", .double).notNull()
+                table.column("channel_count", .integer).notNull()
+                table.column("byte_count", .integer).notNull()
+                table.column("sha256", .text).notNull()
+                table.column("relative_path", .text).notNull()
+                table.column("created_at", .text).notNull()
+                table.check(sql: "end_seconds >= start_seconds")
+                table.uniqueKey(["stream_id", "run_id", "chunk_id", "sequence"])
+            }
+            try db.create(
+                index: "audio_archive_segments_on_stream_time",
+                on: "audio_archive_segments",
+                columns: ["stream_id", "start_seconds", "end_seconds"]
+            )
+            try db.create(
+                index: "audio_archive_segments_on_run_chunk",
+                on: "audio_archive_segments",
+                columns: ["run_id", "chunk_id"]
+            )
+        }
+
+        migrator.registerMigration("addAppTimelinePerformanceIndexes") { db in
+            try db.create(
+                index: "transcript_segments_on_run_end_start_id",
+                on: "transcript_segments",
+                columns: ["run_id", "end_seconds", "start_seconds", "id"]
+            )
+            try db.create(
+                index: "transcript_segments_on_run_start_id",
+                on: "transcript_segments",
+                columns: ["run_id", "start_seconds", "id"]
+            )
+            try db.create(
+                index: "transcript_words_on_segment_sequence_id",
+                on: "transcript_words",
+                columns: ["segment_id", "sequence", "id"]
+            )
+            try db.create(
+                index: "speaker_turns_on_chunk_start_end",
+                on: "speaker_turns",
+                columns: ["chunk_id", "start_seconds", "end_seconds"]
+            )
+            try db.create(
+                index: "ad_events_on_run_pts_observed_id",
+                on: "ad_events",
+                columns: ["run_id", "pts", "observed_at", "id"]
+            )
+            try db.create(
+                index: "song_plays_on_stream_start_id",
+                on: "song_plays",
+                columns: ["stream_id", "start_seconds", "id"]
+            )
+        }
+
         try migrator.migrate(writer)
     }
 }

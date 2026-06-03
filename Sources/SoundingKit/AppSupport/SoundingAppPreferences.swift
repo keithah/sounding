@@ -48,6 +48,7 @@ public enum SoundingAppIssueCategory: String, Equatable, Sendable {
     case database
     case model
     case rollingBuffer
+    case audioArchive
     case acoustID
     case secretStore
 }
@@ -56,6 +57,7 @@ public enum SoundingAppIssueActionKind: String, Equatable, Sendable {
     case chooseDatabaseLocation
     case chooseWhisperModel
     case adjustRollingBuffer
+    case adjustAudioArchive
     case addAcoustIDKey
     case retrySecretStore
     case openSettings
@@ -104,10 +106,15 @@ public struct SoundingAppConfigurationIssue: Equatable, Identifiable, Sendable {
 public struct SoundingAppPreferences: Equatable, Sendable {
     public static let defaultWhisperModelName = "tiny"
     public static let defaultDatabaseFilename = "Sounding.sqlite"
+    public static let defaultAudioArchiveMaximumBytes: Int64 = 10 * 1024 * 1024 * 1024
+    public static let defaultAudioArchiveRetentionSeconds: Double = 7 * 24 * 60 * 60
 
     public var databaseURL: URL
     public var whisperModelName: String
     public var rollingBufferTargetSeconds: Double
+    public var audioArchiveDirectory: URL?
+    public var audioArchiveMaximumBytes: Int64
+    public var audioArchiveDefaultRetentionSeconds: Double
     public var isDiarizationEnabled: Bool
     public var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
 
@@ -115,6 +122,9 @@ public struct SoundingAppPreferences: Equatable, Sendable {
         databaseURL: URL? = nil,
         whisperModelName: String = Self.defaultWhisperModelName,
         rollingBufferTargetSeconds: Double = RollingBufferConfiguration.appDefault().targetDurationSeconds,
+        audioArchiveDirectory: URL? = nil,
+        audioArchiveMaximumBytes: Int64 = Self.defaultAudioArchiveMaximumBytes,
+        audioArchiveDefaultRetentionSeconds: Double = Self.defaultAudioArchiveRetentionSeconds,
         isDiarizationEnabled: Bool = false,
         acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus = .missing,
         fileManager: FileManager = .default
@@ -122,6 +132,9 @@ public struct SoundingAppPreferences: Equatable, Sendable {
         self.databaseURL = databaseURL ?? Self.defaultDatabaseURL(fileManager: fileManager)
         self.whisperModelName = whisperModelName
         self.rollingBufferTargetSeconds = rollingBufferTargetSeconds
+        self.audioArchiveDirectory = audioArchiveDirectory
+        self.audioArchiveMaximumBytes = audioArchiveMaximumBytes
+        self.audioArchiveDefaultRetentionSeconds = audioArchiveDefaultRetentionSeconds
         self.isDiarizationEnabled = isDiarizationEnabled
         self.acoustIDKeyStatus = acoustIDKeyStatus
     }
@@ -130,6 +143,9 @@ public struct SoundingAppPreferences: Equatable, Sendable {
         databaseURL: URL? = nil,
         whisperModelName: String = Self.defaultWhisperModelName,
         rollingBufferTargetSeconds: Double = RollingBufferConfiguration.appDefault().targetDurationSeconds,
+        audioArchiveDirectory: URL? = nil,
+        audioArchiveMaximumBytes: Int64 = Self.defaultAudioArchiveMaximumBytes,
+        audioArchiveDefaultRetentionSeconds: Double = Self.defaultAudioArchiveRetentionSeconds,
         isDiarizationEnabled: Bool = false,
         secretStore: any AppSecretStore,
         fileManager: FileManager = .default
@@ -144,6 +160,9 @@ public struct SoundingAppPreferences: Equatable, Sendable {
             databaseURL: databaseURL,
             whisperModelName: whisperModelName,
             rollingBufferTargetSeconds: rollingBufferTargetSeconds,
+            audioArchiveDirectory: audioArchiveDirectory,
+            audioArchiveMaximumBytes: audioArchiveMaximumBytes,
+            audioArchiveDefaultRetentionSeconds: audioArchiveDefaultRetentionSeconds,
             isDiarizationEnabled: isDiarizationEnabled,
             acoustIDKeyStatus: status,
             fileManager: fileManager
@@ -166,6 +185,9 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
     public var databaseURL: URL
     public var whisperModelName: String
     public var rollingBuffer: RollingBufferConfiguration
+    public var audioArchiveDirectory: URL
+    public var audioArchiveMaximumBytes: Int64
+    public var audioArchiveDefaultRetentionSeconds: Double
     public var isDiarizationEnabled: Bool
     public var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
     public var issues: [SoundingAppConfigurationIssue]
@@ -178,6 +200,11 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
         databaseURL: URL,
         whisperModelName: String,
         rollingBuffer: RollingBufferConfiguration,
+        audioArchiveDirectory: URL = SoundingAppPreferences.defaultDatabaseURL()
+            .deletingLastPathComponent()
+            .appendingPathComponent("AudioArchive", isDirectory: true),
+        audioArchiveMaximumBytes: Int64 = SoundingAppPreferences.defaultAudioArchiveMaximumBytes,
+        audioArchiveDefaultRetentionSeconds: Double = SoundingAppPreferences.defaultAudioArchiveRetentionSeconds,
         isDiarizationEnabled: Bool = false,
         acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus,
         issues: [SoundingAppConfigurationIssue] = []
@@ -185,6 +212,9 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
         self.databaseURL = databaseURL
         self.whisperModelName = whisperModelName
         self.rollingBuffer = rollingBuffer
+        self.audioArchiveDirectory = audioArchiveDirectory
+        self.audioArchiveMaximumBytes = audioArchiveMaximumBytes
+        self.audioArchiveDefaultRetentionSeconds = audioArchiveDefaultRetentionSeconds
         self.isDiarizationEnabled = isDiarizationEnabled
         self.acoustIDKeyStatus = acoustIDKeyStatus
         self.issues = issues
@@ -202,12 +232,28 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
             issues: &issues
         )
         validateDatabaseURL(preferences.databaseURL, fileManager: fileManager, issues: &issues)
+        let archiveDirectory = audioArchiveDirectory(
+            for: preferences,
+            fileManager: fileManager,
+            issues: &issues
+        )
+        let archiveMaximumBytes = audioArchiveMaximumBytes(
+            preferences.audioArchiveMaximumBytes,
+            issues: &issues
+        )
+        let archiveRetentionSeconds = audioArchiveRetentionSeconds(
+            preferences.audioArchiveDefaultRetentionSeconds,
+            issues: &issues
+        )
         issues.append(contentsOf: acoustIDIssues(for: preferences.acoustIDKeyStatus))
 
         return SoundingAppConfiguration(
             databaseURL: preferences.databaseURL,
             whisperModelName: modelName,
             rollingBuffer: rollingBuffer,
+            audioArchiveDirectory: archiveDirectory,
+            audioArchiveMaximumBytes: archiveMaximumBytes,
+            audioArchiveDefaultRetentionSeconds: archiveRetentionSeconds,
             isDiarizationEnabled: preferences.isDiarizationEnabled,
             acoustIDKeyStatus: preferences.acoustIDKeyStatus,
             issues: issues
@@ -324,6 +370,77 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
         if fileManager.fileExists(atPath: url.path, isDirectory: &databaseIsDirectory), databaseIsDirectory.boolValue {
             issues.append(databaseIssue(detail: "Database location points at a folder: \(url.path)."))
         }
+    }
+
+    private static func audioArchiveDirectory(
+        for preferences: SoundingAppPreferences,
+        fileManager: FileManager,
+        issues: inout [SoundingAppConfigurationIssue]
+    ) -> URL {
+        let directory = preferences.audioArchiveDirectory
+            ?? preferences.databaseURL.deletingLastPathComponent()
+                .appendingPathComponent("AudioArchive", isDirectory: true)
+        guard directory.isFileURL else {
+            issues.append(audioArchiveIssue(detail: "Audio archive folder must be a local file URL."))
+            return preferences.databaseURL.deletingLastPathComponent()
+                .appendingPathComponent("AudioArchive", isDirectory: true)
+        }
+        var isDirectory: ObjCBool = false
+        if !fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
+            do {
+                try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+                isDirectory = true
+            } catch {
+                issues.append(audioArchiveIssue(detail: "Audio archive folder is unavailable."))
+                return directory
+            }
+        }
+        guard isDirectory.boolValue else {
+            issues.append(audioArchiveIssue(detail: "Audio archive location points at a file."))
+            return directory
+        }
+        guard fileManager.isWritableFile(atPath: directory.path) else {
+            issues.append(audioArchiveIssue(detail: "Audio archive folder is not writable."))
+            return directory
+        }
+        return directory
+    }
+
+    private static func audioArchiveMaximumBytes(
+        _ value: Int64,
+        issues: inout [SoundingAppConfigurationIssue]
+    ) -> Int64 {
+        guard value > 0 else {
+            issues.append(audioArchiveIssue(detail: "Audio archive maximum size must be greater than zero."))
+            return SoundingAppPreferences.defaultAudioArchiveMaximumBytes
+        }
+        return value
+    }
+
+    private static func audioArchiveRetentionSeconds(
+        _ value: Double,
+        issues: inout [SoundingAppConfigurationIssue]
+    ) -> Double {
+        guard value.isFinite, value > 0 else {
+            issues.append(audioArchiveIssue(detail: "Audio archive retention must be greater than zero."))
+            return SoundingAppPreferences.defaultAudioArchiveRetentionSeconds
+        }
+        return value
+    }
+
+    private static func audioArchiveIssue(detail: String) -> SoundingAppConfigurationIssue {
+        SoundingAppConfigurationIssue(
+            id: "audio-archive.invalid-preference",
+            severity: .warning,
+            phase: .preferences,
+            category: .audioArchive,
+            message: "Audio archive settings need attention.",
+            detail: detail,
+            action: SoundingAppConfigurationAction(
+                kind: .adjustAudioArchive,
+                label: "Adjust audio archive"
+            )
+        )
     }
 
     private static func databaseIssue(detail: String) -> SoundingAppConfigurationIssue {

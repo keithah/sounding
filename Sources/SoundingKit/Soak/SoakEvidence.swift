@@ -558,9 +558,7 @@ public struct SoakEvidence: Codable, Equatable, Sendable {
     }
 
     private static func stableJSONEncoder() -> JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return encoder
+        SoundingJSONCoding.stableEncoder()
     }
 }
 

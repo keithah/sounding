@@ -58,6 +58,60 @@ distribution_json_escape() {
     printf '%s' "$value"
 }
 
+distribution_run_bounded() {
+    local timeout_seconds="$1"
+    shift
+    /usr/bin/python3 - "$timeout_seconds" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+cmd = sys.argv[2:]
+try:
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+    sys.stdout.buffer.write(result.stdout)
+    sys.stdout.buffer.write(result.stderr)
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired as exc:
+    if exc.stdout:
+        sys.stdout.buffer.write(exc.stdout)
+    if exc.stderr:
+        sys.stdout.buffer.write(exc.stderr)
+    sys.exit(124)
+except Exception:
+    sys.exit(127)
+PY
+}
+
+distribution_run_bounded_to_log() {
+    local timeout_seconds="$1"
+    local log_path="$2"
+    shift 2
+    /usr/bin/python3 - "$timeout_seconds" "$log_path" "$@" <<'PY'
+import subprocess
+import sys
+
+timeout = float(sys.argv[1])
+log_path = sys.argv[2]
+cmd = sys.argv[3:]
+try:
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, check=False)
+    with open(log_path, "ab") as handle:
+        handle.write(result.stdout)
+    sys.exit(result.returncode)
+except subprocess.TimeoutExpired as exc:
+    with open(log_path, "ab") as handle:
+        if exc.stdout:
+            handle.write(exc.stdout)
+        handle.write(b"\n[distribution-package-timeout]\n")
+    sys.exit(124)
+except Exception as exc:
+    with open(log_path, "ab") as handle:
+        handle.write(("[distribution-package-error] " + exc.__class__.__name__ + "\n").encode("utf-8"))
+    sys.exit(127)
+PY
+}
+
 # Return success when the phase is in the supported distribution vocabulary.
 distribution_is_known_phase() {
     case "${1-}" in

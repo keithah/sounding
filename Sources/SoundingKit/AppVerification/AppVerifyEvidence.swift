@@ -571,9 +571,7 @@ public struct AppVerifyEvidence: Codable, Equatable, Sendable {
     }
 
     public static func stableJSONEncoder() -> JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return encoder
+        SoundingJSONCoding.stableEncoder()
     }
 }
 

@@ -1,103 +1,6 @@
 import Foundation
 import GRDB
 
-public struct AppVerifyLiveStreamExecutionRequest: Sendable {
-    public var runID: String
-    public var runDirectory: URL
-    public var streamDirectory: URL
-    public var stream: AppVerifyLiveStreamSpec
-    public var diagnosticsLogURL: URL
-    public var generatedAt: String
-
-    public init(
-        runID: String,
-        runDirectory: URL,
-        streamDirectory: URL,
-        stream: AppVerifyLiveStreamSpec,
-        diagnosticsLogURL: URL,
-        generatedAt: String
-    ) {
-        self.runID = runID
-        self.runDirectory = runDirectory
-        self.streamDirectory = streamDirectory
-        self.stream = stream
-        self.diagnosticsLogURL = diagnosticsLogURL
-        self.generatedAt = generatedAt
-    }
-}
-
-public struct AppVerifyLiveStreamStopRequest: Sendable {
-    public var runID: String
-    public var runDirectory: URL
-    public var streamDirectory: URL
-    public var stream: AppVerifyLiveStreamSpec
-    public var diagnosticsLogURL: URL
-    public var registeredStreamID: Int64?
-
-    public init(
-        runID: String,
-        runDirectory: URL,
-        streamDirectory: URL,
-        stream: AppVerifyLiveStreamSpec,
-        diagnosticsLogURL: URL,
-        registeredStreamID: Int64? = nil
-    ) {
-        self.runID = runID
-        self.runDirectory = runDirectory
-        self.streamDirectory = streamDirectory
-        self.stream = stream
-        self.diagnosticsLogURL = diagnosticsLogURL
-        self.registeredStreamID = registeredStreamID
-    }
-}
-
-public struct AppVerifyLiveStreamExecutionResult: Sendable, Equatable {
-    public var registeredStreamID: Int64?
-    public var runtimeStarted: Bool
-    public var processedChunks: Int
-    public var decodedChunks: Int
-    public var scheduledBuffers: Int
-    public var transcriptCount: Int
-    public var metadataCount: Int
-    public var diagnosticEvents: [String]
-    public var diagnosticsFileWritten: Bool
-    public var artifacts: [AppVerifyRedactedArtifact]
-    public var fields: [String: String]
-
-    public init(
-        registeredStreamID: Int64? = nil,
-        runtimeStarted: Bool = true,
-        processedChunks: Int = 0,
-        decodedChunks: Int = 0,
-        scheduledBuffers: Int = 0,
-        transcriptCount: Int = 0,
-        metadataCount: Int = 0,
-        diagnosticEvents: [String] = [],
-        diagnosticsFileWritten: Bool = false,
-        artifacts: [AppVerifyRedactedArtifact] = [],
-        fields: [String: String] = [:]
-    ) {
-        self.registeredStreamID = registeredStreamID
-        self.runtimeStarted = runtimeStarted
-        self.processedChunks = max(0, processedChunks)
-        self.decodedChunks = max(0, decodedChunks)
-        self.scheduledBuffers = max(0, scheduledBuffers)
-        self.transcriptCount = max(0, transcriptCount)
-        self.metadataCount = max(0, metadataCount)
-        self.diagnosticEvents = Array(diagnosticEvents.prefix(32)).map(AppVerifyEvidenceSanitizer.redact)
-        self.diagnosticsFileWritten = diagnosticsFileWritten
-        self.artifacts = Array(artifacts.prefix(16))
-        self.fields = fields.prefix(16).reduce(into: [:]) { partial, pair in
-            partial[AppVerifyEvidenceSanitizer.redact(pair.key)] = AppVerifyEvidenceSanitizer.redact(pair.value)
-        }
-    }
-}
-
-public protocol AppVerifyLiveStreamExecuting: Sendable {
-    func execute(_ request: AppVerifyLiveStreamExecutionRequest) async throws -> AppVerifyLiveStreamExecutionResult
-    func stop(_ request: AppVerifyLiveStreamStopRequest) async throws
-}
-
 public struct AppVerifyLiveRunner: Sendable {
     public struct Configuration: Sendable {
         public var liveConfiguration: AppVerifyLiveConfiguration
@@ -111,7 +14,7 @@ public struct AppVerifyLiveRunner: Sendable {
             runRootDirectory: URL = FileManager.default.temporaryDirectory
                 .appendingPathComponent("SoundingAppVerifyLive", isDirectory: true),
             configPath: String? = nil,
-            timestamp: @escaping @Sendable () -> String = { ISO8601DateFormatter().string(from: Date()) },
+            timestamp: @escaping @Sendable () -> String = { SoundingTimestampClock.timestamp() },
             makeRunID: @escaping @Sendable () -> String = { UUID().uuidString }
         ) {
             self.liveConfiguration = liveConfiguration
@@ -587,7 +490,7 @@ public struct AppVerifyAVFoundationLiveStreamExecutor: AppVerifyLiveStreamExecut
                 timeline: timeline,
                 rollingBuffer: rollingBuffer,
                 diagnosticsLog: diagnosticsLog,
-                keepPlaybackRunningAfterIngestCompletes: true,
+                ingestMode: .livePolling(maxChunksPerPass: 1),
                 now: now
             )
         },
@@ -904,108 +807,5 @@ public struct AppVerifyAVFoundationLiveStreamExecutor: AppVerifyLiveStreamExecut
         case .stopped: return "stopped"
         case .failed(let message): return "failed: \(message)"
         }
-    }
-}
-
-public actor AppVerifyLiveActiveRuntimeStore {
-    private var handles: [String: AppVerifyLiveRuntimeHandle] = [:]
-
-    public init() {}
-
-    func insert(_ handle: AppVerifyLiveRuntimeHandle, for request: AppVerifyLiveStreamExecutionRequest) {
-        handles[key(runID: request.runID, streamID: request.stream.id)] = handle
-    }
-
-    func remove(for request: AppVerifyLiveStreamStopRequest) -> AppVerifyLiveRuntimeHandle? {
-        handles.removeValue(forKey: key(runID: request.runID, streamID: request.stream.id))
-    }
-
-    private func key(runID: String, streamID: String) -> String {
-        "\(runID)::\(streamID)"
-    }
-}
-
-struct AppVerifyLiveRuntimeHandle: Sendable {
-    var runtime: any AppStreamRuntimeControlling
-    var player: any AppPCMPlaybackAdapting
-    var timeline: AppPlayerTimelineClock
-    var rollingBuffer: RollingPCMBuffer
-    var diagnostics: AppRuntimeDiagnosticsLog
-    var database: SoundingDatabase
-    var streamID: Int64?
-}
-
-private actor AppVerifyLiveRuntimeEventRecorder {
-    private var events: [AppStreamRuntimeEvent] = []
-
-    func append(_ event: AppStreamRuntimeEvent) {
-        events.append(event)
-    }
-
-    func count(streamID: Int64, phase: AppStreamRuntimeStatusPhase) -> Int {
-        events.filter { $0.streamID == streamID && $0.phase.statusPhase == phase }.count
-    }
-}
-
-private struct AppVerifyLiveDiagnosticsSnapshot: Sendable {
-    var eventFileExists: Bool
-    var errorFileExists: Bool
-    var eventEntries: [AppVerifyParsedDiagnosticEntry]
-    var errorEntries: [AppVerifyParsedDiagnosticEntry]
-    var malformedLineCount: Int
-
-    var eventNames: [String] { eventEntries.map(\.event) }
-    var errorNames: [String] { errorEntries.map(\.event) }
-    var recentNames: [String] { Array((eventNames + errorNames).suffix(32)) }
-}
-
-private struct AppVerifyLiveRawDiagnosticEntry: Decodable {
-    var event: String
-    var phase: String?
-    var streamID: Int64?
-    var message: String?
-    var fields: [String: String]?
-}
-
-private enum AppVerifyLiveExecutionError: Error, CustomStringConvertible, Sendable {
-    case databaseOpenFailed(String)
-    case streamRegistrationFailed(String)
-    case unsupportedResolvedStreamType(String)
-    case runtimeStartFailed(String)
-    case runtimeProofTimeout(String)
-    case cleanupFailed(String)
-
-    var description: String {
-        switch self {
-        case .databaseOpenFailed(let message):
-            return "database open failed: \(AppVerifyEvidenceSanitizer.redact(message))"
-        case .streamRegistrationFailed(let message):
-            return "stream registration failed: \(AppVerifyEvidenceSanitizer.redact(message))"
-        case .unsupportedResolvedStreamType(let streamType):
-            return "unsupported resolved stream type for app runtime: \(AppVerifyEvidenceSanitizer.redact(streamType))"
-        case .runtimeStartFailed(let message):
-            return "runtime start failed: \(AppVerifyEvidenceSanitizer.redact(message))"
-        case .runtimeProofTimeout(let message):
-            return "runtime proof timed out or failed: \(AppVerifyEvidenceSanitizer.redact(message))"
-        case .cleanupFailed(let message):
-            return "cleanup failed: \(AppVerifyEvidenceSanitizer.redact(message))"
-        }
-    }
-}
-
-private struct AppVerifyLiveNoOpTranscriber: MLTranscription {
-    func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] { [] }
-}
-
-private struct AppVerifyLiveNoOpDiarizer: SpeakerDiarization {
-    func diarize(_ chunk: DecodedAudioChunk, transcriptSegments: [TranscriptSegmentDraft]) async throws -> [SpeakerTurnDraft] { [] }
-}
-
-private struct AppVerifyLiveRunnerTimeoutError: Error, CustomStringConvertible, Sendable {
-    var streamID: String
-    var timeoutSeconds: Double
-
-    var description: String {
-        "Timed out waiting for live stream \(AppVerifyEvidenceSanitizer.redact(streamID)) after \(String(format: "%.3f", timeoutSeconds)) seconds."
     }
 }

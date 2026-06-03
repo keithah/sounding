@@ -60,23 +60,23 @@ final class AppPlayerTimelineTests: XCTestCase {
                 streamType: .hls
             ))
 
-        XCTAssertEqual(result.processedChunks, 1)
+        XCTAssertEqual(result.processedChunks, 2)
         let decodeCallCount = await decoder.callCount()
         XCTAssertEqual(decodeCallCount, 1)
         let frames = await player.frames()
-        XCTAssertEqual(frames.map(\.sequence), [0])
-        XCTAssertEqual(frames.map(\.audio), [Data([0x01, 0x02, 0x03])])
-        XCTAssertEqual(frames.map(\.startSeconds), [0])
-        XCTAssertEqual(frames.map(\.endSeconds), [2])
+        XCTAssertEqual(frames.map(\.sequence), [0, 1])
+        XCTAssertEqual(frames.map(\.audio), [Data([0x01, 0x02, 0x03]), Data([0x04, 0x05])])
+        XCTAssertEqual(frames.map(\.startSeconds), [0, 2])
+        XCTAssertEqual(frames.map(\.endSeconds), [2, 4])
         let preparedStreams = await player.preparedStreams()
         XCTAssertEqual(preparedStreams, [stream.id])
 
         let snapshot = try XCTUnwrap(result.playerTimeline)
         XCTAssertEqual(snapshot.streamID, stream.id)
-        XCTAssertEqual(snapshot.decodedFrameCount, 1)
+        XCTAssertEqual(snapshot.decodedFrameCount, 2)
         XCTAssertEqual(snapshot.bufferedStartSeconds, 0)
-        XCTAssertEqual(snapshot.bufferedEndSeconds, 2)
-        XCTAssertEqual(snapshot.liveEdgeSeconds, 2)
+        XCTAssertEqual(snapshot.bufferedEndSeconds, 4)
+        XCTAssertEqual(snapshot.liveEdgeSeconds, 4)
         XCTAssertEqual(snapshot.state, .stopped)
         XCTAssertFalse(snapshot.lastMessage.contains("token=secret"), snapshot.lastMessage)
 
@@ -92,7 +92,7 @@ final class AppPlayerTimelineTests: XCTestCase {
                 arguments: [stream.id]
             )
         }
-        XCTAssertEqual(rows?["chunk_count"] as Int?, 1)
+        XCTAssertEqual(rows?["chunk_count"] as Int?, 2)
     }
 
     func testSinglePathDecoderSurfacesPlaybackFailuresWithoutSecondDecodePath() async throws {
@@ -248,8 +248,8 @@ final class AppPlayerTimelineTests: XCTestCase {
             decoder: decoder,
             transcriber: FixtureTimelineTranscriber(),
             diarizer: FixtureTimelineDiarizer(),
-            player: DeterministicAppPCMPlayerAdapter(),
             timeline: AppPlayerTimelineClock(),
+            ingestMode: .livePolling(maxChunksPerPass: 1),
             now: { "2026-05-01T00:00:00Z" }
         )
 
@@ -354,6 +354,53 @@ final class AppPlayerTimelineTests: XCTestCase {
         XCTAssertEqual(
             snapshot.lastMessage,
             "Decoded audio was not playable PCM; ingest continues without scheduling playback.")
+    }
+
+    func testSinglePathFramePartitionKeepsLinearPCMFramesOnly() {
+        let linear = SharedPCMFrame(
+            streamID: 42,
+            sequence: 1,
+            audio: Data([0x00, 0x01]),
+            startSeconds: 1,
+            endSeconds: 2,
+            format: .linearPCM(sampleRate: 44_100, channelCount: 1)
+        )
+        let container = SharedPCMFrame(
+            streamID: 42,
+            sequence: 2,
+            audio: Data([0x23, 0x45]),
+            startSeconds: 2,
+            endSeconds: 3,
+            format: .containerBytes
+        )
+
+        let partition = SinglePathPCMFramePartition(frames: [container, linear])
+
+        XCTAssertEqual(partition.linearPCMFrames.map(\.sequence), [1])
+    }
+
+    func testSinglePathFramePartitionDetectsDecodedAudioEvenWhenNotPlayable() {
+        let container = SharedPCMFrame(
+            streamID: 42,
+            sequence: 2,
+            audio: Data([0x23, 0x45]),
+            startSeconds: 2,
+            endSeconds: 3,
+            format: .containerBytes
+        )
+        let emptyPCM = SharedPCMFrame(
+            streamID: 42,
+            sequence: 3,
+            audio: Data(),
+            byteCount: 0,
+            startSeconds: 3,
+            endSeconds: 4,
+            format: .linearPCM(sampleRate: 44_100, channelCount: 1)
+        )
+
+        let partition = SinglePathPCMFramePartition(frames: [container, emptyPCM])
+
+        XCTAssertTrue(partition.sawDecodedAudio)
     }
 
     func testAVFoundationAdapterSchedulesSupportedPCMFrames() async throws {

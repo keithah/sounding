@@ -43,6 +43,34 @@ final class StreamRegistryTests: XCTestCase {
         )
     }
 
+    func testTypedStreamTypeOverloadsPersistRawRegistryValue() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+
+        let record = try registry.add(
+            name: "Typed",
+            streamType: .hls,
+            source: "https://example.test/live.m3u8"
+        )
+        let reconnect = try XCTUnwrap(registry.reconnectSource(id: record.id))
+
+        XCTAssertEqual(record.streamType, "hls")
+        XCTAssertEqual(record.resolvedStreamType, .hls)
+        XCTAssertEqual(reconnect.streamType, "hls")
+        XCTAssertEqual(reconnect.resolvedStreamType, .hls)
+
+        let updated = try registry.update(
+            id: record.id,
+            name: "Typed",
+            streamType: .icy,
+            source: "https://example.test/live.icy"
+        )
+
+        XCTAssertTrue(updated.changed)
+        XCTAssertEqual(updated.record.streamType, "icy")
+        XCTAssertEqual(updated.record.resolvedStreamType, .icy)
+    }
+
     func testDiarizationSettingIsPerStreamAndPersists() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -80,6 +108,39 @@ final class StreamRegistryTests: XCTestCase {
         )
         XCTAssertFalse(enabledAgain.changed)
         XCTAssertEqual(enabledAgain.record.updatedAt, "2026-05-01T10:01:00Z")
+    }
+
+    func testAudioArchiveSettingIsPerStreamAndPersists() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "JFL",
+            streamType: .hls,
+            source: "https://example.test/live.m3u8"
+        )
+
+        XCTAssertFalse(stream.audioArchiveEnabled)
+
+        let enabled = try registry.updateAudioArchive(
+            streamID: stream.id,
+            isEnabled: true,
+            updatedAt: "2026-05-01T10:01:00Z"
+        )
+        XCTAssertTrue(enabled.record.audioArchiveEnabled)
+        XCTAssertTrue(enabled.changed)
+        XCTAssertEqual(enabled.record.updatedAt, "2026-05-01T10:01:00Z")
+
+        let unchanged = try registry.updateAudioArchive(
+            streamID: stream.id,
+            isEnabled: true,
+            updatedAt: "2026-05-01T10:02:00Z"
+        )
+        XCTAssertTrue(unchanged.record.audioArchiveEnabled)
+        XCTAssertFalse(unchanged.changed)
+        XCTAssertEqual(unchanged.record.updatedAt, "2026-05-01T10:01:00Z")
+
+        XCTAssertTrue(try XCTUnwrap(registry.find(id: stream.id)).audioArchiveEnabled)
+        XCTAssertTrue(try XCTUnwrap(registry.reconnectSource(id: stream.id)).audioArchiveEnabled)
     }
 
     func testReconnectSourceExposesRawSourceWithoutChangingListRedaction() throws {

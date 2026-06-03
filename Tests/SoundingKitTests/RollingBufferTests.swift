@@ -69,6 +69,49 @@ final class RollingBufferTests: XCTestCase {
         XCTAssertEqual(range, RollingBufferRange(startSeconds: 10, endSeconds: 14))
     }
 
+    func testAppendDeduplicatesPCMAndHLSFrames() async throws {
+        let buffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 60,
+                hotMemoryDurationSeconds: 60,
+                maximumSpillBytes: 0
+            )
+        )
+        await buffer.start(streamID: 12)
+
+        let snapshot = await buffer.append([
+            frame(streamID: 12, sequence: 7, start: 20, end: 22, bytes: [1]),
+            frame(streamID: 12, sequence: 7, start: 20, end: 22, bytes: [2]),
+            frame(
+                streamID: 12,
+                sequence: 8,
+                start: 22,
+                end: 24,
+                bytes: [3],
+                hlsIdentity: HLSDecodedAudioChunkIdentity(
+                    mediaSequence: 42,
+                    segmentIdentity: "segment-42.ts",
+                    manifestPosition: 0
+                )
+            ),
+            frame(
+                streamID: 12,
+                sequence: 9,
+                start: 22,
+                end: 24,
+                bytes: [4],
+                hlsIdentity: HLSDecodedAudioChunkIdentity(
+                    mediaSequence: 42,
+                    segmentIdentity: "segment-42.ts",
+                    manifestPosition: 1
+                )
+            ),
+        ])
+
+        XCTAssertEqual(snapshot.frameCount, 2)
+        XCTAssertEqual(snapshot.bufferedRange, RollingBufferRange(startSeconds: 20, endSeconds: 24))
+    }
+
     func testCleanupRemovesSpillSegmentsAndReportsResult() async throws {
         let spillDirectory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: spillDirectory) }
@@ -181,14 +224,16 @@ final class RollingBufferTests: XCTestCase {
         sequence: Int,
         start: Double,
         end: Double,
-        bytes: [UInt8]
+        bytes: [UInt8],
+        hlsIdentity: HLSDecodedAudioChunkIdentity? = nil
     ) -> SharedPCMFrame {
         SharedPCMFrame(
             streamID: streamID,
             sequence: sequence,
             audio: Data(bytes),
             startSeconds: start,
-            endSeconds: end
+            endSeconds: end,
+            hlsIdentity: hlsIdentity
         )
     }
 

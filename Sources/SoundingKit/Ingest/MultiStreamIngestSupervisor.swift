@@ -80,6 +80,7 @@ public struct MultiStreamIngestSupervisor {
 
     private let database: SoundingDatabase
     private let maximumRequests: Int
+    private let maxConcurrentRequests: Int
     private let decoderFactory: DecoderFactory
     private let transcriber: any MLTranscription
     private let diarizer: any SpeakerDiarization
@@ -91,16 +92,18 @@ public struct MultiStreamIngestSupervisor {
     public init(
         database: SoundingDatabase,
         maximumRequests: Int = 2,
+        maxConcurrentRequests: Int? = nil,
         decoderFactory: @escaping DecoderFactory,
         transcriber: any MLTranscription,
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
         deduplicatesHLSSegments: Bool = true,
-        now: @escaping TimestampProvider = { ISO8601DateFormatter().string(from: Date()) }
+        now: @escaping TimestampProvider = { SoundingTimestampClock.timestamp() }
     ) {
         self.database = database
         self.maximumRequests = maximumRequests
+        self.maxConcurrentRequests = max(1, min(maxConcurrentRequests ?? maximumRequests, maximumRequests))
         self.decoderFactory = decoderFactory
         self.transcriber = transcriber
         self.diarizer = diarizer
@@ -113,22 +116,38 @@ public struct MultiStreamIngestSupervisor {
     public func run(_ requests: [StreamIngestRequest]) async throws -> [MultiStreamIngestOutcome] {
         try validate(requests)
 
+        let concurrency = min(maxConcurrentRequests, requests.count)
         return await withTaskGroup(of: (Int, MultiStreamIngestOutcome).self) { group in
-            for (index, request) in requests.enumerated() {
-                group.addTask {
-                    let outcome = await runOne(request)
-                    return (index, outcome)
-                }
+            var nextIndex = 0
+            for _ in 0..<concurrency {
+                addTask(to: &group, requests: requests, index: nextIndex)
+                nextIndex += 1
             }
 
             var indexedOutcomes: [(Int, MultiStreamIngestOutcome)] = []
-            for await outcome in group {
+            while let outcome = await group.next() {
                 indexedOutcomes.append(outcome)
+                if nextIndex < requests.count {
+                    addTask(to: &group, requests: requests, index: nextIndex)
+                    nextIndex += 1
+                }
             }
             return
                 indexedOutcomes
                 .sorted { $0.0 < $1.0 }
                 .map(\.1)
+        }
+    }
+
+    private func addTask(
+        to group: inout TaskGroup<(Int, MultiStreamIngestOutcome)>,
+        requests: [StreamIngestRequest],
+        index: Int
+    ) {
+        let request = requests[index]
+        group.addTask {
+            let outcome = await runOne(request)
+            return (index, outcome)
         }
     }
 

@@ -18,7 +18,7 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         segmentLoader: any HLSSegmentLoading = HLSSegmentLoader(),
         segmentID3Extractor: any HLSSegmentID3Extracting = HLSSegmentID3Extractor(),
         segmentSCTE35Extractor: any HLSSegmentSCTE35Extracting = HLSSegmentSCTE35Extractor(),
-        now: @escaping @Sendable () -> String = { ISO8601DateFormatter().string(from: Date()) }
+        now: @escaping @Sendable () -> String = { SoundingTimestampClock.timestamp() }
     ) {
         self.chunkDurationSeconds = max(chunkDurationSeconds, 0.001)
         self.segmentLoader = segmentLoader
