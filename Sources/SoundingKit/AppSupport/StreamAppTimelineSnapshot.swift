@@ -247,6 +247,53 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
     }
 }
 
+public enum StreamAppTimelineMarkerSource: String, Equatable, Sendable {
+    case timedID3
+    case scte35
+    case unknown
+}
+
+public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var subtitle: String?
+    public var startSeconds: Double
+    public var endSeconds: Double
+    public var normalizedStart: Double
+    public var normalizedEnd: Double
+    public var colorToken: String
+    public var isSeekable: Bool
+}
+
+public struct StreamAppTimelineRailMarker: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var source: StreamAppTimelineMarkerSource
+    public var seconds: Double
+    public var normalizedPosition: Double
+    public var colorToken: String
+    public var isSeekable: Bool
+}
+
+public struct StreamAppTimelineRailSnapshot: Equatable, Sendable {
+    public var visibleStartSeconds: Double
+    public var visibleEndSeconds: Double
+    public var spans: [StreamAppTimelineRailSpan]
+    public var markers: [StreamAppTimelineRailMarker]
+
+    public init(
+        visibleStartSeconds: Double,
+        visibleEndSeconds: Double,
+        spans: [StreamAppTimelineRailSpan] = [],
+        markers: [StreamAppTimelineRailMarker] = []
+    ) {
+        self.visibleStartSeconds = visibleStartSeconds
+        self.visibleEndSeconds = visibleEndSeconds
+        self.spans = spans
+        self.markers = markers
+    }
+}
+
 public struct StreamAppTimelineDiagnostics: Equatable, Sendable {
     public var latestSegmentEndSeconds: Double?
     public var playerPositionSeconds: Double?
