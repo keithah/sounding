@@ -6,14 +6,16 @@ public enum StreamAppTimelineRailProjection {
         visibleStartSeconds: Double,
         visibleEndSeconds: Double
     ) -> StreamAppTimelineRailSnapshot {
-        let duration = max(visibleEndSeconds - visibleStartSeconds, 0)
+        let orderedVisibleStartSeconds = min(visibleStartSeconds, visibleEndSeconds)
+        let orderedVisibleEndSeconds = max(visibleStartSeconds, visibleEndSeconds)
+        let duration = max(orderedVisibleEndSeconds - orderedVisibleStartSeconds, 0)
         let spans = items
             .filter { $0.kind == .song }
             .compactMap { item in
                 span(
                     for: item,
-                    visibleStartSeconds: visibleStartSeconds,
-                    visibleEndSeconds: visibleEndSeconds,
+                    visibleStartSeconds: orderedVisibleStartSeconds,
+                    visibleEndSeconds: orderedVisibleEndSeconds,
                     duration: duration
                 )
             }
@@ -26,8 +28,8 @@ public enum StreamAppTimelineRailProjection {
             .compactMap { item in
                 marker(
                     for: item,
-                    visibleStartSeconds: visibleStartSeconds,
-                    visibleEndSeconds: visibleEndSeconds,
+                    visibleStartSeconds: orderedVisibleStartSeconds,
+                    visibleEndSeconds: orderedVisibleEndSeconds,
                     duration: duration
                 )
             }
@@ -37,8 +39,8 @@ public enum StreamAppTimelineRailProjection {
             }
 
         return StreamAppTimelineRailSnapshot(
-            visibleStartSeconds: visibleStartSeconds,
-            visibleEndSeconds: visibleEndSeconds,
+            visibleStartSeconds: orderedVisibleStartSeconds,
+            visibleEndSeconds: orderedVisibleEndSeconds,
             spans: spans,
             markers: markers
         )
@@ -95,8 +97,8 @@ public enum StreamAppTimelineRailProjection {
 
     private static func markerSource(for item: StreamAppTimelineItem) -> StreamAppTimelineMarkerSource {
         let text = [item.id, item.title, item.subtitle ?? ""].joined(separator: " ").lowercased()
-        if scte35Markers.contains(where: { text.contains($0) }) { return .scte35 }
-        if timedID3Markers.contains(where: { text.contains($0) }) { return .timedID3 }
+        if scte35Markers.contains(where: { containsMarker($0, in: text) }) { return .scte35 }
+        if timedID3Markers.contains(where: { containsMarker($0, in: text) }) { return .timedID3 }
         return .unknown
     }
 
@@ -108,8 +110,6 @@ public enum StreamAppTimelineRailProjection {
         "ext-x-cue-in",
         "cue-out",
         "cue-in",
-        "cue out",
-        "cue in",
     ]
 
     private static let timedID3Markers = [
@@ -117,6 +117,11 @@ public enum StreamAppTimelineRailProjection {
         "timed id3",
         "timed-id3",
     ]
+
+    private static func containsMarker(_ marker: String, in text: String) -> Bool {
+        let pattern = "(^|[^a-z0-9])" + NSRegularExpression.escapedPattern(for: marker) + "([^a-z0-9]|$)"
+        return text.range(of: pattern, options: .regularExpression) != nil
+    }
 
     private static func markerColorToken(for source: StreamAppTimelineMarkerSource) -> String {
         switch source {
