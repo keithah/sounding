@@ -81,6 +81,19 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertEqual(rail.markers.map(\.source), [.scte35, .scte35, .scte35, .scte35, .scte35])
     }
 
+    func testClassifiesBareSCTE35MarkerType() {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline("event:marker:1", kind: .event, start: 10, end: 10, title: "Marker", subtitle: "SCTE35"),
+                timeline("event:scte35:2", kind: .event, start: 20, end: 20, title: "Break", subtitle: nil)
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 30
+        )
+
+        XCTAssertEqual(rail.markers.map(\.source), [.scte35, .scte35])
+    }
+
     func testDoesNotClassifyEmbeddedCueWordsAsSCTE() {
         let rail = StreamAppTimelineRailProjection.project(
             items: [

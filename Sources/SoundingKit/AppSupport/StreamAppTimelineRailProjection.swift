@@ -103,6 +103,7 @@ public enum StreamAppTimelineRailProjection {
     }
 
     private static let scte35Markers = [
+        "scte35",
         "scte",
         "splice_insert",
         "splice insert",
