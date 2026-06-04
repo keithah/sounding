@@ -463,6 +463,99 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertTrue(snapshot.timelineItems.contains { $0.kind == .song && $0.title == "Wire Song" })
     }
 
+    func testTimelineKeepsNewestTimedMetadataWhenRunsReusePTS() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+
+        let staleRunID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T16:00:00Z",
+            status: .completed
+        )
+        let staleChunkID = try writer.createChunk(
+            runID: staleRunID,
+            sequence: 1,
+            segmentURI: "stale-001.ts",
+            startedAt: "2026-05-01T16:00:00Z",
+            endedAt: "2026-05-01T16:00:01Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: staleRunID,
+                chunkID: staleChunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "ID3",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 118,
+                        tags: [
+                            "TIT2": .string("Old Collision"),
+                            "TPE1": .string("Old Artist"),
+                        ],
+                        timestamp: "2026-05-01T16:00:00Z"
+                    )
+                ],
+                createdAt: "2026-05-01T16:00:00Z"
+            )
+        )
+
+        let currentRunID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T16:10:00Z",
+            status: .completed
+        )
+        let currentChunkID = try writer.createChunk(
+            runID: currentRunID,
+            sequence: 1,
+            segmentURI: "current-001.ts",
+            startedAt: "2026-05-01T16:10:00Z",
+            endedAt: "2026-05-01T16:10:01Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: currentRunID,
+                chunkID: currentChunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "ID3",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 120,
+                        tags: [
+                            "TIT2": .string("Current Collision"),
+                            "TPE1": .string("Current Artist"),
+                        ],
+                        timestamp: "2026-05-01T16:10:00Z"
+                    )
+                ],
+                createdAt: "2026-05-01T16:10:00Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 120,
+                    liveEdgeSeconds: 180,
+                    bufferedStartSeconds: 0,
+                    bufferedEndSeconds: 180
+                ),
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:10:02Z"
+            )
+        )
+
+        let songTitles = snapshot.timelineItems.filter { $0.kind == .song }.map(\.title)
+        XCTAssertTrue(songTitles.contains("Current Collision"))
+        XCTAssertFalse(songTitles.contains("Old Collision"))
+    }
+
     func testTimelineTranscriptParagraphsStayBoundedWhenSpeakerDoesNotChange() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

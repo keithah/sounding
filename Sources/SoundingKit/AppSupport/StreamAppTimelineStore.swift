@@ -70,6 +70,7 @@ public struct StreamAppTimelineStore: Sendable {
                     guard let player = request.player else { return nil }
                     return max(0, player.liveEdgeSeconds - lookback)
                 }
+                let liveWallClockLowerBound = liveWallClockLowerBound(for: request)
                 let overrides = try speakerOverrides(streamID: request.streamID, db: db)
                 let segmentRows = try fetchSegmentRows(
                     request: request, lowerBound: lowerBound, db: db)
@@ -119,9 +120,17 @@ public struct StreamAppTimelineStore: Sendable {
                     overrides: overrides
                 )
                 let songMetadata = try fetchSongMetadata(
-                    request: request, lowerBound: lowerBound, db: db)
+                    request: request,
+                    lowerBound: lowerBound,
+                    wallClockLowerBound: liveWallClockLowerBound,
+                    db: db
+                )
                 let eventMetadata = try fetchEventMetadata(
-                    request: request, lowerBound: lowerBound, db: db)
+                    request: request,
+                    lowerBound: lowerBound,
+                    wallClockLowerBound: liveWallClockLowerBound,
+                    db: db
+                )
                 let projection = StreamAppTimelineProjection(
                     paragraphs: paragraphs,
                     metadata: songMetadata + eventMetadata,
@@ -532,6 +541,7 @@ public struct StreamAppTimelineStore: Sendable {
     private func fetchSongMetadata(
         request: StreamAppTimelineRequest,
         lowerBound: Double?,
+        wallClockLowerBound: String?,
         db: Database
     ) throws -> [StreamAppMetadataItem] {
         var arguments: StatementArguments = [request.streamID]
@@ -539,6 +549,11 @@ public struct StreamAppTimelineStore: Sendable {
         if let lowerBound {
             windowClause = "AND song_plays.end_seconds >= ?"
             arguments += [lowerBound]
+        }
+        var wallClockClause = ""
+        if let wallClockLowerBound {
+            wallClockClause = "AND ingest_runs.started_at >= ?"
+            arguments += [wallClockLowerBound]
         }
         var unknownFilterClause = ""
         if request.hideDeterministicUnknownSongs {
@@ -572,6 +587,7 @@ public struct StreamAppTimelineStore: Sendable {
                 WHERE song_plays.stream_id = ?
                   \(unknownFilterClause)
                   \(windowClause)
+                  \(wallClockClause)
                 ORDER BY song_plays.start_seconds, song_plays.id
                 LIMIT ?
                 """,
@@ -615,6 +631,7 @@ public struct StreamAppTimelineStore: Sendable {
     private func fetchEventMetadata(
         request: StreamAppTimelineRequest,
         lowerBound: Double?,
+        wallClockLowerBound: String?,
         db: Database
     ) throws -> [StreamAppMetadataItem] {
         var arguments: StatementArguments = [request.streamID]
@@ -622,6 +639,11 @@ public struct StreamAppTimelineStore: Sendable {
         if let lowerBound {
             windowClause = "AND ad_events.pts IS NOT NULL AND ad_events.pts >= ?"
             arguments += [lowerBound]
+        }
+        var wallClockClause = ""
+        if let wallClockLowerBound {
+            wallClockClause = "AND ad_events.observed_at >= ?"
+            arguments += [wallClockLowerBound]
         }
         arguments += [max(request.metadataLimit, request.timelineLimit)]
         let rows = try Row.fetchAll(
@@ -679,6 +701,7 @@ public struct StreamAppTimelineStore: Sendable {
                     OR json_extract(ad_events.payload_json, '$.Fields.Artist') IS NOT NULL
                   )
                   \(windowClause)
+                  \(wallClockClause)
                 ORDER BY ad_events.pts, ad_events.observed_at, ad_events.id
                 LIMIT ?
                 """,
@@ -728,6 +751,30 @@ public struct StreamAppTimelineStore: Sendable {
             runStartedAt: runStartedAt,
             offsetSeconds: offsetSeconds
         )
+    }
+
+    private func liveWallClockLowerBound(for request: StreamAppTimelineRequest) -> String? {
+        guard let player = request.player,
+              request.lookbackSeconds == nil,
+              player.liveEdgeSeconds.isFinite,
+              player.liveEdgeSeconds > 0,
+              playerBufferStartsAtSessionOrigin(player) else {
+            return nil
+        }
+        return StreamAppTimelineTimestampFormatter.timestamp(
+            from: request.refreshedAt,
+            addingSeconds: -(player.liveEdgeSeconds + 120)
+        )
+    }
+
+    private func playerBufferStartsAtSessionOrigin(_ player: AppPlayerTimelineSnapshot) -> Bool {
+        if let bufferedStartSeconds = player.bufferedStartSeconds {
+            return bufferedStartSeconds <= 1
+        }
+        if let range = player.rollingBuffer?.bufferedRange {
+            return range.startSeconds <= 1
+        }
+        return false
     }
 
     private func sqlPlaceholders(count: Int) -> String {
@@ -867,10 +914,21 @@ private final class StreamAppTimelineTimestampFormatter: @unchecked Sendable {
         shared.timestamp(runStartedAt: runStartedAt, offsetSeconds: offsetSeconds)
     }
 
+    static func timestamp(from timestamp: String, addingSeconds seconds: Double) -> String? {
+        shared.timestamp(from: timestamp, addingSeconds: seconds)
+    }
+
     private func timestamp(runStartedAt: String, offsetSeconds: Double) -> String? {
         lock.lock()
         defer { lock.unlock() }
         guard let runStart = formatter.date(from: runStartedAt) else { return nil }
         return formatter.string(from: runStart.addingTimeInterval(offsetSeconds))
+    }
+
+    private func timestamp(from timestamp: String, addingSeconds seconds: Double) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard seconds.isFinite, let date = formatter.date(from: timestamp) else { return nil }
+        return formatter.string(from: date.addingTimeInterval(seconds))
     }
 }
