@@ -120,7 +120,7 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         await gate.release()
     }
 
-    func testRestartingRunningStreamStopsOnceAndStartsReplacementIngester() async throws {
+    func testRestartingRunningStreamStartsReplacementWithoutWaitingForPlaybackStop() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
         let stream = try registry.add(
@@ -144,20 +144,20 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
             if await ingester.callCount() >= 1 { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        let secondStart = Task { try await runtime.start(streamID: stream.id) }
-        await stopGate.waitForStopCallCount(1)
-        await stopGate.release()
+        let secondStart = Task { try await runtime.restart(streamID: stream.id) }
 
         try await secondStart.value
 
         for _ in 0..<20 {
-            if await ingester.callCount() >= 1 { break }
+            if await ingester.callCount() >= 2 { break }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
-        let callCount = await ingester.callCount()
-        XCTAssertEqual(callCount, 2)
+        let ingesterCallCount = await ingester.callCount()
+        let stopCallCount = await stopGate.callCount()
+        XCTAssertEqual(ingesterCallCount, 2)
+        XCTAssertEqual(stopCallCount, 0)
 
+        await stopGate.release()
         await runtime.stop(streamID: stream.id)
         await ingesterGate.release()
     }

@@ -240,6 +240,7 @@ struct PlayerCard: View {
     var seekToLive: () -> Void
     var scrubBackward: () -> Void
     var startRuntime: () -> Void
+    var restartRuntime: () -> Void
     var pauseRuntime: () -> Void
     var resumeRuntime: () -> Void
     var stopRuntime: () -> Void
@@ -265,7 +266,7 @@ struct PlayerCard: View {
                 HStack(spacing: 12) {
                     Button("Start", systemImage: "play.fill", action: startRuntime)
                         .disabled(!selected.canStartRuntime)
-                    Button("Restart", systemImage: "arrow.clockwise", action: startRuntime)
+                    Button("Restart", systemImage: "arrow.clockwise", action: restartRuntime)
                         .disabled(!selected.canStopRuntime)
                     Button("Pause", systemImage: "pause.fill", action: pauseRuntime)
                         .disabled(!selected.canPauseRuntime)

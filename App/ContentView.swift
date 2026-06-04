@@ -268,6 +268,7 @@ struct ContentView: View {
                     seekToLive: { seekToLive(streamID: selected.item.id) },
                     scrubBackward: { scrubBackward(seconds: 30, streamID: selected.item.id) },
                     startRuntime: { startRuntime(for: selected.item.id) },
+                    restartRuntime: { restartRuntime(for: selected.item.id) },
                     pauseRuntime: { pauseRuntime(for: selected.item.id) },
                     resumeRuntime: { resumeRuntime(for: selected.item.id) },
                     stopRuntime: { stopRuntime(for: selected.item.id) },
@@ -392,6 +393,26 @@ struct ContentView: View {
             )
             do {
                 try await runtime.start(streamID: streamID)
+                persistenceError = nil
+            } catch {
+                persistenceError = IngestRedaction.redact(String(describing: error))
+            }
+        }
+    }
+
+    private func restartRuntime(for streamID: Int64) {
+        guard let runtime else {
+            persistenceError = "Sounding runtime unavailable."
+            return
+        }
+        Task {
+            diagnosticsLog.recordEvent(
+                "ui.restart.clicked",
+                streamID: streamID,
+                phase: "ui.control"
+            )
+            do {
+                try await runtime.restart(streamID: streamID)
                 persistenceError = nil
             } catch {
                 persistenceError = IngestRedaction.redact(String(describing: error))

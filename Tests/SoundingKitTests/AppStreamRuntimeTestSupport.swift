@@ -112,6 +112,10 @@ actor RuntimeStopGate {
         }
     }
 
+    func callCount() -> Int {
+        stopCallCount
+    }
+
     func release() {
         isReleased = true
         let current = releaseWaiters

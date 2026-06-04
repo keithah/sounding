@@ -293,6 +293,7 @@ public enum AppStreamRuntimeError: Error, Equatable, Sendable, CustomStringConve
 public protocol AppStreamRuntimeControlling: Sendable {
     func events() async -> AsyncStream<AppStreamRuntimeEvent>
     func start(streamID: Int64) async throws
+    func restart(streamID: Int64) async throws
     func pause() async
     func pause(streamID: Int64) async
     func resume() async

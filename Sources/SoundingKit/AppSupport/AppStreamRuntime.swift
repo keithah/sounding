@@ -86,7 +86,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         suspendedStreams[streamID] = nil
         let startToken = UUID()
         pendingStartTokens[streamID] = startToken
-        await stop(streamID: streamID, clearsPendingStart: false)
+        await stop(streamID: streamID, clearsPendingStart: false, stopsPlayback: true)
         guard pendingStartTokens[streamID] == startToken else {
             diagnosticsLog.recordEvent(
                 "runtime.start.superseded",
@@ -98,6 +98,30 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         }
         pendingStartTokens[streamID] = nil
         try beginRun(streamID: streamID, connectionMessagePrefix: "Connecting")
+    }
+
+    public func restart(streamID: Int64) async throws {
+        diagnosticsLog.recordEvent(
+            "runtime.restart.requested",
+            streamID: streamID,
+            phase: "runtime.restart",
+            fields: ["existingRunCount": String(streamRuns.count)]
+        )
+        suspendedStreams[streamID] = nil
+        let startToken = UUID()
+        pendingStartTokens[streamID] = startToken
+        await stop(streamID: streamID, clearsPendingStart: false, stopsPlayback: false)
+        guard pendingStartTokens[streamID] == startToken else {
+            diagnosticsLog.recordEvent(
+                "runtime.restart.superseded",
+                streamID: streamID,
+                phase: "runtime.restart",
+                fields: ["existingRunCount": String(streamRuns.count)]
+            )
+            return
+        }
+        pendingStartTokens[streamID] = nil
+        try beginRun(streamID: streamID, connectionMessagePrefix: "Restarting")
     }
 
     private func beginRun(
@@ -259,15 +283,22 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     }
 
     public func stop(streamID: Int64) async {
-        await stop(streamID: streamID, clearsPendingStart: true)
+        await stop(streamID: streamID, clearsPendingStart: true, stopsPlayback: true)
     }
 
-    private func stop(streamID: Int64, clearsPendingStart: Bool) async {
+    private func stop(
+        streamID: Int64,
+        clearsPendingStart: Bool,
+        stopsPlayback: Bool
+    ) async {
         diagnosticsLog.recordEvent(
             "runtime.stop.requested",
             streamID: streamID,
             phase: "runtime.stop",
-            fields: ["hadRun": String(streamRuns[streamID] != nil)]
+            fields: [
+                "hadRun": String(streamRuns[streamID] != nil),
+                "stopsPlayback": String(stopsPlayback),
+            ]
         )
         let state = streamRuns.removeValue(forKey: streamID)
         if clearsPendingStart {
@@ -275,7 +306,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         }
         guard state != nil || clearsPendingStart else { return }
         state?.task?.cancel()
-        if let playbackController, let playbackTimeline {
+        if stopsPlayback, let playbackController, let playbackTimeline {
             await playbackController.stop(timeline: playbackTimeline)
         }
         if currentStreamID == streamID {

@@ -424,6 +424,7 @@ private extension AppVerifyLiveStreamExecutionResult {
 private struct FakeRuntimeController: AppStreamRuntimeControlling {
     func events() async -> AsyncStream<AppStreamRuntimeEvent> { AsyncStream { $0.finish() } }
     func start(streamID: Int64) async throws {}
+    func restart(streamID: Int64) async throws {}
     func pause() async {}
     func pause(streamID: Int64) async {}
     func resume() async {}
