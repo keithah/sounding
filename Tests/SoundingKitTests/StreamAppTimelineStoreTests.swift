@@ -379,6 +379,65 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         )
     }
 
+    func testTimelineReadsSongMetadataFromSCTE35MarkerFields() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:40:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 40,
+            segmentURI: "main-040.ts",
+            startedAt: "2026-05-01T15:40:01Z",
+            endedAt: "2026-05-01T15:40:07Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .unknown,
+                        source: "scte35",
+                        pts: 80,
+                        fields: [
+                            "Title": "Wire Song",
+                            "Artist": "Wire Artist",
+                            "Album": "Wire Album",
+                        ],
+                        timestamp: "2026-05-01T15:41:20Z"
+                    )
+                ],
+                createdAt: "2026-05-01T15:40:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 80,
+                    liveEdgeSeconds: 90
+                ),
+                paragraphLimit: 5,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: 120,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        XCTAssertEqual(snapshot.currentMetadata?.title, "Wire Song")
+        XCTAssertEqual(snapshot.currentMetadata?.artist, "Wire Artist")
+        XCTAssertEqual(snapshot.currentMetadata?.subtitle, "Wire Album")
+        XCTAssertTrue(snapshot.timelineItems.contains { $0.kind == .song && $0.title == "Wire Song" })
+    }
+
     func testTimelineTranscriptParagraphsStayBoundedWhenSpeakerDoesNotChange() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

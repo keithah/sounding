@@ -77,6 +77,28 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         )
     }
 
+    func testTrustedTimedMetadataSuppressesFingerprintGuessesUntilGap() {
+        let projection = StreamAppTimelineProjection(
+            paragraphs: [],
+            metadata: [
+                metadata("song:1", title: "The Great Divide", artist: "Noah Kahan", start: 0, end: 60, source: "scte35"),
+                metadata("song:2", title: "Hotline Bling", artist: "Drake", start: 60, end: 102, source: "chromaprint"),
+                metadata("song:3", title: "The Great Divide", artist: "Noah Kahan", start: 92, end: 132, source: "scte35"),
+                metadata("song:4", title: "Hotline Bling", artist: "Drake", start: 132, end: 150, source: "chromaprint"),
+                metadata("song:5", title: "Next Song", artist: "Next Artist", start: 190, end: 210, source: "chromaprint"),
+            ],
+            player: AppPlayerTimelineSnapshot(streamID: 1, positionSeconds: 120, liveEdgeSeconds: 220)
+        )
+
+        XCTAssertEqual(projection.metadataChanges.map(\.title), ["The Great Divide", "Next Song"])
+        XCTAssertEqual(projection.metadataChanges.first?.endSeconds, 190)
+        XCTAssertEqual(projection.currentMetadata()?.title, "The Great Divide")
+        XCTAssertEqual(
+            projection.timelineItems(limit: 10).filter { $0.kind == .song }.map(\.title),
+            ["The Great Divide", "Next Song"]
+        )
+    }
+
     func testTranscriptParagraphsMergeOnlyUntilMetadataBoundary() {
         let speaker = display("host")
         let projection = StreamAppTimelineProjection(
@@ -152,7 +174,8 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         artist: String,
         start: Double,
         end: Double,
-        kind: StreamAppMetadataKind = .song
+        kind: StreamAppMetadataKind = .song,
+        source: String? = nil
     ) -> StreamAppMetadataItem {
         StreamAppMetadataItem(
             id: id,
@@ -161,7 +184,8 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
             endSeconds: end,
             title: title,
             artist: artist,
-            subtitle: nil
+            subtitle: nil,
+            source: source
         )
     }
 }

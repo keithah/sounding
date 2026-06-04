@@ -561,6 +561,7 @@ public struct StreamAppTimelineStore: Sendable {
                     song_plays.end_seconds,
                     song_plays.confidence,
                     ingest_runs.started_at AS run_started_at,
+                    song_plays.source,
                     songs.title,
                     songs.artist,
                     songs.display_name,
@@ -605,7 +606,8 @@ public struct StreamAppTimelineStore: Sendable {
                 title: firstNonEmpty([songTitle, displayName]) ?? displayName,
                 artist: artist,
                 subtitle: row["album"],
-                confidence: row["confidence"]
+                confidence: row["confidence"],
+                source: row["source"]
             )
         }
     }
@@ -631,10 +633,39 @@ public struct StreamAppTimelineStore: Sendable {
                     ad_events.marker_type,
                     ad_events.pts,
                     ad_events.segment,
+                    ad_events.source,
                     ingest_runs.started_at AS run_started_at,
-                    json_extract(ad_events.payload_json, '$.Tags.TIT2') AS id3_title,
-                    json_extract(ad_events.payload_json, '$.Tags.TPE1') AS id3_artist,
-                    json_extract(ad_events.payload_json, '$.Tags.TALB') AS id3_album
+                    COALESCE(
+                        json_extract(ad_events.payload_json, '$.Tags.TIT2'),
+                        json_extract(ad_events.payload_json, '$.Tags.Title'),
+                        json_extract(ad_events.payload_json, '$.Fields.TIT2'),
+                        json_extract(ad_events.payload_json, '$.Fields.Title'),
+                        json_extract(ad_events.payload_json, '$.Fields.title'),
+                        json_extract(ad_events.payload_json, '$.Fields.ProgramTitle'),
+                        json_extract(ad_events.payload_json, '$.Fields.Program'),
+                        json_extract(ad_events.payload_json, '$.Command.Title'),
+                        json_extract(ad_events.payload_json, '$.Command.ProgramTitle')
+                    ) AS marker_title,
+                    COALESCE(
+                        json_extract(ad_events.payload_json, '$.Tags.TPE1'),
+                        json_extract(ad_events.payload_json, '$.Tags.Artist'),
+                        json_extract(ad_events.payload_json, '$.Fields.TPE1'),
+                        json_extract(ad_events.payload_json, '$.Fields.Artist'),
+                        json_extract(ad_events.payload_json, '$.Fields.artist'),
+                        json_extract(ad_events.payload_json, '$.Fields.Performer'),
+                        json_extract(ad_events.payload_json, '$.Fields.Provider'),
+                        json_extract(ad_events.payload_json, '$.Command.Artist'),
+                        json_extract(ad_events.payload_json, '$.Command.Provider')
+                    ) AS marker_artist,
+                    COALESCE(
+                        json_extract(ad_events.payload_json, '$.Tags.TALB'),
+                        json_extract(ad_events.payload_json, '$.Tags.Album'),
+                        json_extract(ad_events.payload_json, '$.Fields.TALB'),
+                        json_extract(ad_events.payload_json, '$.Fields.Album'),
+                        json_extract(ad_events.payload_json, '$.Fields.album'),
+                        json_extract(ad_events.payload_json, '$.Fields.Series'),
+                        json_extract(ad_events.payload_json, '$.Command.Album')
+                    ) AS marker_album
                 FROM ad_events
                 JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
                 WHERE ingest_runs.stream_id = ?
@@ -644,6 +675,8 @@ public struct StreamAppTimelineStore: Sendable {
                     OR json_extract(ad_events.payload_json, '$.Tags.TIT2') IS NOT NULL
                     OR json_extract(ad_events.payload_json, '$.Tags.TPE1') IS NOT NULL
                     OR json_extract(ad_events.payload_json, '$.Tags.TALB') IS NOT NULL
+                    OR json_extract(ad_events.payload_json, '$.Fields.Title') IS NOT NULL
+                    OR json_extract(ad_events.payload_json, '$.Fields.Artist') IS NOT NULL
                   )
                   \(windowClause)
                 ORDER BY ad_events.pts, ad_events.observed_at, ad_events.id
@@ -668,18 +701,19 @@ public struct StreamAppTimelineStore: Sendable {
             guard let runStartedAt: String = row["run_started_at"] else {
                 throw StreamAppTimelineStoreError.malformedRow("event_run_started_at")
             }
-            let id3Title: String? = row["id3_title"]
-            let id3Artist: String? = row["id3_artist"]
-            let id3Album: String? = row["id3_album"]
-            let hasSongMetadata = id3Title?.isEmpty == false
+            let markerTitle: String? = row["marker_title"]
+            let markerArtist: String? = row["marker_artist"]
+            let markerAlbum: String? = row["marker_album"]
+            let hasSongMetadata = markerTitle?.isEmpty == false
             return StreamAppMetadataItem(
                 id: "event:\(id)",
                 kind: hasSongMetadata ? .song : .event,
                 startSeconds: pts,
                 startTimestamp: timestamp(runStartedAt: runStartedAt, offsetSeconds: pts),
-                title: id3Title?.isEmpty == false ? id3Title! : classification,
-                artist: id3Artist,
-                subtitle: firstNonEmpty([id3Album, markerType])
+                title: markerTitle?.isEmpty == false ? markerTitle! : classification,
+                artist: markerArtist,
+                subtitle: firstNonEmpty([markerAlbum, markerType]),
+                source: firstNonEmpty([row["source"], markerType])
             )
         }
     }

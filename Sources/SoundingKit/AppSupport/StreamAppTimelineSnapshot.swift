@@ -184,6 +184,7 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
     public var artist: String?
     public var subtitle: String?
     public var confidence: Double?
+    public var source: String?
 
     public init(
         id: String,
@@ -195,7 +196,8 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         title: String,
         artist: String? = nil,
         subtitle: String? = nil,
-        confidence: Double? = nil
+        confidence: Double? = nil,
+        source: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -207,6 +209,7 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         self.artist = artist
         self.subtitle = subtitle
         self.confidence = confidence
+        self.source = source
     }
 }
 

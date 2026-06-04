@@ -151,6 +151,14 @@ public struct StreamAppTimelineProjection: Sendable {
                 continue
             }
             if let last = coalesced.last {
+                if Self.shouldSuppressFingerprintGuess(after: last, candidate: item) {
+                    coalesced[coalesced.count - 1].endSeconds = max(
+                        coalesced[coalesced.count - 1].endSeconds ?? last.startSeconds,
+                        item.endSeconds ?? item.startSeconds
+                    )
+                    coalesced[coalesced.count - 1].endTimestamp = item.endTimestamp
+                    continue
+                }
                 if Self.isSameMetadataChange(last, item) {
                     coalesced[coalesced.count - 1].endSeconds = max(
                         coalesced[coalesced.count - 1].endSeconds ?? last.startSeconds,
@@ -181,6 +189,8 @@ public struct StreamAppTimelineProjection: Sendable {
 
     private static func metadataPreferenceScore(_ item: StreamAppMetadataItem) -> Int {
         var score = item.kind == .song ? 100 : 0
+        if isTrustedTimedMetadata(item) { score += 40 }
+        if isFingerprintMetadata(item) { score -= 20 }
         if Self.firstNonEmpty([item.artist]) != nil { score += 20 }
         if !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { score += 10 }
         if Self.firstNonEmpty([item.subtitle]) != nil { score += 1 }
@@ -199,6 +209,40 @@ public struct StreamAppTimelineProjection: Sendable {
             && lhs.title == rhs.title
             && lhs.artist == rhs.artist
             && lhs.subtitle == rhs.subtitle
+    }
+
+    private static func shouldSuppressFingerprintGuess(
+        after trusted: StreamAppMetadataItem,
+        candidate: StreamAppMetadataItem
+    ) -> Bool {
+        guard trusted.kind == .song,
+              candidate.kind == .song,
+              isTrustedTimedMetadata(trusted),
+              isFingerprintMetadata(candidate),
+              !isSameMetadataChange(trusted, candidate) else {
+            return false
+        }
+        let trustedEnd = trusted.endSeconds ?? trusted.startSeconds
+        let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
+        let gap = candidate.startSeconds - trustedEnd
+        let overlaps = candidate.startSeconds <= trustedEnd
+        let nearTimedMetadata = gap <= 30
+        return overlaps || nearTimedMetadata || candidateEnd <= trustedEnd + 30
+    }
+
+    private static func isTrustedTimedMetadata(_ item: StreamAppMetadataItem) -> Bool {
+        let source = (item.source ?? item.id).lowercased()
+        return source.contains("scte")
+            || source.contains("id3")
+            || source.contains("timed")
+            || item.id.hasPrefix("event:")
+    }
+
+    private static func isFingerprintMetadata(_ item: StreamAppMetadataItem) -> Bool {
+        let source = (item.source ?? item.id).lowercased()
+        return source.contains("fingerprint")
+            || source.contains("chromaprint")
+            || source.contains("acoust")
     }
 
     private func coalescedTimelineMetadataRuns(
