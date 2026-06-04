@@ -354,7 +354,9 @@ public struct StreamIngestPipeline {
 
                 var segments: [TranscriptSegmentDraft] = []
                 var speakerTurns: [SpeakerTurnDraft] = []
-                if !hasResolvedSongPlay(songPlays, overlapping: chunk) {
+                if !hasResolvedSongPlay(songPlays, overlapping: chunk)
+                    && !hasSongMetadataMarker(chunk.adMarkers)
+                {
                     do {
                         try Task.checkCancellation()
                         segments = try await transcriber.transcribe(chunk)
@@ -550,6 +552,52 @@ public struct StreamIngestPipeline {
             !play.song.isUnknown
                 && max(0, min(play.endSeconds, chunk.endSeconds) - max(play.startSeconds, chunk.startSeconds)) > 0
         }
+    }
+
+    private func hasSongMetadataMarker(_ markers: [AdMarker]) -> Bool {
+        markers.contains { marker in
+            let title = firstNonEmptyJSONValue(
+                from: marker.tags,
+                keys: ["TIT2", "Title", "title", "ProgramTitle", "Program"]
+            ) ?? firstNonEmptyJSONValue(
+                from: marker.fields,
+                keys: ["TIT2", "Title", "title", "ProgramTitle", "Program"]
+            )
+            guard title != nil else { return false }
+            let artistOrContext = firstNonEmptyJSONValue(
+                from: marker.tags,
+                keys: ["TPE1", "Artist", "artist", "Performer", "Provider", "TALB", "Album", "album"]
+            ) ?? firstNonEmptyJSONValue(
+                from: marker.fields,
+                keys: ["TPE1", "Artist", "artist", "Performer", "Provider", "TALB", "Album", "album", "Series"]
+            )
+            guard artistOrContext != nil else { return false }
+            let markerType = marker.type.lowercased()
+            let markerSource = marker.source.lowercased()
+            return markerType.contains("id3")
+                || markerType.contains("scte")
+                || markerSource.contains("id3")
+                || markerSource.contains("scte")
+                || markerSource.contains("timed")
+        }
+    }
+
+    private func firstNonEmptyJSONValue(
+        from values: [String: JSONValue],
+        keys: [String]
+    ) -> String? {
+        for key in keys {
+            if let value = nonEmptyString(from: values[key]) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func nonEmptyString(from value: JSONValue?) -> String? {
+        guard case let .string(raw)? = value else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private struct SegmentValidationDiagnostic {

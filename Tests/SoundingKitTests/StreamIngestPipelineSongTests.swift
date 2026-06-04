@@ -61,6 +61,49 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(counts, ["segments": 1, "song_plays": 1])
     }
 
+    func testTimedID3SongMarkerSkipsTranscription() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: 0,
+                            tags: [
+                                "TIT2": .string("Bad Dreams"),
+                                "TPE1": .string("Teddy Swims"),
+                                "TALB": .string("ID3"),
+                            ],
+                            fields: ["FrameIDs": .array([.string("TIT2"), .string("TPE1"), .string("TALB")])]
+                        )
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 0)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 0, "events": 1])
+    }
+
     func testAdjacentSameFingerprintChunksMergeAndChangedFingerprintSplitsPlay() async throws {
         let temporary = try TemporarySoundingDatabase()
         let fingerprinter = StubFingerprinter(outputs: [
@@ -510,7 +553,11 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         )
     }
 
-    private static func chunk(sequence: Int, audio: Data = Data([0x01, 0x02, 0x03]))
+    private static func chunk(
+        sequence: Int,
+        audio: Data = Data([0x01, 0x02, 0x03]),
+        adMarkers: [AdMarker] = []
+    )
         -> DecodedAudioChunk
     {
         DecodedAudioChunk(
@@ -520,7 +567,8 @@ final class StreamIngestPipelineSongTests: XCTestCase {
             startSeconds: Double(sequence) * 2.0,
             endSeconds: Double(sequence + 1) * 2.0,
             startedAt: "2026-05-01T12:00:0\(sequence)Z",
-            endedAt: "2026-05-01T12:00:0\(sequence + 1)Z"
+            endedAt: "2026-05-01T12:00:0\(sequence + 1)Z",
+            adMarkers: adMarkers
         )
     }
 
