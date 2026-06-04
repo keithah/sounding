@@ -300,97 +300,6 @@ public struct StreamIngestPipeline {
                         )
                     }
                 }
-                var segments: [TranscriptSegmentDraft] = []
-                do {
-                    try Task.checkCancellation()
-                    segments = try await transcriber.transcribe(chunk)
-                    let validation = validateAndNormalize(
-                        segments, nextSequence: nextSegmentSequence)
-                    segments = validation.segments
-                    chunkDiagnostics.append(
-                        contentsOf: validation.diagnostics.map { template in
-                            diagnostic(
-                                streamID: streamID,
-                                phase: .transcribe,
-                                severity: .warning,
-                                reason: template.reason,
-                                source: redactedSource,
-                                streamType: streamType,
-                                context: template.context
-                            )
-                        })
-                } catch let cancellation as CancellationError {
-                    throw cancellation
-                } catch {
-                    let diagnosticError = error as? IngestDiagnosticError
-                    let phase = diagnosticError?.ingestDiagnosticPhase ?? .transcribe
-                    let reason = diagnosticError?.ingestDiagnosticReason ?? "transcription-failed"
-                    let providerDiagnostic = diagnostic(
-                        streamID: streamID,
-                        phase: phase,
-                        severity: .error,
-                        reason: reason,
-                        source: redactedSource,
-                        streamType: streamType,
-                        context: errorContext(error, chunk: chunk)
-                    )
-                    if phase == .modelSetup {
-                        try finishRunOnce(
-                            status: .failed,
-                            diagnostic: providerDiagnostic,
-                            chunkID: chunkID,
-                            context: terminalContext(
-                                status: .failed, diagnosticCount: diagnostics.count + 1,
-                                phase: phase, reason: reason)
-                        )
-                        throw error
-                    }
-                    chunkDiagnostics.append(providerDiagnostic)
-                    segments = []
-                }
-
-                var speakerTurns: [SpeakerTurnDraft] = []
-                do {
-                    try Task.checkCancellation()
-                    speakerTurns = try await diarizer.diarize(chunk, transcriptSegments: segments)
-                    segments = applySpeakerTurns(
-                        speakerTurns,
-                        to: segments,
-                        startingSequence: nextSegmentSequence
-                    )
-                    nextSegmentSequence += segments.count
-                } catch let cancellation as CancellationError {
-                    throw cancellation
-                } catch {
-                    let diagnosticError = error as? IngestDiagnosticError
-                    let phase = diagnosticError?.ingestDiagnosticPhase ?? .diarize
-                    let reason = diagnosticError?.ingestDiagnosticReason ?? "diarization-failed"
-                    let providerDiagnostic = diagnostic(
-                        streamID: streamID,
-                        phase: phase,
-                        severity: .error,
-                        reason: reason,
-                        source: redactedSource,
-                        streamType: streamType,
-                        context: errorContext(error, chunk: chunk)
-                    )
-                    if phase == .modelSetup {
-                        try finishRunOnce(
-                            status: .failed,
-                            diagnostic: providerDiagnostic,
-                            chunkID: chunkID,
-                            context: terminalContext(
-                                status: .failed,
-                                diagnosticCount: diagnostics.count + chunkDiagnostics.count + 1,
-                                phase: phase, reason: reason)
-                        )
-                        throw error
-                    }
-                    chunkDiagnostics.append(providerDiagnostic)
-                    speakerTurns = []
-                    nextSegmentSequence += segments.count
-                }
-
                 var fingerprints: [AudioFingerprintDraft] = []
                 var songPlays: [SongPlayDraft] = []
                 do {
@@ -441,6 +350,99 @@ public struct StreamIngestPipeline {
                             context: errorContext(error, chunk: chunk)
                         )
                     )
+                }
+
+                var segments: [TranscriptSegmentDraft] = []
+                var speakerTurns: [SpeakerTurnDraft] = []
+                if !hasResolvedSongPlay(songPlays, overlapping: chunk) {
+                    do {
+                        try Task.checkCancellation()
+                        segments = try await transcriber.transcribe(chunk)
+                        let validation = validateAndNormalize(
+                            segments, nextSequence: nextSegmentSequence)
+                        segments = validation.segments
+                        chunkDiagnostics.append(
+                            contentsOf: validation.diagnostics.map { template in
+                                diagnostic(
+                                    streamID: streamID,
+                                    phase: .transcribe,
+                                    severity: .warning,
+                                    reason: template.reason,
+                                    source: redactedSource,
+                                    streamType: streamType,
+                                    context: template.context
+                                )
+                            })
+                    } catch let cancellation as CancellationError {
+                        throw cancellation
+                    } catch {
+                        let diagnosticError = error as? IngestDiagnosticError
+                        let phase = diagnosticError?.ingestDiagnosticPhase ?? .transcribe
+                        let reason = diagnosticError?.ingestDiagnosticReason ?? "transcription-failed"
+                        let providerDiagnostic = diagnostic(
+                            streamID: streamID,
+                            phase: phase,
+                            severity: .error,
+                            reason: reason,
+                            source: redactedSource,
+                            streamType: streamType,
+                            context: errorContext(error, chunk: chunk)
+                        )
+                        if phase == .modelSetup {
+                            try finishRunOnce(
+                                status: .failed,
+                                diagnostic: providerDiagnostic,
+                                chunkID: chunkID,
+                                context: terminalContext(
+                                    status: .failed, diagnosticCount: diagnostics.count + 1,
+                                    phase: phase, reason: reason)
+                            )
+                            throw error
+                        }
+                        chunkDiagnostics.append(providerDiagnostic)
+                        segments = []
+                    }
+
+                    do {
+                        try Task.checkCancellation()
+                        speakerTurns = try await diarizer.diarize(chunk, transcriptSegments: segments)
+                        segments = applySpeakerTurns(
+                            speakerTurns,
+                            to: segments,
+                            startingSequence: nextSegmentSequence
+                        )
+                        nextSegmentSequence += segments.count
+                    } catch let cancellation as CancellationError {
+                        throw cancellation
+                    } catch {
+                        let diagnosticError = error as? IngestDiagnosticError
+                        let phase = diagnosticError?.ingestDiagnosticPhase ?? .diarize
+                        let reason = diagnosticError?.ingestDiagnosticReason ?? "diarization-failed"
+                        let providerDiagnostic = diagnostic(
+                            streamID: streamID,
+                            phase: phase,
+                            severity: .error,
+                            reason: reason,
+                            source: redactedSource,
+                            streamType: streamType,
+                            context: errorContext(error, chunk: chunk)
+                        )
+                        if phase == .modelSetup {
+                            try finishRunOnce(
+                                status: .failed,
+                                diagnostic: providerDiagnostic,
+                                chunkID: chunkID,
+                                context: terminalContext(
+                                    status: .failed,
+                                    diagnosticCount: diagnostics.count + chunkDiagnostics.count + 1,
+                                    phase: phase, reason: reason)
+                            )
+                            throw error
+                        }
+                        chunkDiagnostics.append(providerDiagnostic)
+                        speakerTurns = []
+                        nextSegmentSequence += segments.count
+                    }
                 }
 
                 try persistence.persistTimeline(
@@ -538,6 +540,16 @@ public struct StreamIngestPipeline {
             bounded = Array(bounded.prefix(max(0, maxChunks)))
         }
         return bounded
+    }
+
+    private func hasResolvedSongPlay(
+        _ songPlays: [SongPlayDraft],
+        overlapping chunk: DecodedAudioChunk
+    ) -> Bool {
+        songPlays.contains { play in
+            !play.song.isUnknown
+                && max(0, min(play.endSeconds, chunk.endSeconds) - max(play.startSeconds, chunk.startSeconds)) > 0
+        }
     }
 
     private struct SegmentValidationDiagnostic {

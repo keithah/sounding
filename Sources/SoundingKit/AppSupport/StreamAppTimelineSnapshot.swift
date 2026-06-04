@@ -15,11 +15,11 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
     public init(
         streamID: Int64,
         player: AppPlayerTimelineSnapshot? = nil,
-        paragraphLimit: Int = 50,
-        wordLimitPerParagraph: Int = 40,
-        metadataLimit: Int = 10,
-        timelineLimit: Int = 100,
-        lookbackSeconds: Double? = 300,
+        paragraphLimit: Int = 10_000,
+        wordLimitPerParagraph: Int = 250,
+        metadataLimit: Int = 10_000,
+        timelineLimit: Int = 20_000,
+        lookbackSeconds: Double? = nil,
         focusedSegmentID: Int64? = nil,
         hideDeterministicUnknownSongs: Bool = false,
         refreshedAt: String? = nil

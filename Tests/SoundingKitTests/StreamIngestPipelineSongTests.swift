@@ -5,6 +5,62 @@ import XCTest
 @testable import SoundingKit
 
 final class StreamIngestPipelineSongTests: XCTestCase {
+    func testKnownSongFingerprintSkipsTranscription() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: StubFingerprinter(outputs: [
+                0: Self.knownSongFingerprintOutput(start: 0, end: 2)
+            ])
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 0)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 0, "song_plays": 1])
+    }
+
+    func testUnknownFingerprintStillTranscribes() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: StubFingerprinter(outputs: [
+                0: Self.fingerprintOutput(hash: "unknown-song", start: 0, end: 2)
+            ])
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 1, "song_plays": 1])
+    }
+
     func testAdjacentSameFingerprintChunksMergeAndChangedFingerprintSplitsPlay() async throws {
         let temporary = try TemporarySoundingDatabase()
         let fingerprinter = StubFingerprinter(outputs: [
@@ -406,6 +462,40 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         )
     }
 
+    private static func knownSongFingerprintOutput(start: Double, end: Double)
+        -> AudioFingerprintResult
+    {
+        AudioFingerprintResult(
+            fingerprints: [
+                AudioFingerprintDraft(
+                    algorithm: "test-deterministic",
+                    algorithmVersion: "1",
+                    fingerprint: "fp:known-song",
+                    fingerprintHash: "known-song",
+                    startSeconds: start,
+                    endSeconds: end,
+                    confidence: 0.99
+                )
+            ],
+            songPlays: [
+                SongPlayDraft(
+                    song: UnresolvedSongDraft(
+                        songKey: "fingerprint:known-song",
+                        title: "Known Song",
+                        artist: "Known Artist",
+                        album: "Known Album",
+                        displayName: "Known Song - Known Artist",
+                        isUnknown: false
+                    ),
+                    startSeconds: start,
+                    endSeconds: end,
+                    confidence: 0.99,
+                    source: "test_fingerprint"
+                )
+            ]
+        )
+    }
+
     private static var lookupMatch: AcoustIDMatch {
         AcoustIDMatch(
             acoustID: "acoustid-pipeline",
@@ -434,7 +524,7 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         )
     }
 
-    private static func segment(text: String) -> TranscriptSegmentDraft {
+    fileprivate static func segment(text: String) -> TranscriptSegmentDraft {
         TranscriptSegmentDraft(
             sequence: 0,
             speakerLabel: "song-speaker",
@@ -485,6 +575,27 @@ private struct FakeSongTranscriber: MLTranscription {
 
     func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
         segmentsBySequence[chunk.sequence] ?? []
+    }
+}
+
+private actor TranscriberInvocations {
+    private var count = 0
+
+    func record() {
+        count += 1
+    }
+
+    func countValue() -> Int {
+        count
+    }
+}
+
+private struct RecordingSongTranscriber: MLTranscription {
+    let invocations: TranscriberInvocations
+
+    func transcribe(_ chunk: DecodedAudioChunk) async throws -> [TranscriptSegmentDraft] {
+        await invocations.record()
+        return [StreamIngestPipelineSongTests.segment(text: "lyrics should not be transcribed")]
     }
 }
 

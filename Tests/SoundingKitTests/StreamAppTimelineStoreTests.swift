@@ -84,6 +84,31 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.diagnostics.bufferedSeekUnavailableMessage, "Requested 40s is unavailable (available range 10-30s).")
     }
 
+    func testDefaultTimelineRequestKeepsOlderMarkersOutsidePlaybackLookback() throws {
+        let fixture = try makeFixture()
+        let store = StreamAppTimelineStore(database: fixture.temporary.database)
+
+        let snapshot = try store.snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 600,
+                    liveEdgeSeconds: 610,
+                    bufferedStartSeconds: 580,
+                    bufferedEndSeconds: 610
+                ),
+                refreshedAt: "2026-05-01T16:00:01Z"
+            )
+        )
+
+        XCTAssertEqual(snapshot.timelineRail.visibleStartSeconds, 5)
+        XCTAssertEqual(snapshot.timelineRail.visibleEndSeconds, 610)
+        XCTAssertEqual(snapshot.timelineRail.spans.map(\.title), ["Fixture Song"])
+        XCTAssertEqual(snapshot.timelineRail.markers.map(\.title), ["AD_START", "AD_END"])
+        XCTAssertTrue(snapshot.timelineItems.contains { $0.subtitle?.contains("Opening alpha words") == true })
+    }
+
     func testTimelineFallsBackToSpeakerTurnsWhenTranscriptRowsHaveNoSpeakerLabel() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
