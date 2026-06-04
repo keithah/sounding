@@ -132,7 +132,7 @@ public struct StreamAppTimelineStore: Sendable {
                 let timelineItems = projection.timelineItems(limit: request.timelineLimit)
                 let timelineRail = makeTimelineRail(
                     request: request,
-                    timelineItems: timelineItems
+                    metadata: projection.metadataChanges
                 )
                 let latestSegmentEnd = try latestSegmentEndSeconds(
                     streamID: request.streamID, db: db)
@@ -749,18 +749,18 @@ public struct StreamAppTimelineStore: Sendable {
 
     private func makeTimelineRail(
         request: StreamAppTimelineRequest,
-        timelineItems: [StreamAppTimelineItem]
+        metadata: [StreamAppMetadataItem]
     ) -> StreamAppTimelineRailSnapshot {
-        let itemEnd = timelineItems
+        let itemEnd = metadata
             .map { $0.endSeconds ?? $0.startSeconds }
             .max()
-        let itemStart = timelineItems.map(\.startSeconds).min()
+        let itemStart = metadata.map(\.startSeconds).min()
         let visibleEnd = request.player?.liveEdgeSeconds ?? itemEnd ?? 0
         let visibleStart = request.lookbackSeconds.map { max(0, visibleEnd - $0) }
             ?? itemStart
             ?? 0
         return StreamAppTimelineRailProjection.project(
-            items: timelineItems,
+            metadata: metadata,
             visibleStartSeconds: visibleStart,
             visibleEndSeconds: visibleEnd
         )

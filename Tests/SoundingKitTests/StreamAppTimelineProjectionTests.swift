@@ -54,7 +54,8 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         )
 
         XCTAssertEqual(index.currentSong(at: 40)?.title, "Current")
-        XCTAssertNil(index.currentSong(at: 60))
+        XCTAssertEqual(index.currentSong(at: 60)?.title, "Current")
+        XCTAssertNil(index.currentSong(at: 5))
         XCTAssertEqual(index.currentSong(at: nil)?.title, "Newest")
     }
 

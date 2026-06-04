@@ -222,18 +222,54 @@ struct TimelineRailView: View {
     var seekToSeconds: (Double) -> Void
     var seekUnavailable: (Double) -> Void
 
-    private var hasVisibleContent: Bool {
-        !rail.spans.isEmpty || !rail.markers.isEmpty
-    }
+    @State private var viewportStartSeconds: Double?
+    @State private var viewportEndSeconds: Double?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Broadcast Timeline")
+                        .font(.caption.weight(.semibold))
+                    Text("\(clockLabel(viewport.start)) - \(clockLabel(viewport.end))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Out", systemImage: "minus.magnifyingglass") {
+                    zoom(by: 2)
+                }
+                .disabled(!canZoomOut)
+                Button("In", systemImage: "plus.magnifyingglass") {
+                    zoom(by: 0.5)
+                }
+                .disabled(!canZoomIn)
+                Button("Left", systemImage: "chevron.left") {
+                    pan(direction: -1)
+                }
+                .disabled(!canPanLeft)
+                Button("Right", systemImage: "chevron.right") {
+                    pan(direction: 1)
+                }
+                .disabled(!canPanRight)
+                Button("Live", systemImage: "dot.radiowaves.forward") {
+                    jumpToLive()
+                }
+                .disabled(!canPanRight && isFullWindow)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
             HStack {
-                Text(timeLabel(rail.visibleStartSeconds))
+                Text(timeLabel(viewport.start))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(timeLabel(rail.visibleEndSeconds))
+                Text("\(Int(viewport.duration.rounded()))s visible")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(timeLabel(viewport.end))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -242,7 +278,7 @@ struct TimelineRailView: View {
                     RoundedRectangle(cornerRadius: 6)
                         .fill(.quaternary.opacity(0.35))
                     if hasVisibleContent {
-                        ForEach(rail.spans) { span in
+                        ForEach(viewportRail.spans) { span in
                             Button {
                                 playOrReport(seconds: span.startSeconds, isSeekable: span.isSeekable)
                             } label: {
@@ -264,7 +300,7 @@ struct TimelineRailView: View {
                             .offset(x: xOffset(span.normalizedStart, totalWidth: proxy.size.width))
                             .help(spanHelp(span))
                         }
-                        ForEach(rail.markers) { marker in
+                        ForEach(viewportRail.markers) { marker in
                             Button {
                                 playOrReport(seconds: marker.seconds, isSeekable: marker.isSeekable)
                             } label: {
@@ -276,13 +312,118 @@ struct TimelineRailView: View {
                             .offset(x: xOffset(marker.normalizedPosition, totalWidth: proxy.size.width))
                             .help("\(marker.source.rawValue): \(marker.title)")
                         }
+                    } else {
+                        Text("No metadata markers in this window")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
                     }
                 }
             }
-            .frame(height: 36)
+            .frame(height: 38)
+
+            if fullDuration > minimumViewportDuration {
+                Slider(
+                    value: viewportCenterBinding,
+                    in: viewportCenterRange
+                )
+                .controlSize(.small)
+                .help("Scroll the visible broadcast timeline window.")
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Timeline rail")
+    }
+
+    private var hasVisibleContent: Bool {
+        !viewportRail.spans.isEmpty || !viewportRail.markers.isEmpty
+    }
+
+    private var fullStart: Double {
+        min(rail.visibleStartSeconds, rail.visibleEndSeconds)
+    }
+
+    private var fullEnd: Double {
+        max(rail.visibleStartSeconds, rail.visibleEndSeconds)
+    }
+
+    private var fullDuration: Double {
+        max(0, fullEnd - fullStart)
+    }
+
+    private var minimumViewportDuration: Double {
+        min(120, max(30, fullDuration))
+    }
+
+    private var viewport: (start: Double, end: Double, duration: Double) {
+        guard fullDuration > 0 else {
+            return (fullStart, fullEnd, 0)
+        }
+        let requestedStart = viewportStartSeconds ?? fullStart
+        let requestedEnd = viewportEndSeconds ?? fullEnd
+        var start = min(requestedStart, requestedEnd)
+        var end = max(requestedStart, requestedEnd)
+        if end <= start {
+            end = start + fullDuration
+        }
+        let duration = min(fullDuration, max(minimumViewportDuration, end - start))
+        start = min(max(fullStart, start), max(fullStart, fullEnd - duration))
+        end = min(fullEnd, start + duration)
+        return (start, end, end - start)
+    }
+
+    private var viewportRail: StreamAppTimelineRailSnapshot {
+        let current = viewport
+        guard current.duration > 0 else {
+            return StreamAppTimelineRailSnapshot(
+                visibleStartSeconds: current.start,
+                visibleEndSeconds: current.end,
+                spans: [],
+                markers: []
+            )
+        }
+        return StreamAppTimelineRailSnapshot(
+            visibleStartSeconds: current.start,
+            visibleEndSeconds: current.end,
+            spans: rail.spans.compactMap { visibleSpan($0, in: current) },
+            markers: rail.markers.compactMap { visibleMarker($0, in: current) }
+        )
+    }
+
+    private var isFullWindow: Bool {
+        abs(viewport.duration - fullDuration) < 0.001
+    }
+
+    private var canZoomIn: Bool {
+        fullDuration > minimumViewportDuration && viewport.duration > minimumViewportDuration
+    }
+
+    private var canZoomOut: Bool {
+        fullDuration > 0 && viewport.duration < fullDuration
+    }
+
+    private var canPanLeft: Bool {
+        viewport.start > fullStart + 0.001
+    }
+
+    private var canPanRight: Bool {
+        viewport.end < fullEnd - 0.001
+    }
+
+    private var viewportCenterRange: ClosedRange<Double> {
+        let half = viewport.duration / 2
+        return (fullStart + half)...(fullEnd - half)
+    }
+
+    private var viewportCenterBinding: Binding<Double> {
+        Binding(
+            get: {
+                (viewport.start + viewport.end) / 2
+            },
+            set: { newCenter in
+                setViewport(center: newCenter, duration: viewport.duration)
+            }
+        )
     }
 
     private func playOrReport(seconds: Double, isSeekable: Bool) {
@@ -291,6 +432,90 @@ struct TimelineRailView: View {
         } else {
             seekUnavailable(seconds)
         }
+    }
+
+    private func zoom(by factor: Double) {
+        guard fullDuration > 0 else { return }
+        let current = viewport
+        let center = (current.start + current.end) / 2
+        let duration = min(fullDuration, max(minimumViewportDuration, current.duration * factor))
+        setViewport(center: center, duration: duration)
+    }
+
+    private func pan(direction: Double) {
+        guard fullDuration > 0 else { return }
+        let current = viewport
+        let center = (current.start + current.end) / 2
+        let step = max(10, current.duration * 0.5)
+        setViewport(center: center + (step * direction), duration: current.duration)
+    }
+
+    private func jumpToLive() {
+        setViewport(center: fullEnd - (viewport.duration / 2), duration: viewport.duration)
+    }
+
+    private func setViewport(center: Double, duration: Double) {
+        let safeDuration = min(fullDuration, max(minimumViewportDuration, duration))
+        var start = center - safeDuration / 2
+        var end = center + safeDuration / 2
+        if start < fullStart {
+            start = fullStart
+            end = min(fullEnd, start + safeDuration)
+        }
+        if end > fullEnd {
+            end = fullEnd
+            start = max(fullStart, end - safeDuration)
+        }
+        viewportStartSeconds = start
+        viewportEndSeconds = end
+    }
+
+    private func visibleSpan(
+        _ span: StreamAppTimelineRailSpan,
+        in current: (start: Double, end: Double, duration: Double)
+    ) -> StreamAppTimelineRailSpan? {
+        guard span.endSeconds >= current.start && span.startSeconds <= current.end else {
+            return nil
+        }
+        let clampedStart = min(max(span.startSeconds, current.start), current.end)
+        let clampedEnd = min(max(span.endSeconds, current.start), current.end)
+        return StreamAppTimelineRailSpan(
+            id: span.id,
+            title: span.title,
+            subtitle: span.subtitle,
+            startSeconds: span.startSeconds,
+            endSeconds: span.endSeconds,
+            normalizedStart: normalized(clampedStart, in: current),
+            normalizedEnd: normalized(clampedEnd, in: current),
+            colorToken: span.colorToken,
+            isSeekable: span.isSeekable
+        )
+    }
+
+    private func visibleMarker(
+        _ marker: StreamAppTimelineRailMarker,
+        in current: (start: Double, end: Double, duration: Double)
+    ) -> StreamAppTimelineRailMarker? {
+        guard marker.seconds >= current.start && marker.seconds <= current.end else {
+            return nil
+        }
+        return StreamAppTimelineRailMarker(
+            id: marker.id,
+            title: marker.title,
+            source: marker.source,
+            seconds: marker.seconds,
+            normalizedPosition: normalized(marker.seconds, in: current),
+            colorToken: marker.colorToken,
+            isSeekable: marker.isSeekable
+        )
+    }
+
+    private func normalized(
+        _ seconds: Double,
+        in current: (start: Double, end: Double, duration: Double)
+    ) -> Double {
+        guard current.duration > 0 else { return 0 }
+        return (seconds - current.start) / current.duration
     }
 
     private func spanWidth(_ span: StreamAppTimelineRailSpan, totalWidth: CGFloat) -> CGFloat {
@@ -310,6 +535,13 @@ struct TimelineRailView: View {
 
     private func timeLabel(_ seconds: Double) -> String {
         String(format: "%.0fs", seconds)
+    }
+
+    private func clockLabel(_ seconds: Double) -> String {
+        let safeSeconds = max(0, Int(seconds.rounded()))
+        let minutes = safeSeconds / 60
+        let remainingSeconds = safeSeconds % 60
+        return String(format: "%02d:%02d", minutes, remainingSeconds)
     }
 }
 

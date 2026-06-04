@@ -127,6 +127,25 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertEqual(marker.normalizedPosition, 0.5, accuracy: 0.001)
     }
 
+    func testBroadcastProjectionSuppressesShortFingerprintFlips() {
+        let rail = StreamAppTimelineRailProjection.project(
+            metadata: [
+                metadata("song:1", title: "Clocks", artist: "Coldplay", start: 0, end: 70, source: "timed_id3"),
+                metadata("song:2", title: "MUTT", artist: "Leon Thomas", start: 70, end: 76, source: "chromaprint"),
+                metadata("song:3", title: "Clocks", artist: "Coldplay", start: 76, end: 84, source: "chromaprint"),
+                metadata("song:4", title: "MUTT", artist: "Leon Thomas", start: 84, end: 210, source: "timed_id3"),
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 210
+        )
+
+        XCTAssertEqual(rail.spans.map(\.title), ["Clocks", "MUTT"])
+        XCTAssertEqual(rail.spans[0].startSeconds, 0, accuracy: 0.001)
+        XCTAssertEqual(rail.spans[0].endSeconds, 84, accuracy: 0.001)
+        XCTAssertEqual(rail.spans[1].startSeconds, 84, accuracy: 0.001)
+        XCTAssertEqual(rail.spans[1].endSeconds, 210, accuracy: 0.001)
+    }
+
     private func timeline(
         _ id: String,
         kind: StreamAppTimelineItemKind,
@@ -143,6 +162,26 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
             title: title,
             subtitle: subtitle,
             isSeekable: true
+        )
+    }
+
+    private func metadata(
+        _ id: String,
+        title: String,
+        artist: String,
+        start: Double,
+        end: Double,
+        source: String
+    ) -> StreamAppMetadataItem {
+        StreamAppMetadataItem(
+            id: id,
+            kind: .song,
+            startSeconds: start,
+            endSeconds: end,
+            title: title,
+            artist: artist,
+            subtitle: nil,
+            source: source
         )
     }
 }

@@ -2,6 +2,19 @@ import Foundation
 
 public enum StreamAppTimelineRailProjection {
     public static func project(
+        metadata: [StreamAppMetadataItem],
+        visibleStartSeconds: Double,
+        visibleEndSeconds: Double
+    ) -> StreamAppTimelineRailSnapshot {
+        let items = broadcastItems(from: metadata)
+        return project(
+            items: items,
+            visibleStartSeconds: visibleStartSeconds,
+            visibleEndSeconds: visibleEndSeconds
+        )
+    }
+
+    public static func project(
         items: [StreamAppTimelineItem],
         visibleStartSeconds: Double,
         visibleEndSeconds: Double
@@ -43,6 +56,101 @@ public enum StreamAppTimelineRailProjection {
             visibleEndSeconds: orderedVisibleEndSeconds,
             spans: spans,
             markers: markers
+        )
+    }
+
+    private static func broadcastItems(from metadata: [StreamAppMetadataItem]) -> [StreamAppTimelineItem] {
+        let sorted = metadata.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            return $0.id < $1.id
+        }
+        let smoothedSongs = smoothSongMetadata(sorted.filter { $0.kind == .song })
+        let songItems = smoothedSongs.map { item in
+            StreamAppTimelineItem(
+                id: item.id,
+                kind: .song,
+                startSeconds: item.startSeconds,
+                endSeconds: item.endSeconds,
+                startTimestamp: item.startTimestamp,
+                endTimestamp: item.endTimestamp,
+                title: item.title,
+                subtitle: item.subtitle,
+                speakerDisplay: metadataSpeakerDisplay(for: item),
+                isSeekable: false
+            )
+        }
+        let eventItems = sorted.filter { $0.kind == .event }.map { item in
+            StreamAppTimelineItem(
+                id: item.id,
+                kind: .event,
+                startSeconds: item.startSeconds,
+                endSeconds: item.endSeconds,
+                startTimestamp: item.startTimestamp,
+                endTimestamp: item.endTimestamp,
+                title: item.title,
+                subtitle: item.subtitle,
+                isSeekable: false
+            )
+        }
+        return songItems + eventItems
+    }
+
+    private static func smoothSongMetadata(_ songs: [StreamAppMetadataItem]) -> [StreamAppMetadataItem] {
+        var result: [StreamAppMetadataItem] = []
+        for song in songs {
+            var candidate = song
+            candidate.endSeconds = candidate.endSeconds ?? candidate.startSeconds
+            guard let last = result.last else {
+                result.append(candidate)
+                continue
+            }
+            let lastEnd = last.endSeconds ?? last.startSeconds
+            let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
+            if sameSong(last, candidate) {
+                result[result.count - 1].endSeconds = max(lastEnd, candidateEnd)
+                result[result.count - 1].endTimestamp = candidate.endTimestamp
+                continue
+            }
+            let gap = candidate.startSeconds - lastEnd
+            let duration = max(0, candidateEnd - candidate.startSeconds)
+            if isFingerprint(candidate), !isTrusted(last), gap <= 30, duration < 20 {
+                result[result.count - 1].endSeconds = max(lastEnd, candidateEnd)
+                result[result.count - 1].endTimestamp = candidate.endTimestamp
+                continue
+            }
+            if isFingerprint(candidate), isTrusted(last), gap <= 45, duration < 30 {
+                result[result.count - 1].endSeconds = max(lastEnd, candidateEnd)
+                result[result.count - 1].endTimestamp = candidate.endTimestamp
+                continue
+            }
+            result.append(candidate)
+        }
+        return result
+    }
+
+    private static func sameSong(_ lhs: StreamAppMetadataItem, _ rhs: StreamAppMetadataItem) -> Bool {
+        lhs.title.caseInsensitiveCompare(rhs.title) == .orderedSame
+            && (lhs.artist ?? "").caseInsensitiveCompare(rhs.artist ?? "") == .orderedSame
+    }
+
+    private static func isTrusted(_ item: StreamAppMetadataItem) -> Bool {
+        let source = (item.source ?? item.id).lowercased()
+        return source.contains("id3") || source.contains("scte") || source.contains("timed") || item.id.hasPrefix("event:")
+    }
+
+    private static func isFingerprint(_ item: StreamAppMetadataItem) -> Bool {
+        let source = (item.source ?? item.id).lowercased()
+        return source.contains("fingerprint") || source.contains("chromaprint") || source.contains("acoust")
+    }
+
+    private static func metadataSpeakerDisplay(for item: StreamAppMetadataItem) -> StreamAppSpeakerDisplay? {
+        guard let artist = item.artist?.trimmingCharacters(in: .whitespacesAndNewlines), !artist.isEmpty else {
+            return nil
+        }
+        return StreamAppSpeakerDisplay(
+            rawLabel: artist,
+            displayLabel: artist,
+            colorToken: StreamAppSpeakerDisplayProjection.fallbackColorToken(for: artist)
         )
     }
 

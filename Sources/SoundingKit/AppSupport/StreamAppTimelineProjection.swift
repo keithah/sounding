@@ -23,9 +23,14 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         guard let playerPosition else {
             return songMetadata.first
         }
-        return songMetadata.first { item in
+        if let exactMatch = songMetadata.first(where: { item in
             item.startSeconds <= playerPosition
                 && (item.endSeconds ?? item.startSeconds) >= playerPosition
+        }) {
+            return exactMatch
+        }
+        return songMetadata.first { item in
+            item.startSeconds <= playerPosition
         }
     }
 
