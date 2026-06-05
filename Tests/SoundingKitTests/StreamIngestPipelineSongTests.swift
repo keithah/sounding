@@ -104,6 +104,268 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(counts, ["segments": 0, "events": 1])
     }
 
+    func testAlwaysTranscriptionPolicyCapturesIdentifiedSongAudio() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: 0,
+                            tags: [
+                                "TIT2": .string("Bad Dreams"),
+                                "TPE1": .string("Teddy Swims"),
+                                "TALB": .string("ID3"),
+                            ]
+                        )
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer(),
+            transcriptionPolicy: .always
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+    }
+
+    func testHiddenTranscriptionPolicyStillCapturesNonSongAudio() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: 0,
+                            tags: [
+                                "TIT2": .string("PADULTH21"),
+                                "TPE1": .string("Stingray"),
+                                "TALB": .string("ID3"),
+                            ]
+                        )
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer(),
+            transcriptionPolicy: .hidden
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+    }
+
+    func testTimedID3PromoMarkerStillTranscribesInNonSongPolicy() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: 0,
+                            tags: [
+                                "TIT2": .string("PADULTH21"),
+                                "TPE1": .string("Stingray"),
+                                "TALB": .string("ID3"),
+                            ]
+                        )
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 1, "events": 1, "song_plays": 0])
+    }
+
+    func testTimedID3SongMarkerPersistsOnChunkTimelineAndCreatesSongPlay() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let chunk = DecodedAudioChunk(
+            sequence: 42,
+            segmentURI: "https://example.test/live/segment-42.ts",
+            audio: Data([0x01, 0x02, 0x03]),
+            startSeconds: 9_000,
+            endSeconds: 9_006,
+            startedAt: "2026-05-01T12:00:00Z",
+            endedAt: "2026-05-01T12:00:06Z",
+            adMarkers: [
+                AdMarker(
+                    type: "ID3",
+                    classification: .unknown,
+                    source: "hls_segment",
+                    pts: 85,
+                    tags: [
+                        "TIT2": .string("Bad Dreams"),
+                        "TPE1": .string("Teddy Swims"),
+                        "TALB": .string("ID3"),
+                    ],
+                    fields: ["FrameIDs": .array([.string("TIT2"), .string("TPE1"), .string("TALB")])]
+                )
+            ]
+        )
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [chunk]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: StubFingerprinter(outputs: [
+                42: Self.fingerprintOutput(hash: "unknown-song", start: 9_000, end: 9_006)
+            ])
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live.m3u8", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 0)
+        let rows = try temporary.database.read { db in
+            try (
+                eventPTS: Double.fetchOne(db, sql: "SELECT pts FROM ad_events"),
+                segmentCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                songPlayCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+                songPlay: Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT songs.title, songs.artist, song_plays.start_seconds, song_plays.end_seconds,
+                               song_plays.source
+                        FROM song_plays
+                        JOIN songs ON songs.id = song_plays.song_id
+                        """)
+            )
+        }
+        XCTAssertEqual(rows.eventPTS, 9_000)
+        XCTAssertEqual(rows.segmentCount, 0)
+        XCTAssertEqual(rows.songPlayCount, 1)
+        XCTAssertEqual(rows.songPlay?["title"] as String?, "Bad Dreams")
+        XCTAssertEqual(rows.songPlay?["artist"] as String?, "Teddy Swims")
+        XCTAssertEqual(rows.songPlay?["start_seconds"] as Double?, 9_000)
+        XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 9_006)
+        XCTAssertEqual(rows.songPlay?["source"] as String?, "timed_id3")
+    }
+
+    func testAdjacentChunkInsideActiveTimedID3SongSkipsTranscriptionAcrossRuns() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let firstChunk = DecodedAudioChunk(
+            sequence: 0,
+            segmentURI: "https://example.test/live/segment-0.ts",
+            audio: Data([0x01, 0x02, 0x03]),
+            startSeconds: 0,
+            endSeconds: 6,
+            startedAt: "2026-05-01T12:00:00Z",
+            endedAt: "2026-05-01T12:00:06Z",
+            adMarkers: [
+                AdMarker(
+                    type: "ID3",
+                    classification: .unknown,
+                    source: "hls_segment",
+                    pts: 85,
+                    tags: [
+                        "TIT2": .string("The Great Divide"),
+                        "TPE1": .string("Noah Kahan"),
+                        "TALB": .string("ID3"),
+                    ]
+                )
+            ]
+        )
+        let secondChunk = DecodedAudioChunk(
+            sequence: 1,
+            segmentURI: "https://example.test/live/segment-1.ts",
+            audio: Data([0x04, 0x05, 0x06]),
+            startSeconds: 6,
+            endSeconds: 12,
+            startedAt: "2026-05-01T12:00:06Z",
+            endedAt: "2026-05-01T12:00:12Z",
+            adMarkers: []
+        )
+        let firstPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [firstChunk]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+        let secondPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [secondChunk]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let first = try await firstPipeline.run(
+            source: "https://example.test/live.m3u8", streamType: .hls, maxChunks: 1)
+        let second = try await secondPipeline.run(
+            streamID: first.streamID,
+            source: "https://example.test/live.m3u8",
+            streamType: .hls,
+            maxChunks: 1
+        )
+
+        XCTAssertEqual(first.processedChunks, 1)
+        XCTAssertEqual(second.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 0)
+        let rows = try temporary.database.read { db in
+            try (
+                segmentCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                songPlay: Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT songs.artist, songs.title, song_plays.start_seconds, song_plays.end_seconds
+                        FROM song_plays
+                        JOIN songs ON songs.id = song_plays.song_id
+                        """)
+            )
+        }
+        XCTAssertEqual(rows.segmentCount, 0)
+        XCTAssertEqual(rows.songPlay?["artist"] as String?, "Noah Kahan")
+        XCTAssertEqual(rows.songPlay?["title"] as String?, "The Great Divide")
+        XCTAssertEqual(rows.songPlay?["start_seconds"] as Double?, 0)
+        XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 12)
+    }
+
     func testAdjacentSameFingerprintChunksMergeAndChangedFingerprintSplitsPlay() async throws {
         let temporary = try TemporarySoundingDatabase()
         let fingerprinter = StubFingerprinter(outputs: [

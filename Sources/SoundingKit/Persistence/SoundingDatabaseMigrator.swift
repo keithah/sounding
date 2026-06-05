@@ -431,6 +431,14 @@ enum SoundingDatabaseMigrator {
             }
         }
 
+        migrator.registerMigration("addStreamTranscriptionPolicy") { db in
+            try db.alter(table: "streams") { table in
+                table.add(column: "transcription_policy", .text)
+                    .notNull()
+                    .defaults(to: StreamTranscriptionPolicy.defaultValue.rawValue)
+            }
+        }
+
         migrator.registerMigration("addAudioArchiveSegments") { db in
             try db.create(table: "audio_archive_segments") { table in
                 table.autoIncrementedPrimaryKey("id")

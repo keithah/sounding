@@ -10,6 +10,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
     public var lookbackSeconds: Double?
     public var focusedSegmentID: Int64?
     public var hideDeterministicUnknownSongs: Bool
+    public var transcriptionPolicy: StreamTranscriptionPolicy
     public var refreshedAt: String
 
     public init(
@@ -22,6 +23,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
         lookbackSeconds: Double? = nil,
         focusedSegmentID: Int64? = nil,
         hideDeterministicUnknownSongs: Bool = false,
+        transcriptionPolicy: StreamTranscriptionPolicy = .defaultValue,
         refreshedAt: String? = nil
     ) {
         self.streamID = streamID
@@ -33,6 +35,7 @@ public struct StreamAppTimelineRequest: Equatable, Sendable {
         self.lookbackSeconds = lookbackSeconds
         self.focusedSegmentID = focusedSegmentID
         self.hideDeterministicUnknownSongs = hideDeterministicUnknownSongs
+        self.transcriptionPolicy = transcriptionPolicy
         self.refreshedAt = refreshedAt ?? Self.defaultRefreshTimestamp()
     }
 
@@ -185,6 +188,7 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
     public var subtitle: String?
     public var confidence: Double?
     public var source: String?
+    public var isUnknown: Bool
 
     public init(
         id: String,
@@ -197,7 +201,8 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         artist: String? = nil,
         subtitle: String? = nil,
         confidence: Double? = nil,
-        source: String? = nil
+        source: String? = nil,
+        isUnknown: Bool = false
     ) {
         self.id = id
         self.kind = kind
@@ -210,6 +215,7 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         self.subtitle = subtitle
         self.confidence = confidence
         self.source = source
+        self.isUnknown = isUnknown
     }
 }
 

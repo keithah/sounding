@@ -15,6 +15,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     private let playbackController: (any AppPCMPlaybackAdapting)?
     private let playbackCommands: AppStreamPlaybackCommands
     private let diagnosticsLog: AppRuntimeDiagnosticsLog
+    private let playbackStopTimeoutNanoseconds: UInt64
     private let now: @Sendable () -> Date
     private let timestampFormatter: ISO8601DateFormatter
 
@@ -37,6 +38,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         audioArchiveStore: AudioArchiveStore? = nil,
         playbackController: (any AppPCMPlaybackAdapting)? = nil,
         diagnosticsLog: AppRuntimeDiagnosticsLog = AppRuntimeDiagnosticsLog(),
+        playbackStopTimeoutNanoseconds: UInt64 = 2_000_000_000,
         now: @escaping @Sendable () -> Date = { Date() },
         retrySleep: @escaping @Sendable (Int) async throws -> Void = { seconds in
             try await Task.sleep(nanoseconds: UInt64(max(0, seconds)) * 1_000_000_000)
@@ -57,6 +59,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             diagnosticsLog: diagnosticsLog
         )
         self.diagnosticsLog = diagnosticsLog
+        self.playbackStopTimeoutNanoseconds = playbackStopTimeoutNanoseconds
         self.now = now
         self.retrySleep = retrySleep
         self.timestampFormatter = ISO8601DateFormatter()
@@ -165,7 +168,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             sourceDescription: reconnect.sourceDescription,
             streamType: streamType,
             isDiarizationEnabled: reconnect.diarizationEnabled,
-            isAudioArchiveEnabled: reconnect.audioArchiveEnabled
+            isAudioArchiveEnabled: reconnect.audioArchiveEnabled,
+            transcriptionPolicy: reconnect.transcriptionPolicy
         )
         let token = UUID()
         diagnosticsLog.recordEvent(
@@ -307,7 +311,11 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         guard state != nil || clearsPendingStart else { return }
         state?.task?.cancel()
         if stopsPlayback, let playbackController, let playbackTimeline {
-            await playbackController.stop(timeline: playbackTimeline)
+            await stopPlaybackForRuntimeStop(
+                playbackController,
+                timeline: playbackTimeline,
+                streamID: streamID
+            )
         }
         if currentStreamID == streamID {
             currentStreamID = streamRuns.keys.min()
@@ -327,6 +335,38 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         let streamIDs = Array(streamRuns.keys)
         for streamID in streamIDs {
             await stop(streamID: streamID)
+        }
+    }
+
+    private func stopPlaybackForRuntimeStop(
+        _ playbackController: any AppPCMPlaybackAdapting,
+        timeline: AppPlayerTimelineClock,
+        streamID: Int64
+    ) async {
+        diagnosticsLog.recordEvent(
+            "runtime.playback.stop.requested",
+            streamID: streamID,
+            phase: "runtime.stop"
+        )
+        let timeoutNanoseconds = playbackStopTimeoutNanoseconds
+        let completed = await AppPlaybackStopCoordinator.stop(
+            playbackController,
+            timeline: timeline,
+            timeoutNanoseconds: timeoutNanoseconds
+        ) { [diagnosticsLog] in
+            diagnosticsLog.recordEvent(
+                "runtime.playback.stop.timed_out",
+                streamID: streamID,
+                phase: "runtime.stop",
+                fields: ["timeoutNanoseconds": String(timeoutNanoseconds)]
+            )
+        }
+        if completed {
+            diagnosticsLog.recordEvent(
+                "runtime.playback.stop.completed",
+                streamID: streamID,
+                phase: "runtime.stop"
+            )
         }
     }
 

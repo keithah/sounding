@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2 - 2026-06-05
+
+- Added a hybrid broadcast timeline with zoomable marker rails and persisted song/ad marker projection.
+- Normalized program metadata at ingest so repeated ID3/fingerprint hits collapse into coherent song spans.
+- Added per-stream transcript display modes so song lyrics can be hidden while non-song content remains available.
+- Improved song timeline persistence, export-ready marker storage, and stream registry settings for cached audio.
+- Hardened runtime stop, restart, and wake recovery so stuck AVFoundation playback cleanup cannot leave the app falsely running.
+- Added regression coverage for metadata normalization, timeline projection, song persistence, and playback-stop timeouts.
+
 ## 0.2.1 - 2026-05-08
 
 - Moved the selected-stream player back to the bottom of the app and removed duplicated stream identity text from the detail pane.

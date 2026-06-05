@@ -35,6 +35,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     private let diagnosticsLog: AppRuntimeDiagnosticsLog
     private let ingestMode: StreamIngestAppRuntimeMode
     private let livePollIntervalNanoseconds: UInt64
+    private let playbackStopTimeoutNanoseconds: UInt64
 
     public init(
         database: SoundingDatabase,
@@ -50,6 +51,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         diagnosticsLog: AppRuntimeDiagnosticsLog = AppRuntimeDiagnosticsLog(),
         ingestMode: StreamIngestAppRuntimeMode = .singlePass,
         livePollIntervalNanoseconds: UInt64 = 2_000_000_000,
+        playbackStopTimeoutNanoseconds: UInt64 = 2_000_000_000,
         diarizerFactory: (@Sendable (Bool) -> any SpeakerDiarization)? = nil,
         now: @escaping StreamIngestPipeline.TimestampProvider = { SoundingTimestampClock.timestamp() }
     ) {
@@ -67,6 +69,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         self.diagnosticsLog = diagnosticsLog
         self.ingestMode = ingestMode
         self.livePollIntervalNanoseconds = livePollIntervalNanoseconds
+        self.playbackStopTimeoutNanoseconds = playbackStopTimeoutNanoseconds
         self.now = now
     }
 
@@ -84,6 +87,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 "ingestMode": String(describing: ingestMode),
                 "isDiarizationEnabled": String(request.isDiarizationEnabled),
                 "isAudioArchiveEnabled": String(request.isAudioArchiveEnabled),
+                "transcriptionPolicy": request.transcriptionPolicy.rawValue,
             ]
         )
         let runtimeDecoder: any AudioDecoding
@@ -199,7 +203,11 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 phase: "runner.cancel"
             )
             if let player {
-                await player.stop(timeline: timeline)
+                await stopPlaybackDuringCleanup(
+                    player,
+                    request: request,
+                    reason: "cancelled"
+                )
             }
             if let rollingBuffer {
                 await timeline.updateRollingBuffer(await rollingBuffer.cleanup())
@@ -215,7 +223,11 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 error: error
             )
             if let player {
-                await player.stop(timeline: timeline)
+                await stopPlaybackDuringCleanup(
+                    player,
+                    request: request,
+                    reason: "failed"
+                )
                 await timeline.updatePlayerState(
                     .failed(message: String(describing: error)),
                     message: "Runtime playback failed: \(error).")
@@ -224,6 +236,52 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 await timeline.updateRollingBuffer(await rollingBuffer.cleanup())
             }
             throw error
+        }
+    }
+
+    private func stopPlaybackDuringCleanup(
+        _ player: any AppPCMPlaybackAdapting,
+        request: AppStreamRuntimeRequest,
+        reason: String
+    ) async {
+        diagnosticsLog.recordEvent(
+            "runner.playback.stop.requested",
+            streamID: request.streamID,
+            streamName: request.name,
+            source: request.source,
+            sourceDescription: request.sourceDescription,
+            phase: "runner.stop",
+            fields: ["reason": reason]
+        )
+        let timeoutNanoseconds = playbackStopTimeoutNanoseconds
+        let completed = await AppPlaybackStopCoordinator.stop(
+            player,
+            timeline: timeline,
+            timeoutNanoseconds: timeoutNanoseconds
+        ) { [diagnosticsLog] in
+            diagnosticsLog.recordEvent(
+                "runner.playback.stop.timed_out",
+                streamID: request.streamID,
+                streamName: request.name,
+                source: request.source,
+                sourceDescription: request.sourceDescription,
+                phase: "runner.stop",
+                fields: [
+                    "reason": reason,
+                    "timeoutNanoseconds": String(timeoutNanoseconds),
+                ]
+            )
+        }
+        if completed {
+            diagnosticsLog.recordEvent(
+                "runner.playback.stop.completed",
+                streamID: request.streamID,
+                streamName: request.name,
+                source: request.source,
+                sourceDescription: request.sourceDescription,
+                phase: "runner.stop",
+                fields: ["reason": reason]
+            )
         }
     }
 
@@ -242,6 +300,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
             fingerprintEnricher: fingerprintEnricher,
             audioArchiveStore: audioArchiveStore,
             audioArchiveEnabled: request.isAudioArchiveEnabled,
+            transcriptionPolicy: request.transcriptionPolicy,
             now: now
         ).run(
             streamID: request.streamID,

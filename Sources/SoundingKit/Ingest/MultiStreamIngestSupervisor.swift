@@ -7,17 +7,20 @@ public struct StreamIngestRequest: Equatable, Sendable {
     public var streamType: StreamType
     public var durationSeconds: Double?
     public var maxChunks: Int?
+    public var transcriptionPolicy: StreamTranscriptionPolicy
 
     public init(
         source: String,
         streamType: StreamType = .auto,
         durationSeconds: Double? = nil,
-        maxChunks: Int? = nil
+        maxChunks: Int? = nil,
+        transcriptionPolicy: StreamTranscriptionPolicy = .defaultValue
     ) {
         self.source = source
         self.streamType = streamType
         self.durationSeconds = durationSeconds
         self.maxChunks = maxChunks
+        self.transcriptionPolicy = transcriptionPolicy
     }
 }
 
@@ -179,6 +182,7 @@ public struct MultiStreamIngestSupervisor {
                 diarizer: diarizer,
                 fingerprinter: fingerprinter,
                 fingerprintEnricher: fingerprintEnricher,
+                transcriptionPolicy: request.transcriptionPolicy,
                 deduplicatesHLSSegments: deduplicatesHLSSegments,
                 now: now
             )

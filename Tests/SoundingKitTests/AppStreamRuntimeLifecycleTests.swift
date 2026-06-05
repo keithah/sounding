@@ -120,6 +120,40 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         await gate.release()
     }
 
+    func testStopPublishesStoppedWhenPlaybackStopDoesNotReturn() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Fixture HLS",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8"
+        )
+        let ingesterGate = RuntimeGate()
+        let stopGate = RuntimeStopGate()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: BlockingAppRuntimeIngester(gate: ingesterGate),
+            retryPolicy: .noRetry,
+            playbackTimeline: AppPlayerTimelineClock(),
+            playbackController: GatedStopRuntimePlaybackAdapter(gate: stopGate),
+            playbackStopTimeoutNanoseconds: 1_000_000
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+        _ = try await nextEvent(matching: { $0.phase == .running }, from: &iterator)
+        await runtime.stop(streamID: stream.id)
+
+        let stopped = try await nextEvent(matching: { $0.phase == .stopped }, from: &iterator)
+        XCTAssertEqual(stopped.streamID, stream.id)
+        let stopCallCount = await stopGate.callCount()
+        XCTAssertEqual(stopCallCount, 1)
+
+        await stopGate.release()
+        await ingesterGate.release()
+    }
+
     func testRestartingRunningStreamStartsReplacementWithoutWaitingForPlaybackStop() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -530,7 +564,6 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         XCTAssertNil(firstSuspended.lifecycleEvidence?.recoveryLatencySeconds)
         XCTAssertEqual(try statusStore.status(streamID: first.id)?.phase, .suspended)
 
-        await gate.release()
         try await Task.sleep(nanoseconds: 50_000_000)
         let firstSnapshotAfterCancel = await runtime.snapshot(streamID: first.id)
         let secondSnapshotAfterCancel = await runtime.snapshot(streamID: second.id)
@@ -551,6 +584,7 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         XCTAssertEqual(try statusStore.status(streamID: second.id)?.phase, .running)
         let requestStreamIDs = await ingester.requestStreamIDs()
         XCTAssertEqual(requestStreamIDs, [first.id, second.id, first.id, second.id])
+        await gate.release()
     }
 
     func testWakeRecoveryFailureIsRedactedAndDoesNotBlockSibling() async throws {

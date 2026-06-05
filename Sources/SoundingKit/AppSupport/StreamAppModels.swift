@@ -43,6 +43,30 @@ public enum StreamAppTransport: String, CaseIterable, Equatable, Sendable, Ident
     }
 }
 
+public extension StreamTranscriptionPolicy {
+    var displayName: String {
+        switch self {
+        case .always:
+            return "Show all transcripts"
+        case .nonSongs:
+            return "Show non-song transcripts"
+        case .hidden:
+            return "Hide transcripts"
+        }
+    }
+
+    var statusDetail: String {
+        switch self {
+        case .always:
+            return "Transcripts are shown for speech and songs."
+        case .nonSongs:
+            return "Song lyric transcripts are hidden when music metadata identifies the song."
+        case .hidden:
+            return "Transcript rows are hidden for this stream."
+        }
+    }
+}
+
 public enum StreamAppValidationError: Error, Equatable, Sendable, CustomStringConvertible {
     case emptyName
     case emptySource
@@ -212,6 +236,7 @@ public struct StreamAppListItem: Equatable, Identifiable, Sendable {
     public var status: StreamAppStatus
     public var diarizationEnabled: Bool
     public var audioArchiveEnabled: Bool
+    public var transcriptionPolicy: StreamTranscriptionPolicy
     public var runtimeStatusDetail: String?
 
     public init(record: StreamRecord) {
@@ -224,6 +249,7 @@ public struct StreamAppListItem: Equatable, Identifiable, Sendable {
         status = .fromRegistryStatus(record.status)
         diarizationEnabled = record.diarizationEnabled
         audioArchiveEnabled = record.audioArchiveEnabled
+        transcriptionPolicy = record.transcriptionPolicy
         runtimeStatusDetail = nil
     }
 }

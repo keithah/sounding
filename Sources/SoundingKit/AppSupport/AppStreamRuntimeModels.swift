@@ -8,6 +8,7 @@ public struct AppStreamRuntimeRequest: Equatable, Sendable {
     public var streamType: StreamType
     public var isDiarizationEnabled: Bool
     public var isAudioArchiveEnabled: Bool
+    public var transcriptionPolicy: StreamTranscriptionPolicy
 
     public init(
         streamID: Int64,
@@ -16,7 +17,8 @@ public struct AppStreamRuntimeRequest: Equatable, Sendable {
         sourceDescription: String,
         streamType: StreamType,
         isDiarizationEnabled: Bool = false,
-        isAudioArchiveEnabled: Bool = false
+        isAudioArchiveEnabled: Bool = false,
+        transcriptionPolicy: StreamTranscriptionPolicy = .defaultValue
     ) {
         self.streamID = streamID
         self.name = name
@@ -25,6 +27,7 @@ public struct AppStreamRuntimeRequest: Equatable, Sendable {
         self.streamType = streamType
         self.isDiarizationEnabled = isDiarizationEnabled
         self.isAudioArchiveEnabled = isAudioArchiveEnabled
+        self.transcriptionPolicy = transcriptionPolicy
     }
 }
 

@@ -36,6 +36,7 @@ public struct StreamIngestPipeline {
     private let fingerprintEnricher: any AudioFingerprintEnriching
     private let audioArchiveStore: AudioArchiveStore?
     private let audioArchiveEnabled: Bool
+    private let transcriptionPolicy: StreamTranscriptionPolicy
     private let deduplicatesHLSSegments: Bool
     private let now: TimestampProvider
 
@@ -52,6 +53,7 @@ public struct StreamIngestPipeline {
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
         audioArchiveStore: AudioArchiveStore? = nil,
         audioArchiveEnabled: Bool = false,
+        transcriptionPolicy: StreamTranscriptionPolicy = .defaultValue,
         deduplicatesHLSSegments: Bool = true,
         now: @escaping TimestampProvider = { StreamIngestPipeline.defaultTimestamp() }
     ) {
@@ -63,6 +65,7 @@ public struct StreamIngestPipeline {
         self.fingerprintEnricher = fingerprintEnricher
         self.audioArchiveStore = audioArchiveStore
         self.audioArchiveEnabled = audioArchiveEnabled
+        self.transcriptionPolicy = transcriptionPolicy
         self.deduplicatesHLSSegments = deduplicatesHLSSegments
         self.now = now
     }
@@ -164,6 +167,14 @@ public struct StreamIngestPipeline {
                 context["terminalReason"] = .string(IngestRedaction.redact(reason))
             }
             return context
+        }
+
+        let programMetadataResolver = ChunkProgramMetadataResolver { startSeconds, endSeconds in
+            try persistence.activeTimedMetadataSongPlay(
+                streamID: streamID,
+                startSeconds: startSeconds,
+                endSeconds: endSeconds
+            )
         }
 
         do {
@@ -352,11 +363,19 @@ public struct StreamIngestPipeline {
                     )
                 }
 
+                let programContext = try programMetadataResolver.resolve(
+                    chunk: chunk,
+                    fingerprintSongPlays: songPlays
+                )
+                let timelineAdMarkers = programContext.markers
+                songPlays = programContext.songPlays
+
                 var segments: [TranscriptSegmentDraft] = []
                 var speakerTurns: [SpeakerTurnDraft] = []
-                if !hasResolvedSongPlay(songPlays, overlapping: chunk)
-                    && !hasSongMetadataMarker(chunk.adMarkers)
-                {
+                if programContext.shouldCaptureTranscript(
+                    overlapping: chunk,
+                    policy: transcriptionPolicy.capturePolicy
+                ) {
                     do {
                         try Task.checkCancellation()
                         segments = try await transcriber.transcribe(chunk)
@@ -453,7 +472,7 @@ public struct StreamIngestPipeline {
                         chunkID: chunkID,
                         segments: segments,
                         speakerTurns: speakerTurns,
-                        adMarkers: redactedMarkers(chunk.adMarkers),
+                        adMarkers: redactedMarkers(timelineAdMarkers),
                         diagnostics: chunkDiagnostics,
                         fingerprints: fingerprints,
                         songPlays: songPlays,
@@ -542,62 +561,6 @@ public struct StreamIngestPipeline {
             bounded = Array(bounded.prefix(max(0, maxChunks)))
         }
         return bounded
-    }
-
-    private func hasResolvedSongPlay(
-        _ songPlays: [SongPlayDraft],
-        overlapping chunk: DecodedAudioChunk
-    ) -> Bool {
-        songPlays.contains { play in
-            !play.song.isUnknown
-                && max(0, min(play.endSeconds, chunk.endSeconds) - max(play.startSeconds, chunk.startSeconds)) > 0
-        }
-    }
-
-    private func hasSongMetadataMarker(_ markers: [AdMarker]) -> Bool {
-        markers.contains { marker in
-            let title = firstNonEmptyJSONValue(
-                from: marker.tags,
-                keys: ["TIT2", "Title", "title", "ProgramTitle", "Program"]
-            ) ?? firstNonEmptyJSONValue(
-                from: marker.fields,
-                keys: ["TIT2", "Title", "title", "ProgramTitle", "Program"]
-            )
-            guard title != nil else { return false }
-            let artistOrContext = firstNonEmptyJSONValue(
-                from: marker.tags,
-                keys: ["TPE1", "Artist", "artist", "Performer", "Provider", "TALB", "Album", "album"]
-            ) ?? firstNonEmptyJSONValue(
-                from: marker.fields,
-                keys: ["TPE1", "Artist", "artist", "Performer", "Provider", "TALB", "Album", "album", "Series"]
-            )
-            guard artistOrContext != nil else { return false }
-            let markerType = marker.type.lowercased()
-            let markerSource = marker.source.lowercased()
-            return markerType.contains("id3")
-                || markerType.contains("scte")
-                || markerSource.contains("id3")
-                || markerSource.contains("scte")
-                || markerSource.contains("timed")
-        }
-    }
-
-    private func firstNonEmptyJSONValue(
-        from values: [String: JSONValue],
-        keys: [String]
-    ) -> String? {
-        for key in keys {
-            if let value = nonEmptyString(from: values[key]) {
-                return value
-            }
-        }
-        return nil
-    }
-
-    private func nonEmptyString(from value: JSONValue?) -> String? {
-        guard case let .string(raw)? = value else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     private struct SegmentValidationDiagnostic {

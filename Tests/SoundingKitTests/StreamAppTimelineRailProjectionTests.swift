@@ -127,6 +127,21 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertEqual(marker.normalizedPosition, 0.5, accuracy: 0.001)
     }
 
+    func testNormalizesNonFiniteVisibleWindow() {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline("song:1", kind: .song, start: 0, end: 10, title: "Song", subtitle: "Artist")
+            ],
+            visibleStartSeconds: .nan,
+            visibleEndSeconds: .infinity
+        )
+
+        XCTAssertEqual(rail.visibleStartSeconds, 0)
+        XCTAssertEqual(rail.visibleEndSeconds, 0)
+        XCTAssertEqual(rail.spans, [])
+        XCTAssertEqual(rail.markers, [])
+    }
+
     func testBroadcastProjectionSuppressesShortFingerprintFlips() {
         let rail = StreamAppTimelineRailProjection.project(
             metadata: [

@@ -161,4 +161,56 @@ final class AppStreamRuntimePipelineRunnerTests: AppStreamRuntimeTestCase {
         XCTAssertGreaterThanOrEqual(evidence?["run_count"] as Int? ?? 0, 2)
         XCTAssertGreaterThanOrEqual(evidence?["chunk_count"] as Int? ?? 0, 2)
     }
+
+    func testPipelineRunnerCancellationDoesNotWaitForeverForPlaybackStop() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Continuous HLS",
+            streamType: "hls",
+            source: "https://example.test/continuous.m3u8"
+        )
+        let decoder = PollingFixtureDecoder()
+        let stopGate = RuntimeStopGate()
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: decoder,
+            transcriber: FixtureTranscriber(),
+            diarizer: FixtureDiarizer(),
+            player: GatedStopRuntimePlaybackAdapter(gate: stopGate),
+            timeline: AppPlayerTimelineClock(),
+            ingestMode: .livePolling(maxChunksPerPass: 1),
+            livePollIntervalNanoseconds: 1_000_000,
+            playbackStopTimeoutNanoseconds: 1_000_000,
+            now: { "2026-05-01T00:00:00Z" }
+        )
+        let request = AppStreamRuntimeRequest(
+            streamID: stream.id,
+            name: stream.name,
+            source: "https://example.test/continuous.m3u8",
+            sourceDescription: stream.sourceDescription,
+            streamType: .hls
+        )
+
+        let task = Task {
+            try await runner.run(request)
+        }
+        await decoder.waitForCalls(1)
+        let startedAt = Date()
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+        let stopCallCount = await stopGate.callCount()
+        XCTAssertEqual(stopCallCount, 1)
+
+        await stopGate.release()
+    }
 }

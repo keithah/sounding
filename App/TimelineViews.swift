@@ -340,11 +340,15 @@ struct TimelineRailView: View {
     }
 
     private var fullStart: Double {
-        min(rail.visibleStartSeconds, rail.visibleEndSeconds)
+        let start = safeSeconds(rail.visibleStartSeconds, fallback: 0)
+        let end = safeSeconds(rail.visibleEndSeconds, fallback: start)
+        return min(start, end)
     }
 
     private var fullEnd: Double {
-        max(rail.visibleStartSeconds, rail.visibleEndSeconds)
+        let start = safeSeconds(rail.visibleStartSeconds, fallback: 0)
+        let end = safeSeconds(rail.visibleEndSeconds, fallback: start)
+        return max(start, end)
     }
 
     private var fullDuration: Double {
@@ -359,8 +363,8 @@ struct TimelineRailView: View {
         guard fullDuration > 0 else {
             return (fullStart, fullEnd, 0)
         }
-        let requestedStart = viewportStartSeconds ?? fullStart
-        let requestedEnd = viewportEndSeconds ?? fullEnd
+        let requestedStart = safeSeconds(viewportStartSeconds, fallback: fullStart)
+        let requestedEnd = safeSeconds(viewportEndSeconds, fallback: fullEnd)
         var start = min(requestedStart, requestedEnd)
         var end = max(requestedStart, requestedEnd)
         if end <= start {
@@ -412,7 +416,14 @@ struct TimelineRailView: View {
 
     private var viewportCenterRange: ClosedRange<Double> {
         let half = viewport.duration / 2
-        return (fullStart + half)...(fullEnd - half)
+        let lower = fullStart + half
+        let upper = fullEnd - half
+        guard lower.isFinite, upper.isFinite, lower <= upper else {
+            let center = (fullStart + fullEnd) / 2
+            let safeCenter = center.isFinite ? center : 0
+            return safeCenter...safeCenter
+        }
+        return lower...upper
     }
 
     private var viewportCenterBinding: Binding<Double> {
@@ -455,9 +466,15 @@ struct TimelineRailView: View {
     }
 
     private func setViewport(center: Double, duration: Double) {
+        guard fullDuration > 0 else {
+            viewportStartSeconds = nil
+            viewportEndSeconds = nil
+            return
+        }
         let safeDuration = min(fullDuration, max(minimumViewportDuration, duration))
-        var start = center - safeDuration / 2
-        var end = center + safeDuration / 2
+        let safeCenter = safeSeconds(center, fallback: (fullStart + fullEnd) / 2)
+        var start = safeCenter - safeDuration / 2
+        var end = safeCenter + safeDuration / 2
         if start < fullStart {
             start = fullStart
             end = min(fullEnd, start + safeDuration)
@@ -468,6 +485,11 @@ struct TimelineRailView: View {
         }
         viewportStartSeconds = start
         viewportEndSeconds = end
+    }
+
+    private func safeSeconds(_ value: Double?, fallback: Double) -> Double {
+        guard let value, value.isFinite else { return fallback }
+        return value
     }
 
     private func visibleSpan(

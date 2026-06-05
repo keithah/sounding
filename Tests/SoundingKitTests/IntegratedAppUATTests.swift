@@ -84,6 +84,7 @@ final class IntegratedAppUATTests: XCTestCase {
             source: "https://example.test/synthetic/live.m3u8",
             createdAt: "2026-05-01T12:00:00Z"
         )
+        _ = try registry.updateTranscriptionPolicy(streamID: stream.id, policy: .always)
         let recorder = UATRuntimeRecorder()
         let timeline = AppPlayerTimelineClock()
         let rollingBuffer = RollingPCMBuffer(
@@ -117,7 +118,8 @@ final class IntegratedAppUATTests: XCTestCase {
             source: "https://example.test/synthetic/live.m3u8",
             sourceDescription: stream.sourceDescription,
             streamType: .hls,
-            isDiarizationEnabled: false
+            isDiarizationEnabled: false,
+            transcriptionPolicy: .always
         )
         let runtimeTask = Task {
             try await runner.run(request)
@@ -200,6 +202,7 @@ final class IntegratedAppUATTests: XCTestCase {
                     metadataLimit: 10,
                     timelineLimit: 10,
                     lookbackSeconds: 30 * 60,
+                    transcriptionPolicy: .always,
                     refreshedAt: "2026-05-01T12:00:40Z"
                 )
             )
@@ -286,6 +289,11 @@ final class IntegratedAppUATTests: XCTestCase {
             transport: .hls
         )
         let added = try state.viewModel.addStream(using: registry)
+        _ = try state.viewModel.updateTranscriptionPolicy(
+            streamID: added.id,
+            policy: .always,
+            using: registry
+        )
         XCTAssertEqual(added.sourceDescription, "https://example.test/private/live.m3u8")
         XCTAssertFalse(String(describing: state.viewModel).contains("listener:pass"))
         XCTAssertFalse(String(describing: state.viewModel).contains("uat-secret"))
@@ -610,6 +618,7 @@ private struct IntegratedUATIngester: AppStreamRuntimeIngesting {
                 lookup: DeterministicAcoustIDLookup(),
                 now: { "2026-05-01T20:00:00Z" }
             ),
+            transcriptionPolicy: .always,
             now: { "2026-05-01T20:00:00Z" }
         ).run(streamID: request.streamID, source: request.source, streamType: request.streamType)
         await gate.markPersisted()

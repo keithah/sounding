@@ -19,6 +19,7 @@ final class StreamRegistryTests: XCTestCase {
         XCTAssertEqual(record.sourceDescription, "https://example.test/private/live.m3u8")
         XCTAssertEqual(record.status, .active)
         XCTAssertFalse(record.diarizationEnabled)
+        XCTAssertEqual(record.transcriptionPolicy, .nonSongs)
         XCTAssertEqual(record.createdAt, "2026-05-01T10:00:00Z")
         XCTAssertEqual(record.updatedAt, "2026-05-01T10:00:00Z")
         XCTAssertNil(record.pausedAt)
@@ -32,7 +33,7 @@ final class StreamRegistryTests: XCTestCase {
         let stored = try temporary.database.read { db in
             try Row.fetchOne(
                 db,
-                sql: "SELECT source, source_url FROM streams WHERE id = ?",
+                sql: "SELECT source, source_url, transcription_policy FROM streams WHERE id = ?",
                 arguments: [record.id]
             )
         }
@@ -41,6 +42,7 @@ final class StreamRegistryTests: XCTestCase {
             stored?["source_url"] as String?,
             "https://user:pass@example.test/private/live.m3u8?token=secret#frag"
         )
+        XCTAssertEqual(stored?["transcription_policy"] as String?, "non_songs")
     }
 
     func testTypedStreamTypeOverloadsPersistRawRegistryValue() throws {
@@ -141,6 +143,42 @@ final class StreamRegistryTests: XCTestCase {
 
         XCTAssertTrue(try XCTUnwrap(registry.find(id: stream.id)).audioArchiveEnabled)
         XCTAssertTrue(try XCTUnwrap(registry.reconnectSource(id: stream.id)).audioArchiveEnabled)
+    }
+
+    func testTranscriptionPolicyIsPerStreamAndPersists() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let first = try registry.add(
+            name: "Music",
+            streamType: .hls,
+            source: "https://example.test/music.m3u8"
+        )
+        let second = try registry.add(
+            name: "Talk",
+            streamType: .hls,
+            source: "https://example.test/talk.m3u8"
+        )
+
+        let updated = try registry.updateTranscriptionPolicy(
+            streamID: first.id,
+            policy: .always,
+            updatedAt: "2026-05-01T10:01:00Z"
+        )
+
+        XCTAssertTrue(updated.changed)
+        XCTAssertEqual(updated.record.transcriptionPolicy, .always)
+        XCTAssertEqual(updated.record.updatedAt, "2026-05-01T10:01:00Z")
+        XCTAssertEqual(try XCTUnwrap(registry.find(id: first.id)).transcriptionPolicy, .always)
+        XCTAssertEqual(try XCTUnwrap(registry.find(id: second.id)).transcriptionPolicy, .nonSongs)
+        XCTAssertEqual(try XCTUnwrap(registry.reconnectSource(id: first.id)).transcriptionPolicy, .always)
+
+        let unchanged = try registry.updateTranscriptionPolicy(
+            streamID: first.id,
+            policy: .always,
+            updatedAt: "2026-05-01T10:02:00Z"
+        )
+        XCTAssertFalse(unchanged.changed)
+        XCTAssertEqual(unchanged.record.updatedAt, "2026-05-01T10:01:00Z")
     }
 
     func testReconnectSourceExposesRawSourceWithoutChangingListRedaction() throws {

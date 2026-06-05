@@ -19,8 +19,10 @@ public enum StreamAppTimelineRailProjection {
         visibleStartSeconds: Double,
         visibleEndSeconds: Double
     ) -> StreamAppTimelineRailSnapshot {
-        let orderedVisibleStartSeconds = min(visibleStartSeconds, visibleEndSeconds)
-        let orderedVisibleEndSeconds = max(visibleStartSeconds, visibleEndSeconds)
+        let finiteVisibleStartSeconds = visibleStartSeconds.isFinite ? visibleStartSeconds : 0
+        let finiteVisibleEndSeconds = visibleEndSeconds.isFinite ? visibleEndSeconds : finiteVisibleStartSeconds
+        let orderedVisibleStartSeconds = min(finiteVisibleStartSeconds, finiteVisibleEndSeconds)
+        let orderedVisibleEndSeconds = max(finiteVisibleStartSeconds, finiteVisibleEndSeconds)
         let duration = max(orderedVisibleEndSeconds - orderedVisibleStartSeconds, 0)
         let spans = items
             .filter { $0.kind == .song }

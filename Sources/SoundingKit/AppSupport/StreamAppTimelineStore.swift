@@ -134,7 +134,8 @@ public struct StreamAppTimelineStore: Sendable {
                 let projection = StreamAppTimelineProjection(
                     paragraphs: paragraphs,
                     metadata: songMetadata + eventMetadata,
-                    player: request.player
+                    player: request.player,
+                    transcriptionPolicy: request.transcriptionPolicy
                 )
                 let recentMetadata = projection.recentMetadata(limit: request.metadataLimit)
                 let currentMetadata = projection.currentMetadata()
@@ -152,7 +153,7 @@ public struct StreamAppTimelineStore: Sendable {
 
                 return StreamAppTimelineSnapshot(
                     streamID: request.streamID,
-                    transcriptParagraphs: paragraphs,
+                    transcriptParagraphs: projection.paragraphs,
                     speakers: speakers,
                     currentMetadata: currentMetadata,
                     recentMetadata: recentMetadata,
@@ -580,7 +581,8 @@ public struct StreamAppTimelineStore: Sendable {
                     songs.title,
                     songs.artist,
                     songs.display_name,
-                    songs.album
+                    songs.album,
+                    songs.is_unknown
                 FROM song_plays INDEXED BY song_plays_on_stream_start_id
                 JOIN ingest_runs ON ingest_runs.id = song_plays.run_id
                 JOIN songs ON songs.id = song_plays.song_id
@@ -623,7 +625,8 @@ public struct StreamAppTimelineStore: Sendable {
                 artist: artist,
                 subtitle: row["album"],
                 confidence: row["confidence"],
-                source: row["source"]
+                source: row["source"],
+                isUnknown: row["is_unknown"] ?? false
             )
         }
     }

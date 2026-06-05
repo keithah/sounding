@@ -84,6 +84,96 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.diagnostics.bufferedSeekUnavailableMessage, "Requested 40s is unavailable (available range 10-30s).")
     }
 
+    func testTranscriptionPolicyControlsDisplayedTranscriptRows() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Policy",
+            streamType: .hls,
+            source: "https://example.test/policy.m3u8",
+            createdAt: "2026-05-01T15:00:00Z"
+        )
+        let writer = IngestPersistence(database: temporary.database)
+        let runID = try writer.createRun(
+            streamID: stream.id,
+            startedAt: "2026-05-01T15:00:01Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 0,
+            segmentURI: "policy-000.ts",
+            startedAt: "2026-05-01T15:00:02Z",
+            endedAt: "2026-05-01T15:00:32Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(0, "speaker", 0, 10, "song lyric line"),
+                    segment(1, "speaker", 20, 30, "promo copy line"),
+                ],
+                songPlays: [
+                    SongPlayDraft(
+                        song: song(title: "The Great Divide", artist: "Noah Kahan"),
+                        startSeconds: 0,
+                        endSeconds: 15,
+                        confidence: 1,
+                        source: "ID3"
+                    ),
+                    SongPlayDraft(
+                        song: song(title: "PADULTH21", artist: "Stingray"),
+                        startSeconds: 20,
+                        endSeconds: 30,
+                        confidence: 1,
+                        source: "ID3"
+                    ),
+                ],
+                createdAt: "2026-05-01T15:00:03Z"
+            )
+        )
+        let store = StreamAppTimelineStore(database: temporary.database)
+
+        let always = try store.snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: stream.id,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                transcriptionPolicy: .always
+            )
+        )
+        let nonSongs = try store.snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: stream.id,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                transcriptionPolicy: .nonSongs
+            )
+        )
+        let hidden = try store.snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: stream.id,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                transcriptionPolicy: .hidden
+            )
+        )
+
+        XCTAssertEqual(always.timelineItems.filter { $0.kind == .transcript }.map(\.subtitle), [
+            "song lyric line",
+            "promo copy line",
+        ])
+        XCTAssertEqual(nonSongs.timelineItems.filter { $0.kind == .transcript }.map(\.subtitle), [
+            "promo copy line"
+        ])
+        XCTAssertEqual(hidden.timelineItems.filter { $0.kind == .transcript }, [])
+        XCTAssertEqual(nonSongs.timelineItems.filter { $0.kind == .song }.map(\.title), [
+            "The Great Divide",
+            "PADULTH21",
+        ])
+    }
+
     func testDefaultTimelineRequestKeepsOlderMarkersOutsidePlaybackLookback() throws {
         let fixture = try makeFixture()
         let store = StreamAppTimelineStore(database: fixture.temporary.database)

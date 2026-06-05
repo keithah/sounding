@@ -190,6 +190,16 @@ public struct StreamAppViewModel: Equatable, Sendable {
     }
 
     @discardableResult
+    public mutating func updateTranscriptionPolicy(
+        streamID: Int64,
+        policy: StreamTranscriptionPolicy,
+        using registry: StreamRegistry
+    ) throws -> StreamAppListItem {
+        let result = try registry.updateTranscriptionPolicy(streamID: streamID, policy: policy)
+        return replaceStream(result.record)
+    }
+
+    @discardableResult
     public mutating func addStream(using registry: StreamRegistry) throws -> StreamAppListItem {
         do {
             let request = try Self.validateAddDraft(addDraft)
@@ -404,11 +414,13 @@ public struct StreamAppViewModel: Equatable, Sendable {
         }
 
         do {
+            let policy = streams.first(where: { $0.id == streamID })?.transcriptionPolicy ?? .defaultValue
             let snapshot = try store.snapshot(
                 request: StreamAppTimelineRequest(
                     streamID: streamID,
                     player: playerTimelines[streamID],
                     hideDeterministicUnknownSongs: true,
+                    transcriptionPolicy: policy,
                     refreshedAt: refreshedAt
                 )
             )

@@ -28,6 +28,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.sounding.Sounding
         PRODUCT_NAME: Sounding
+        ACOUSTID_CLIENT_KEY: FYFIbD93Vn
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist

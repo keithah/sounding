@@ -297,6 +297,7 @@
 		A10000000000000000000015 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ACOUSTID_CLIENT_KEY = FYFIbD93Vn;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;
@@ -317,6 +318,7 @@
 		A10000000000000000000016 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ACOUSTID_CLIENT_KEY = FYFIbD93Vn;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGNING_ALLOWED = NO;
 				CODE_SIGNING_REQUIRED = NO;

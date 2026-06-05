@@ -2,6 +2,7 @@ import Foundation
 
 struct StreamAppTimelineMetadataIndex: Sendable {
     private let songMetadata: [StreamAppMetadataItem]
+    private let confirmedSongMetadata: [StreamAppMetadataItem]
     private let songBoundaryStarts: [Double]
     private let artistSongMetadata: [StreamAppMetadataItem]
 
@@ -10,6 +11,7 @@ struct StreamAppTimelineMetadataIndex: Sendable {
             .filter { $0.kind == .song }
             .sorted(by: StreamAppTimelineProjection.metadataSort)
         self.songMetadata = songMetadata
+        self.confirmedSongMetadata = songMetadata.filter(Self.isConfirmedMusicMetadata)
         self.songBoundaryStarts = songMetadata.map(\.startSeconds).sorted()
         self.artistSongMetadata = songMetadata
             .filter { Self.firstNonEmpty([$0.artist]) != nil }
@@ -47,6 +49,13 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         }
     }
 
+    func overlapsConfirmedSong(startSeconds: Double, endSeconds: Double) -> Bool {
+        confirmedSongMetadata.contains { item in
+            let itemEnd = item.endSeconds ?? item.startSeconds + 8
+            return max(startSeconds, item.startSeconds) < min(endSeconds, itemEnd)
+        }
+    }
+
     private func firstBoundaryIndex(greaterThan lowerBound: Double) -> Int {
         var low = 0
         var high = songBoundaryStarts.count
@@ -67,6 +76,16 @@ struct StreamAppTimelineMetadataIndex: Sendable {
             return trimmed?.isEmpty == false ? trimmed : nil
         }.first
     }
+
+    private static func isConfirmedMusicMetadata(_ item: StreamAppMetadataItem) -> Bool {
+        ProgramMetadataClassifier.isMusic(
+            title: item.title,
+            artist: item.artist,
+            album: item.subtitle,
+            source: ProgramMetadataSource(raw: item.source),
+            isUnknown: item.kind != .song || item.isUnknown
+        )
+    }
 }
 
 public struct StreamAppTimelineProjection: Sendable {
@@ -78,13 +97,19 @@ public struct StreamAppTimelineProjection: Sendable {
     public init(
         paragraphs: [StreamAppTranscriptParagraph],
         metadata: [StreamAppMetadataItem],
-        player: AppPlayerTimelineSnapshot? = nil
+        player: AppPlayerTimelineSnapshot? = nil,
+        transcriptionPolicy: StreamTranscriptionPolicy = .defaultValue
     ) {
-        self.paragraphs = paragraphs
         let metadataChanges = Self.coalescedMetadataChanges(metadata)
         self.metadataChanges = metadataChanges
         self.player = player
-        self.metadataIndex = StreamAppTimelineMetadataIndex(metadataChanges: metadataChanges)
+        let metadataIndex = StreamAppTimelineMetadataIndex(metadataChanges: metadataChanges)
+        self.metadataIndex = metadataIndex
+        self.paragraphs = Self.filteredParagraphs(
+            paragraphs,
+            policy: transcriptionPolicy,
+            metadataIndex: metadataIndex
+        )
     }
 
     public func recentMetadata(limit: Int) -> [StreamAppMetadataItem] {
@@ -182,6 +207,26 @@ public struct StreamAppTimelineProjection: Sendable {
         return coalesced
     }
 
+    private static func filteredParagraphs(
+        _ paragraphs: [StreamAppTranscriptParagraph],
+        policy: StreamTranscriptionPolicy,
+        metadataIndex: StreamAppTimelineMetadataIndex
+    ) -> [StreamAppTranscriptParagraph] {
+        switch policy {
+        case .always:
+            return paragraphs
+        case .hidden:
+            return []
+        case .nonSongs:
+            return paragraphs.filter { paragraph in
+                !metadataIndex.overlapsConfirmedSong(
+                    startSeconds: paragraph.startSeconds,
+                    endSeconds: paragraph.endSeconds
+                )
+            }
+        }
+    }
+
     private static func preferredMetadataSample(_ items: [StreamAppMetadataItem]) -> StreamAppMetadataItem? {
         items.max { lhs, rhs in
             let lhsScore = metadataPreferenceScore(lhs)
@@ -235,7 +280,7 @@ public struct StreamAppTimelineProjection: Sendable {
         return overlaps || nearTimedMetadata || candidateEnd <= trustedEnd + 30
     }
 
-    private static func isTrustedTimedMetadata(_ item: StreamAppMetadataItem) -> Bool {
+    fileprivate static func isTrustedTimedMetadata(_ item: StreamAppMetadataItem) -> Bool {
         let source = (item.source ?? item.id).lowercased()
         return source.contains("scte")
             || source.contains("id3")
@@ -243,7 +288,7 @@ public struct StreamAppTimelineProjection: Sendable {
             || item.id.hasPrefix("event:")
     }
 
-    private static func isFingerprintMetadata(_ item: StreamAppMetadataItem) -> Bool {
+    fileprivate static func isFingerprintMetadata(_ item: StreamAppMetadataItem) -> Bool {
         let source = (item.source ?? item.id).lowercased()
         return source.contains("fingerprint")
             || source.contains("chromaprint")

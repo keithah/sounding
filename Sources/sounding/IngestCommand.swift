@@ -82,6 +82,7 @@ struct IngestCommand: AsyncParsableCommand {
                     diarizer: providers.diarizer,
                     fingerprinter: fingerprinter,
                     fingerprintEnricher: fingerprintEnricher,
+                    transcriptionPolicy: .always,
                     deduplicatesHLSSegments: false
                 ).run(
                     streamID: managedStream.id,
@@ -112,6 +113,7 @@ struct IngestCommand: AsyncParsableCommand {
                     diarizer: providers.diarizer,
                     fingerprinter: fingerprinter,
                     fingerprintEnricher: fingerprintEnricher,
+                    transcriptionPolicy: .always,
                     deduplicatesHLSSegments: false
                 ).run(
                     source: normalizedSources[0],
@@ -149,7 +151,8 @@ struct IngestCommand: AsyncParsableCommand {
                         source: source,
                         streamType: streamType.value,
                         durationSeconds: duration,
-                        maxChunks: maxChunks
+                        maxChunks: maxChunks,
+                        transcriptionPolicy: .always
                     )
                 }
             )

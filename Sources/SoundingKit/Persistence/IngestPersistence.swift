@@ -9,10 +9,12 @@ import GRDB
 /// constraint.
 public struct IngestPersistence {
     private let database: SoundingDatabase
+    private let songPlayStore: SongPlayStore
     private let jsonEncoder: JSONEncoder
 
     public init(database: SoundingDatabase) {
         self.database = database
+        self.songPlayStore = SongPlayStore(database: database)
         self.jsonEncoder = JSONEncoder()
     }
 
@@ -439,10 +441,8 @@ public struct IngestPersistence {
                 }
 
                 for play in timeline.songPlays {
-                    let songID = try upsertSong(play.song, createdAt: timeline.createdAt, db: db)
-                    try upsertAdjacentSongPlay(
+                    try songPlayStore.persist(
                         play,
-                        songID: songID,
                         streamID: streamID,
                         timeline: timeline,
                         db: db
@@ -450,6 +450,20 @@ public struct IngestPersistence {
                 }
             }
         }
+    }
+
+    public func activeTimedMetadataSongPlay(
+        streamID: Int64,
+        startSeconds: Double,
+        endSeconds: Double,
+        toleranceSeconds: Double = 15
+    ) throws -> SongPlayDraft? {
+        try songPlayStore.activeTimedMetadataSongPlay(
+            streamID: streamID,
+            startSeconds: startSeconds,
+            endSeconds: endSeconds,
+            toleranceSeconds: toleranceSeconds
+        )
     }
 
     private func insertSegment(
@@ -649,129 +663,8 @@ public struct IngestPersistence {
         )
     }
 
-    private func upsertSong(
-        _ song: UnresolvedSongDraft,
-        createdAt: String,
-        db: Database
-    ) throws -> Int64 {
-        try db.execute(
-            sql: """
-                INSERT INTO songs (
-                    song_key, title, artist, album, isrc, display_name,
-                    is_unknown, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(song_key) DO UPDATE SET
-                    title = excluded.title,
-                    artist = excluded.artist,
-                    album = excluded.album,
-                    isrc = excluded.isrc,
-                    display_name = excluded.display_name,
-                    is_unknown = excluded.is_unknown,
-                    updated_at = excluded.updated_at
-                """,
-            arguments: [
-                song.songKey,
-                song.title,
-                song.artist,
-                song.album,
-                song.isrc,
-                song.displayName,
-                song.isUnknown,
-                createdAt,
-                createdAt
-            ]
-        )
-
-        guard let songID = try Int64.fetchOne(
-            db,
-            sql: "SELECT id FROM songs WHERE song_key = ?",
-            arguments: [song.songKey]
-        ) else {
-            throw PersistenceError.missingSong(song.songKey)
-        }
-        return songID
-    }
-
-    private func upsertAdjacentSongPlay(
-        _ play: SongPlayDraft,
-        songID: Int64,
-        streamID: Int64,
-        timeline: IngestChunkTimeline,
-        db: Database
-    ) throws {
-        guard play.endSeconds >= play.startSeconds else {
-            throw PersistenceError.invalidTimelineInterval
-        }
-
-        if let adjacentPlayID = try Int64.fetchOne(
-            db,
-            sql: """
-                SELECT song_plays.id
-                FROM song_plays
-                JOIN ingest_chunks AS last_chunk ON last_chunk.id = song_plays.last_chunk_id
-                JOIN ingest_chunks AS current_chunk ON current_chunk.id = ?
-                WHERE song_plays.stream_id = ?
-                  AND song_plays.run_id = ?
-                  AND song_plays.song_id = ?
-                  AND last_chunk.run_id = current_chunk.run_id
-                  AND last_chunk.sequence = current_chunk.sequence - 1
-                  AND song_plays.end_seconds >= ?
-                ORDER BY song_plays.id DESC
-                LIMIT 1
-                """,
-            arguments: [timeline.chunkID, streamID, timeline.runID, songID, play.startSeconds - 1.0]
-        ) {
-            try db.execute(
-                sql: """
-                    UPDATE song_plays
-                    SET last_chunk_id = ?,
-                        end_seconds = ?,
-                        confidence = COALESCE(?, confidence),
-                        source = COALESCE(?, source),
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                arguments: [
-                    timeline.chunkID,
-                    play.endSeconds,
-                    play.confidence,
-                    play.source,
-                    timeline.createdAt,
-                    adjacentPlayID
-                ]
-            )
-            return
-        }
-
-        try db.execute(
-            sql: """
-                INSERT INTO song_plays (
-                    stream_id, run_id, song_id, first_chunk_id, last_chunk_id,
-                    start_seconds, end_seconds, confidence, source,
-                    created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-            arguments: [
-                streamID,
-                timeline.runID,
-                songID,
-                timeline.chunkID,
-                timeline.chunkID,
-                play.startSeconds,
-                play.endSeconds,
-                play.confidence,
-                play.source,
-                timeline.createdAt,
-                timeline.createdAt
-            ]
-        )
-    }
-
     private enum PersistenceError: Error, Equatable {
         case missingRun(Int64)
-        case missingSong(String)
         case missingHLSSegmentClaim(streamID: Int64, mediaSequence: Int)
         case invalidTimelineInterval
     }

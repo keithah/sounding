@@ -102,6 +102,98 @@ final class SongTimelinePersistenceTests: XCTestCase {
         XCTAssertEqual(plays[0]["updated_at"] as String, "2026-05-01T10:00:13Z")
     }
 
+    func testAdjacentSameSongChunksExtendExistingPlayAcrossRuns() throws {
+        let fixture = try makeFixture()
+        let secondRunID = try fixture.writer.createRun(
+            streamID: fixture.streamID,
+            startedAt: "2026-05-01T10:00:11Z",
+            status: .running
+        )
+        let secondRunChunkID = try fixture.writer.createChunk(
+            runID: secondRunID,
+            sequence: 1001,
+            segmentURI: "segment-1001.ts",
+            startedAt: "2026-05-01T10:00:12Z",
+            endedAt: "2026-05-01T10:00:18Z"
+        )
+
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.firstChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 60, endSeconds: 66, confidence: 1, source: "ID3")],
+                createdAt: "2026-05-01T10:00:06Z"
+            )
+        )
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: secondRunID,
+                chunkID: secondRunChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 66, endSeconds: 72, confidence: 1, source: "ID3")],
+                createdAt: "2026-05-01T10:00:12Z"
+            )
+        )
+
+        let plays = try fixture.temporary.database.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT run_id, first_chunk_id, last_chunk_id, start_seconds, end_seconds, source FROM song_plays")
+        }
+
+        XCTAssertEqual(plays.count, 1)
+        XCTAssertEqual(plays[0]["run_id"] as Int64, fixture.runID)
+        XCTAssertEqual(plays[0]["first_chunk_id"] as Int64, fixture.firstChunkID)
+        XCTAssertEqual(plays[0]["last_chunk_id"] as Int64, secondRunChunkID)
+        XCTAssertEqual(plays[0]["start_seconds"] as Double, 60)
+        XCTAssertEqual(plays[0]["end_seconds"] as Double, 72)
+        XCTAssertEqual(plays[0]["source"] as String, "timed_id3")
+    }
+
+    func testTimedID3SongRefreshesMergeAcrossCadenceGap() throws {
+        let fixture = try makeFixture()
+        let secondRunID = try fixture.writer.createRun(
+            streamID: fixture.streamID,
+            startedAt: "2026-05-01T10:00:20Z",
+            status: .running
+        )
+        let secondRunChunkID = try fixture.writer.createChunk(
+            runID: secondRunID,
+            sequence: 1002,
+            segmentURI: "segment-1002.ts",
+            startedAt: "2026-05-01T10:00:24Z",
+            endedAt: "2026-05-01T10:00:30Z"
+        )
+
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.firstChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 60, endSeconds: 66, confidence: 1, source: "ID3")],
+                createdAt: "2026-05-01T10:00:06Z"
+            )
+        )
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: secondRunID,
+                chunkID: secondRunChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 78, endSeconds: 84, confidence: 1, source: "ID3")],
+                createdAt: "2026-05-01T10:00:24Z"
+            )
+        )
+
+        let plays = try fixture.temporary.database.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT first_chunk_id, last_chunk_id, start_seconds, end_seconds FROM song_plays")
+        }
+
+        XCTAssertEqual(plays.count, 1)
+        XCTAssertEqual(plays[0]["first_chunk_id"] as Int64, fixture.firstChunkID)
+        XCTAssertEqual(plays[0]["last_chunk_id"] as Int64, secondRunChunkID)
+        XCTAssertEqual(plays[0]["start_seconds"] as Double, 60)
+        XCTAssertEqual(plays[0]["end_seconds"] as Double, 84)
+    }
+
     func testAdjacentSameSongChunksWithTimelineGapRemainSeparatePlays() throws {
         let fixture = try makeFixture()
 
@@ -135,6 +227,75 @@ final class SongTimelinePersistenceTests: XCTestCase {
         XCTAssertEqual(plays[1]["last_chunk_id"] as Int64, fixture.secondChunkID)
         XCTAssertEqual(plays[1]["start_seconds"] as Double, 22)
         XCTAssertEqual(plays[1]["end_seconds"] as Double, 30)
+    }
+
+    func testFingerprintSongAcrossRunsDoesNotUseTimedMetadataMerge() throws {
+        let fixture = try makeFixture()
+        let secondRunID = try fixture.writer.createRun(
+            streamID: fixture.streamID,
+            startedAt: "2026-05-01T10:01:00Z",
+            status: .running
+        )
+        let secondRunChunkID = try fixture.writer.createChunk(
+            runID: secondRunID,
+            sequence: 2000,
+            segmentURI: "segment-2000.ts",
+            startedAt: "2026-05-01T10:01:01Z",
+            endedAt: "2026-05-01T10:01:07Z"
+        )
+
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.firstChunkID,
+                songPlays: [
+                    SongPlayDraft(
+                        song: knownSong,
+                        startSeconds: 0,
+                        endSeconds: 6,
+                        confidence: 0.92,
+                        source: "chromaprint"
+                    )
+                ],
+                createdAt: "2026-05-01T10:00:06Z"
+            )
+        )
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: secondRunID,
+                chunkID: secondRunChunkID,
+                songPlays: [
+                    SongPlayDraft(
+                        song: knownSong,
+                        startSeconds: 12,
+                        endSeconds: 18,
+                        confidence: 0.93,
+                        source: "chromaprint"
+                    )
+                ],
+                createdAt: "2026-05-01T10:01:07Z"
+            )
+        )
+
+        let plays = try fixture.temporary.database.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT run_id, first_chunk_id, last_chunk_id, start_seconds, end_seconds, source
+                    FROM song_plays
+                    ORDER BY start_seconds
+                    """
+            )
+        }
+
+        XCTAssertEqual(plays.count, 2)
+        XCTAssertEqual(plays[0]["run_id"] as Int64, fixture.runID)
+        XCTAssertEqual(plays[0]["first_chunk_id"] as Int64, fixture.firstChunkID)
+        XCTAssertEqual(plays[0]["last_chunk_id"] as Int64, fixture.firstChunkID)
+        XCTAssertEqual(plays[1]["run_id"] as Int64, secondRunID)
+        XCTAssertEqual(plays[1]["first_chunk_id"] as Int64, secondRunChunkID)
+        XCTAssertEqual(plays[1]["last_chunk_id"] as Int64, secondRunChunkID)
+        XCTAssertEqual(plays[1]["source"] as String, "chromaprint")
     }
 
     func testUnidentifiedSongUsesStableUnknownSongRow() throws {

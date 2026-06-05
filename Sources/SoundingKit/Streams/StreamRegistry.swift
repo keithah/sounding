@@ -7,6 +7,19 @@ public enum StreamStatus: String, Equatable, Sendable, CaseIterable {
     case removed
 }
 
+public enum StreamTranscriptionPolicy: String, Equatable, Sendable, CaseIterable {
+    case always = "always"
+    case nonSongs = "non_songs"
+    case hidden = "hidden"
+
+    public static let defaultValue: StreamTranscriptionPolicy = .nonSongs
+
+    public init(databaseValue: String?) {
+        let normalized = databaseValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self = normalized.flatMap(StreamTranscriptionPolicy.init(rawValue:)) ?? Self.defaultValue
+    }
+}
+
 public struct StreamRecord: Equatable, Sendable {
     public var id: Int64
     public var name: String
@@ -15,6 +28,7 @@ public struct StreamRecord: Equatable, Sendable {
     public var status: StreamStatus
     public var diarizationEnabled: Bool
     public var audioArchiveEnabled: Bool
+    public var transcriptionPolicy: StreamTranscriptionPolicy
     public var createdAt: String
     public var updatedAt: String
     public var pausedAt: String?
@@ -29,6 +43,7 @@ public struct StreamRecord: Equatable, Sendable {
         status: StreamStatus,
         diarizationEnabled: Bool = false,
         audioArchiveEnabled: Bool = false,
+        transcriptionPolicy: StreamTranscriptionPolicy = .defaultValue,
         createdAt: String,
         updatedAt: String,
         pausedAt: String?,
@@ -42,6 +57,7 @@ public struct StreamRecord: Equatable, Sendable {
         self.status = status
         self.diarizationEnabled = diarizationEnabled
         self.audioArchiveEnabled = audioArchiveEnabled
+        self.transcriptionPolicy = transcriptionPolicy
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.pausedAt = pausedAt
@@ -62,6 +78,7 @@ public struct StreamReconnectSource: Equatable, Sendable {
     public var sourceDescription: String
     public var diarizationEnabled: Bool
     public var audioArchiveEnabled: Bool
+    public var transcriptionPolicy: StreamTranscriptionPolicy
 
     public init(
         streamID: Int64,
@@ -70,7 +87,8 @@ public struct StreamReconnectSource: Equatable, Sendable {
         source: String,
         sourceDescription: String,
         diarizationEnabled: Bool = false,
-        audioArchiveEnabled: Bool = false
+        audioArchiveEnabled: Bool = false,
+        transcriptionPolicy: StreamTranscriptionPolicy = .defaultValue
     ) {
         self.streamID = streamID
         self.name = name
@@ -79,6 +97,7 @@ public struct StreamReconnectSource: Equatable, Sendable {
         self.sourceDescription = sourceDescription
         self.diarizationEnabled = diarizationEnabled
         self.audioArchiveEnabled = audioArchiveEnabled
+        self.transcriptionPolicy = transcriptionPolicy
     }
 
     public var resolvedStreamType: StreamType? {
@@ -139,8 +158,9 @@ public final class StreamRegistry {
                     sql: """
                     INSERT INTO streams (
                         name, stream_type, source, source_url, status, created_at, updated_at,
-                        diarization_enabled, paused_at, resumed_at, removed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+                        diarization_enabled, audio_archive_enabled, transcription_policy,
+                        paused_at, resumed_at, removed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
                     """,
                     arguments: [
                         name,
@@ -150,7 +170,9 @@ public final class StreamRegistry {
                         StreamStatus.active.rawValue,
                         createdAt,
                         createdAt,
-                        false
+                        false,
+                        false,
+                        StreamTranscriptionPolicy.defaultValue.rawValue
                     ]
                 )
                 return try fetchStream(id: db.lastInsertedRowID, includeRemoved: true, db: db) ?? {
@@ -189,6 +211,7 @@ public final class StreamRegistry {
                         SELECT id, name, stream_type, source, status,
                                COALESCE(diarization_enabled, 0) AS diarization_enabled,
                                COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                               transcription_policy,
                                created_at, updated_at, paused_at, resumed_at, removed_at
                         FROM streams
                         WHERE name IS NOT NULL
@@ -202,6 +225,7 @@ public final class StreamRegistry {
                         SELECT id, name, stream_type, source, status,
                                COALESCE(diarization_enabled, 0) AS diarization_enabled,
                                COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                               transcription_policy,
                                created_at, updated_at, paused_at, resumed_at, removed_at
                         FROM streams
                         WHERE name IS NOT NULL
@@ -413,6 +437,26 @@ public final class StreamRegistry {
         }
     }
 
+    public func updateTranscriptionPolicy(
+        streamID: Int64,
+        policy: StreamTranscriptionPolicy,
+        updatedAt: String? = nil
+    ) throws -> StreamMutationResult {
+        let updatedAt = updatedAt ?? Self.nowString()
+        return try transition(id: streamID, at: updatedAt, includeRemoved: false) { record, db in
+            guard record.transcriptionPolicy != policy else { return false }
+            try db.execute(
+                sql: """
+                UPDATE streams
+                SET transcription_policy = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                arguments: [policy.rawValue, updatedAt, record.id]
+            )
+            return true
+        }
+    }
+
     private func transition(
         id: Int64,
         at _: String,
@@ -493,6 +537,7 @@ public final class StreamRegistry {
             SELECT id, name, stream_type, source, status,
                    COALESCE(diarization_enabled, 0) AS diarization_enabled,
                    COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                   transcription_policy,
                    created_at, updated_at, paused_at, resumed_at, removed_at
             FROM streams
             WHERE id = ?
@@ -512,6 +557,7 @@ public final class StreamRegistry {
             SELECT id, name, stream_type, source, status,
                    COALESCE(diarization_enabled, 0) AS diarization_enabled,
                    COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                   transcription_policy,
                    created_at, updated_at, paused_at, resumed_at, removed_at
             FROM streams
             WHERE name = ?
@@ -530,7 +576,8 @@ public final class StreamRegistry {
             sql: """
             SELECT id, name, stream_type, source, source_url, status,
                    COALESCE(diarization_enabled, 0) AS diarization_enabled,
-                   COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled
+                   COALESCE(audio_archive_enabled, 0) AS audio_archive_enabled,
+                   transcription_policy
             FROM streams
             WHERE id = ?
               AND name IS NOT NULL
@@ -554,6 +601,7 @@ public final class StreamRegistry {
             status: status,
             diarizationEnabled: row["diarization_enabled"],
             audioArchiveEnabled: row["audio_archive_enabled"],
+            transcriptionPolicy: StreamTranscriptionPolicy(databaseValue: row["transcription_policy"]),
             createdAt: row["created_at"],
             updatedAt: row["updated_at"],
             pausedAt: row["paused_at"],
@@ -576,7 +624,8 @@ public final class StreamRegistry {
             source: sourceURL ?? sourceDescription,
             sourceDescription: sourceDescription,
             diarizationEnabled: row["diarization_enabled"],
-            audioArchiveEnabled: row["audio_archive_enabled"]
+            audioArchiveEnabled: row["audio_archive_enabled"],
+            transcriptionPolicy: StreamTranscriptionPolicy(databaseValue: row["transcription_policy"])
         )
     }
 

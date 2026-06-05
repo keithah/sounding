@@ -110,6 +110,20 @@ struct ContentView: View {
                                         isEnabled: !stream.audioArchiveEnabled
                                     )
                                 }
+                                Menu("Transcripts", systemImage: "text.bubble") {
+                                    ForEach(StreamTranscriptionPolicy.allCases, id: \.rawValue) { policy in
+                                        Button {
+                                            setTranscriptionPolicy(for: stream.id, policy: policy)
+                                        } label: {
+                                            Label(
+                                                policy.displayName,
+                                                systemImage: stream.transcriptionPolicy == policy
+                                                    ? "checkmark"
+                                                    : "text.bubble"
+                                            )
+                                        }
+                                    }
+                                }
                             }
                     }
                 }
@@ -518,6 +532,34 @@ struct ContentView: View {
                 timelineActionMessage = isEnabled
                     ? "Audio archive enabled for this stream. Restart the stream to apply it."
                     : "Audio archive disabled for this stream. Restart the stream to apply it."
+                refreshRuntimeStatuses()
+                refreshSelectedTimeline()
+            } catch {
+                persistenceError = IngestRedaction.redact(String(describing: error))
+            }
+        }
+    }
+
+    private func setTranscriptionPolicy(for streamID: Int64, policy: StreamTranscriptionPolicy) {
+        guard let registry else {
+            persistenceError = "Sounding database unavailable."
+            return
+        }
+        Task {
+            diagnosticsLog.recordEvent(
+                "ui.stream.transcriptionPolicy.changed",
+                streamID: streamID,
+                phase: "ui.stream",
+                fields: ["policy": policy.rawValue]
+            )
+            do {
+                _ = try viewModel.updateTranscriptionPolicy(
+                    streamID: streamID,
+                    policy: policy,
+                    using: registry
+                )
+                persistenceError = nil
+                timelineActionMessage = policy.statusDetail
                 refreshRuntimeStatuses()
                 refreshSelectedTimeline()
             } catch {

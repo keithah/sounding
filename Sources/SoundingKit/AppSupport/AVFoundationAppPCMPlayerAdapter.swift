@@ -84,8 +84,6 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
     ) async throws {
         #if canImport(AVFoundation)
             setCurrentStreamID(streamID)
-            playerNode.stop()
-            clearScheduledBuffers()
             diagnosticsLog.recordEvent(
                 "playback.prepare.requested",
                 streamID: streamID,
@@ -93,6 +91,8 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 phase: "playback.prepare",
                 fields: ["engineRunning": String(engine.isRunning)]
             )
+            playerNode.stop()
+            clearScheduledBuffers()
             await applyVolume(streamID: streamID)
             do {
                 try startAudioEngineIfNeeded()
