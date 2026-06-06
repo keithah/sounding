@@ -91,7 +91,10 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 phase: "playback.prepare",
                 fields: ["engineRunning": String(engine.isRunning)]
             )
-            playerNode.stop()
+            // Do NOT call playerNode.stop() here. The runtime's replacePlaybackOwner
+            // already invokes player.stop() on the previous owner before this prepare.
+            // A second concurrent playerNode.stop() races with the first one inside
+            // AVFoundation and the calling task blocks indefinitely.
             clearScheduledBuffers()
             await applyVolume(streamID: streamID)
             do {
@@ -152,7 +155,7 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                     await applyVolume(streamID: streamID)
                 }
                 if replacingScheduledBuffers {
-                    playerNode.stop()
+                    playerNode.reset()
                     clearScheduledBuffers()
                     diagnosticsLog.recordEvent(
                         "playback.queue.flushed",
@@ -249,14 +252,17 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
         #if canImport(AVFoundation)
             let streamID = currentStreamIDValue()
             let retainedBeforeStop = scheduledBufferCount()
-            playerNode.stop()
+            // Don't call playerNode.stop() — it blocks for seconds with a long
+            // queue and causes the runtime stop-coordinator to time out, with
+            // racing scheduleBuffer calls from the next stream. Use
+            // playerNode.reset() instead: documented as "clears any previously
+            // scheduled events" and runs without blocking. The player node stays
+            // attached to the running engine; the next play() call schedules new
+            // buffers from a clean queue and resumes playback via play().
+            playerNode.reset()
             clearScheduledBuffers()
             setCurrentStreamID(nil)
-            if let engineStopper {
-                engineStopper()
-            } else {
-                engine.stop()
-            }
+            engineStopper?()
             diagnosticsLog.recordEvent(
                 "playback.stop.applied",
                 streamID: streamID,
