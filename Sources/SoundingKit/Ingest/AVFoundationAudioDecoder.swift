@@ -6,12 +6,15 @@ import AVFoundation
 /// Native SoundingKit decoder that validates media with AVFoundation and emits bounded chunks
 /// for the ingest pipeline. HLS manifests also contribute manifest-level SCTE-35 markers so
 /// marker extraction failures remain isolated from transcription persistence.
-public struct AVFoundationAudioDecoder: AudioDecoding {
+public final class AVFoundationAudioDecoder: AudioDecoding, @unchecked Sendable {
     public var chunkDurationSeconds: Double
     public var segmentLoader: any HLSSegmentLoading
     public var segmentID3Extractor: any HLSSegmentID3Extracting
     public var segmentSCTE35Extractor: any HLSSegmentSCTE35Extracting
     public var now: @Sendable () -> String
+
+    private let icySessionLock = NSLock()
+    private var icySessions: [String: ICYStreamingSession] = [:]
 
     public init(
         chunkDurationSeconds: Double = 10,
@@ -31,14 +34,50 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         switch request.streamType {
         case .hls:
             return try await decodeHLS(request)
-        case .icecast, .icy, .mpegts, .udp, .auto:
+        case .icecast, .icy:
+            // Local file fixtures fall through to the AVURLAsset path; only
+            // live HTTP(S) sources benefit from the continuous streaming
+            // session.
+            if let url = try? mediaURL(from: request.source), !url.isFileURL {
+                return try await decodeICYContinuous(request)
+            }
+            return try await decodeAsset(request)
+        case .mpegts, .udp, .auto:
             return try await decodeAsset(request)
         }
+    }
+
+    private func icySession(for key: String) -> ICYStreamingSession? {
+        icySessionLock.lock()
+        defer { icySessionLock.unlock() }
+        return icySessions[key]
+    }
+
+    private func storeICYSession(_ session: ICYStreamingSession, for key: String) {
+        icySessionLock.lock()
+        icySessions[key] = session
+        icySessionLock.unlock()
+    }
+
+    private func dropICYSession(for key: String) -> ICYStreamingSession? {
+        icySessionLock.lock()
+        defer { icySessionLock.unlock() }
+        return icySessions.removeValue(forKey: key)
     }
 
     private struct ResolvedHLSManifest: Sendable {
         var text: String
         var source: String
+    }
+
+    private struct RemoteAudioSample: Sendable {
+        var url: URL
+        var markers: [AdMarker]
+    }
+
+    private struct ICYAudioExtraction: Sendable {
+        var audio: Data
+        var markers: [AdMarker]
     }
 
     private func decodeHLS(_ request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
@@ -141,12 +180,14 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         let originalURL = try mediaURL(from: request.source)
         let url: URL
         var temporaryURL: URL?
+        var remoteMarkers: [AdMarker] = []
         if originalURL.isFileURL {
             url = originalURL
         } else {
-            let downloaded = try await downloadRemoteAudioSample(from: originalURL)
-            url = downloaded
-            temporaryURL = downloaded
+            let downloaded = try await downloadRemoteAudioSample(from: originalURL, streamType: request.streamType)
+            url = downloaded.url
+            temporaryURL = downloaded.url
+            remoteMarkers = downloaded.markers
         }
         defer {
             if let temporaryURL {
@@ -171,7 +212,8 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         let decoded = try decodeLinearPCM(from: url, fallbackDuration: duration)
         let data = decoded.audio
 
-        let effectiveDuration = min(duration, request.durationSeconds ?? duration)
+        let decodedDuration = pcmDurationSeconds(data, format: decoded.format) ?? duration
+        let effectiveDuration = min(decodedDuration, request.durationSeconds ?? decodedDuration)
         let chunkCount = max(1, Int(ceil(effectiveDuration / chunkDurationSeconds)))
         let boundedCount = min(chunkCount, max(0, request.maxChunks ?? chunkCount))
         guard boundedCount > 0 else { return [] }
@@ -179,17 +221,122 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         return (0..<boundedCount).map { index in
             let start = Double(index) * chunkDurationSeconds
             let end = min(start + chunkDurationSeconds, effectiveDuration)
+            let chunkAudio = pcmSlice(data, format: decoded.format, startSeconds: start, endSeconds: end)
+            let markers = markersOverlapping(remoteMarkers, startSeconds: start, endSeconds: max(end, start))
             return DecodedAudioChunk(
                 sequence: index,
                 segmentURI: IngestRedaction.sourceDescription(request.source),
-                audio: data,
+                audio: chunkAudio,
                 audioFormat: decoded.format,
-                byteCount: data.count,
+                byteCount: chunkAudio.count,
                 startSeconds: start,
                 endSeconds: max(end, start),
                 startedAt: now(),
                 endedAt: now(),
-                adMarkers: []
+                adMarkers: markers
+            )
+        }
+#else
+        throw AVFoundationAudioDecoderError.unsupportedMedia("AVFoundation is unavailable on this platform.")
+#endif
+    }
+
+    private func decodeICYContinuous(_ request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+#if canImport(AVFoundation)
+        let url = try mediaURL(from: request.source)
+        // Keep one HTTP connection open per stream URL across decoder passes so
+        // each pass reads the next bytes from the live stream instead of
+        // re-opening (which makes some CDNs replay the same buffer).
+        let session: ICYStreamingSession
+        if let existing = icySession(for: request.source) {
+            session = existing
+        } else {
+            do {
+                session = try await ICYStreamingSession.open(url: url)
+            } catch {
+                throw error
+            }
+            storeICYSession(session, for: request.source)
+        }
+
+        // Target one chunk of MP3 bytes per pass. With chunkDurationSeconds=10,
+        // aim for ~10s of audio. If the byte rate is unknown, fall back to
+        // 128 kbps (16 KB/s).
+        let targetByteCount: Int
+        let byteRate: Double
+        let readResult: ICYStreamingSession.ReadResult
+        do {
+            // Probe the current byte rate from the session (it may be nil until
+            // the first read returns headers).
+            let probe = try await session.read(byteCount: 4096)
+            byteRate = probe.byteRate ?? 16_000
+            targetByteCount = max(0, Int(byteRate * chunkDurationSeconds) - probe.audio.count)
+            let remainder = targetByteCount > 0
+                ? try await session.read(byteCount: targetByteCount)
+                : ICYStreamingSession.ReadResult(
+                    audio: Data(),
+                    markers: [],
+                    totalAudioBytes: probe.totalAudioBytes,
+                    byteRate: probe.byteRate
+                )
+            var combined = probe.audio
+            combined.append(remainder.audio)
+            readResult = ICYStreamingSession.ReadResult(
+                audio: combined,
+                markers: probe.markers + remainder.markers,
+                totalAudioBytes: remainder.totalAudioBytes,
+                byteRate: remainder.byteRate
+            )
+        } catch {
+            // Drop the session so the next call reopens a fresh connection.
+            _ = dropICYSession(for: request.source)
+            throw error
+        }
+
+        if readResult.audio.isEmpty {
+            return []
+        }
+
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sounding-icy-\(UUID().uuidString)")
+            .appendingPathExtension("mp3")
+        do {
+            try readResult.audio.write(to: temporaryURL, options: .atomic)
+        } catch {
+            throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: temporary audio staging failed.")
+        }
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+
+        let fallbackDuration = byteRate > 0 ? Double(readResult.audio.count) / byteRate : chunkDurationSeconds
+        let decoded: (audio: Data, format: DecodedAudioFormat)
+        do {
+            decoded = try decodeLinearPCM(from: temporaryURL, fallbackDuration: fallbackDuration)
+        } catch {
+            throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: \(sanitized(error)).")
+        }
+        let data = decoded.audio
+        let decodedDuration = pcmDurationSeconds(data, format: decoded.format) ?? fallbackDuration
+        let effectiveDuration = min(decodedDuration, request.durationSeconds ?? decodedDuration)
+        let chunkCount = max(1, Int(ceil(effectiveDuration / chunkDurationSeconds)))
+        let boundedCount = min(chunkCount, max(0, request.maxChunks ?? chunkCount))
+        guard boundedCount > 0 else { return [] }
+
+        return (0..<boundedCount).map { index in
+            let start = Double(index) * chunkDurationSeconds
+            let end = min(start + chunkDurationSeconds, effectiveDuration)
+            let chunkAudio = pcmSlice(data, format: decoded.format, startSeconds: start, endSeconds: end)
+            let markers = markersOverlapping(readResult.markers, startSeconds: start, endSeconds: max(end, start))
+            return DecodedAudioChunk(
+                sequence: index,
+                segmentURI: IngestRedaction.sourceDescription(request.source),
+                audio: chunkAudio,
+                audioFormat: decoded.format,
+                byteCount: chunkAudio.count,
+                startSeconds: start,
+                endSeconds: max(end, start),
+                startedAt: now(),
+                endedAt: now(),
+                adMarkers: markers
             )
         }
 #else
@@ -322,15 +469,33 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
 #if canImport(FoundationNetworking)
 #endif
 
-    private func downloadRemoteAudioSample(from url: URL) async throws -> URL {
+    private func downloadRemoteAudioSample(from url: URL, streamType: StreamType) async throws -> RemoteAudioSample {
         var request = URLRequest(url: url)
-        request.setValue("bytes=0-2097151", forHTTPHeaderField: "Range")
-        request.timeoutInterval = 12
+        // For live ICY/Icecast streams, don't send a Range header: some CDNs
+        // honor it and return cached bytes 0-N, which makes every pass play the
+        // same audio loop. Without Range, the server streams from "now" and we
+        // read until our byte target is reached.
+        if streamType != .icecast && streamType != .icy {
+            request.setValue("bytes=0-2097151", forHTTPHeaderField: "Range")
+        }
+        if streamType == .icecast || streamType == .icy {
+            for (field, value) in ICYMetadataParser.requestHeaders {
+                request.setValue(value, forHTTPHeaderField: field)
+            }
+        }
+        // The idle timeout has to cover the time between bytes from a live
+        // stream. 30s covers slow startup and DNS-renegotiation hiccups; the
+        // request itself terminates as soon as we have enough audio bytes.
+        request.timeoutInterval = 30
 
         let data: Data
         let response: URLResponse
         do {
-            (response, data) = try await readRemoteAudioPrefix(for: request, byteLimit: 2_097_152)
+            (response, data) = try await readRemoteAudioPrefix(
+                for: request,
+                byteLimit: 2_097_152,
+                streamType: streamType
+            )
         } catch {
             throw AVFoundationAudioDecoderError.sourceOpenFailed("Audio source open failed: \(sanitized(error)).")
         }
@@ -341,30 +506,202 @@ public struct AVFoundationAudioDecoder: AudioDecoding {
         guard !data.isEmpty else {
             throw AVFoundationAudioDecoderError.unsupportedMedia("Audio source produced no bytes.")
         }
+        let headers = (response as? HTTPURLResponse)?.allHeaderFields.reduce(into: [String: String]()) { result, entry in
+            result[String(describing: entry.key)] = String(describing: entry.value)
+        } ?? [:]
+        let extraction = extractICYAudioIfPresent(data, headers: headers)
 
         let fileExtension = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
         let temporaryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("sounding-remote-audio-\(UUID().uuidString)")
             .appendingPathExtension(fileExtension)
         do {
-            try data.write(to: temporaryURL, options: .atomic)
-            return temporaryURL
+            try extraction.audio.write(to: temporaryURL, options: .atomic)
+            return RemoteAudioSample(url: temporaryURL, markers: extraction.markers)
         } catch {
             throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: temporary audio staging failed.")
         }
     }
 
-    private func readRemoteAudioPrefix(for request: URLRequest, byteLimit: Int) async throws -> (URLResponse, Data) {
+    private func extractICYAudioIfPresent(_ data: Data, headers: [String: String]) -> ICYAudioExtraction {
+        guard let metaInt = icyMetaInt(from: headers), metaInt > 0 else {
+            return ICYAudioExtraction(audio: data, markers: [])
+        }
+        var parser = ICYMetadataParser()
+        var strippedAudio = Data()
+        strippedAudio.reserveCapacity(data.count)
+        var markers: [AdMarker] = []
+        let byteRate = icyAudioBytesPerSecond(from: headers)
+        var offset = data.startIndex
+
+        while offset < data.endIndex {
+            let audioEnd = min(offset + metaInt, data.endIndex)
+            let audioChunk = data[offset..<audioEnd]
+            strippedAudio.append(audioChunk)
+            offset = audioEnd
+            guard offset < data.endIndex else {
+                break
+            }
+
+            let metadataLength = Int(data[offset]) * 16
+            offset = data.index(after: offset)
+            guard metadataLength > 0 else { continue }
+            let metadataEnd = min(offset + metadataLength, data.endIndex)
+            let metadata = Data(data[offset..<metadataEnd])
+            offset = metadataEnd
+            guard metadata.count == metadataLength,
+                  var marker = parser.marker(fromMetadataBlock: metadata) else { continue }
+            if let byteRate, byteRate > 0 {
+                marker.pts = Double(strippedAudio.count) / byteRate
+            }
+            marker.segment = "icy-\(markers.count)"
+            enrichICYProgramFields(&marker)
+            markers.append(marker)
+        }
+
+        guard !strippedAudio.isEmpty else {
+            return ICYAudioExtraction(audio: data, markers: markers)
+        }
+        return ICYAudioExtraction(audio: strippedAudio, markers: markers)
+    }
+
+    private func enrichICYProgramFields(_ marker: inout AdMarker) {
+        guard case let .string(rawStreamTitle)? = marker.fields["StreamTitle"] else { return }
+        let streamTitle = rawStreamTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !streamTitle.isEmpty else { return }
+        for separator in [" - ", " – ", " — "] {
+            let parts = streamTitle.components(separatedBy: separator)
+            guard parts.count >= 2 else { continue }
+            let artist = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = parts.dropFirst().joined(separator: separator).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !artist.isEmpty, !title.isEmpty else { continue }
+            marker.fields["Artist"] = marker.fields["Artist"] ?? .string(artist)
+            marker.fields["Title"] = marker.fields["Title"] ?? .string(title)
+            return
+        }
+        if marker.fields["Title"] == nil {
+            marker.fields["Title"] = .string(streamTitle)
+        }
+    }
+
+    private func icyMetaInt(from headers: [String: String]) -> Int? {
+        guard let rawValue = caseInsensitiveValue(for: "icy-metaint", in: headers)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !rawValue.isEmpty
+        else { return nil }
+        return Int(rawValue)
+    }
+
+    private func icyAudioBytesPerSecond(from headers: [String: String]) -> Double? {
+        guard let rawValue = caseInsensitiveValue(for: "icy-br", in: headers)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            let kilobitsPerSecond = Double(rawValue),
+            kilobitsPerSecond > 0
+        else { return nil }
+        return kilobitsPerSecond * 1_000 / 8
+    }
+
+    private func caseInsensitiveValue(for key: String, in headers: [String: String]) -> String? {
+        headers.first { candidate, _ in
+            candidate.caseInsensitiveCompare(key) == .orderedSame
+        }?.value
+    }
+
+    private func markersOverlapping(_ markers: [AdMarker], startSeconds: Double, endSeconds: Double) -> [AdMarker] {
+        markers.filter { marker in
+            guard let pts = marker.pts else { return startSeconds == 0 }
+            if startSeconds == endSeconds {
+                return pts == startSeconds
+            }
+            return pts >= startSeconds && pts < endSeconds
+        }
+    }
+
+    private func pcmDurationSeconds(_ data: Data, format: DecodedAudioFormat) -> Double? {
+        guard let bytesPerSecond = pcmBytesPerSecond(format), bytesPerSecond > 0 else { return nil }
+        return Double(data.count) / bytesPerSecond
+    }
+
+    private func pcmSlice(
+        _ data: Data,
+        format: DecodedAudioFormat,
+        startSeconds: Double,
+        endSeconds: Double
+    ) -> Data {
+        guard let bytesPerSecond = pcmBytesPerSecond(format),
+              let blockAlign = pcmBlockAlign(format),
+              bytesPerSecond > 0,
+              blockAlign > 0 else {
+            return data
+        }
+        let lower = alignedPCMOffset(Double.maximum(0, startSeconds) * bytesPerSecond, blockAlign: blockAlign)
+        let upper = alignedPCMOffset(Double.maximum(0, endSeconds) * bytesPerSecond, blockAlign: blockAlign)
+        let start = min(max(0, lower), data.count)
+        let end = min(max(start, upper), data.count)
+        return Data(data[start..<end])
+    }
+
+    private func pcmBytesPerSecond(_ format: DecodedAudioFormat) -> Double? {
+        guard format.payloadKind == .linearPCM,
+              let sampleRate = format.sampleRate,
+              let blockAlign = pcmBlockAlign(format)
+        else { return nil }
+        return sampleRate * Double(blockAlign)
+    }
+
+    private func pcmBlockAlign(_ format: DecodedAudioFormat) -> Int? {
+        guard let channelCount = format.channelCount,
+              let bitDepth = format.bitDepth,
+              channelCount > 0,
+              bitDepth > 0
+        else { return nil }
+        return channelCount * max(1, bitDepth / 8)
+    }
+
+    private func alignedPCMOffset(_ rawOffset: Double, blockAlign: Int) -> Int {
+        let offset = Int(rawOffset.rounded(.down))
+        return offset - (offset % blockAlign)
+    }
+
+    private func readRemoteAudioPrefix(
+        for request: URLRequest,
+        byteLimit: Int,
+        streamType: StreamType
+    ) async throws -> (URLResponse, Data) {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let targetByteCount = remoteAudioPrefixTargetByteCount(
+            response: response,
+            byteLimit: byteLimit,
+            streamType: streamType
+        )
         var data = Data()
-        data.reserveCapacity(min(byteLimit, 256 * 1024))
+        data.reserveCapacity(min(byteLimit, targetByteCount))
         for try await byte in bytes {
             data.append(byte)
-            if data.count >= byteLimit || data.count >= 256 * 1024 {
+            if data.count >= byteLimit || data.count >= targetByteCount {
                 break
             }
         }
         return (response, data)
+    }
+
+    private func remoteAudioPrefixTargetByteCount(
+        response: URLResponse,
+        byteLimit: Int,
+        streamType: StreamType
+    ) -> Int {
+        guard streamType == .icecast || streamType == .icy,
+              let httpResponse = response as? HTTPURLResponse else {
+            return min(byteLimit, 256 * 1024)
+        }
+        let headers = httpResponse.allHeaderFields.reduce(into: [String: String]()) { result, entry in
+            result[String(describing: entry.key)] = String(describing: entry.value)
+        }
+        let metaInt = icyMetaInt(from: headers) ?? ICYMetadataParser.defaultMetaInt
+        // Read enough framed ICY data to include metadata changes, but avoid turning a
+        // continuous MP3 stream into a multi-minute pseudo-file.
+        let metadataAwareTarget = max(64 * 1024, min(160 * 1024, metaInt * 12))
+        return min(byteLimit, metadataAwareTarget)
     }
 
     private func resolvedSegmentDescription(_ uri: String, relativeTo manifestSource: String) -> String {
