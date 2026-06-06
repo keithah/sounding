@@ -14,6 +14,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     private let statusStore: AppStreamRuntimeStatusStore?
     private let playbackController: (any AppPCMPlaybackAdapting)?
     private let playbackCommands: AppStreamPlaybackCommands
+    private let playbackSelection: AppPlaybackStreamSelection?
     private let diagnosticsLog: AppRuntimeDiagnosticsLog
     private let playbackStopTimeoutNanoseconds: UInt64
     private let now: @Sendable () -> Date
@@ -23,6 +24,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     private var pendingStartTokens: [Int64: UUID] = [:]
     private var suspendedStreams: [Int64: Date] = [:]
     private var currentStreamID: Int64?
+    private var suspendedPlaybackOwnerStreamID: Int64?
     private var latestEvents: [Int64: AppStreamRuntimeEvent] = [:]
     private var latestEvent: AppStreamRuntimeEvent?
     private var eventContinuations: [UUID: AsyncStream<AppStreamRuntimeEvent>.Continuation] = [:]
@@ -37,6 +39,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         rollingBuffer: RollingPCMBuffer? = nil,
         audioArchiveStore: AudioArchiveStore? = nil,
         playbackController: (any AppPCMPlaybackAdapting)? = nil,
+        playbackSelection: AppPlaybackStreamSelection? = nil,
         diagnosticsLog: AppRuntimeDiagnosticsLog = AppRuntimeDiagnosticsLog(),
         playbackStopTimeoutNanoseconds: UInt64 = 2_000_000_000,
         now: @escaping @Sendable () -> Date = { Date() },
@@ -50,6 +53,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         self.statusStore = statusStore
         self.playbackTimeline = playbackTimeline
         self.playbackController = playbackController
+        self.playbackSelection = playbackSelection
         self.playbackCommands = AppStreamPlaybackCommands(
             volumeStore: volumeStore,
             playbackTimeline: playbackTimeline,
@@ -100,6 +104,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             return
         }
         pendingStartTokens[streamID] = nil
+        await replacePlaybackOwner(with: streamID, phase: "runtime.start")
         try beginRun(streamID: streamID, connectionMessagePrefix: "Connecting")
     }
 
@@ -113,7 +118,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         suspendedStreams[streamID] = nil
         let startToken = UUID()
         pendingStartTokens[streamID] = startToken
-        await stop(streamID: streamID, clearsPendingStart: false, stopsPlayback: false)
+        await stop(streamID: streamID, clearsPendingStart: false, stopsPlayback: true)
         guard pendingStartTokens[streamID] == startToken else {
             diagnosticsLog.recordEvent(
                 "runtime.restart.superseded",
@@ -124,6 +129,7 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             return
         }
         pendingStartTokens[streamID] = nil
+        await replacePlaybackOwner(with: streamID, phase: "runtime.restart")
         try beginRun(streamID: streamID, connectionMessagePrefix: "Restarting")
     }
 
@@ -185,7 +191,6 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                 "connectionMessagePrefix": connectionMessagePrefix,
             ]
         )
-        currentStreamID = streamID
         streamRuns[streamID] = StreamRunState(task: nil, token: token)
         publish(
             AppStreamRuntimeEvent(
@@ -310,7 +315,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         }
         guard state != nil || clearsPendingStart else { return }
         state?.task?.cancel()
-        if stopsPlayback, let playbackController, let playbackTimeline {
+        let streamOwnsPlayback = currentStreamID == streamID
+        if stopsPlayback, streamOwnsPlayback, let playbackController, let playbackTimeline {
             await stopPlaybackForRuntimeStop(
                 playbackController,
                 timeline: playbackTimeline,
@@ -318,7 +324,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             )
         }
         if currentStreamID == streamID {
-            currentStreamID = streamRuns.keys.min()
+            currentStreamID = nil
+            await playbackSelection?.clear(ifStreamID: streamID)
         }
         publish(
             AppStreamRuntimeEvent(
@@ -378,7 +385,16 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             guard let state = streamRuns.removeValue(forKey: streamID) else { return nil }
             return (streamID, state)
         }
-        currentStreamID = streamRuns.keys.min()
+        suspendedPlaybackOwnerStreamID = currentStreamID
+        if currentStreamID != nil, let playbackController, let playbackTimeline {
+            await stopPlaybackForRuntimeStop(
+                playbackController,
+                timeline: playbackTimeline,
+                streamID: currentStreamID ?? -1
+            )
+        }
+        currentStreamID = nil
+        await playbackSelection?.select(streamID: nil)
         for (streamID, state) in states {
             suspendedStreams[streamID] = suspendedAt
             state.task?.cancel()
@@ -400,9 +416,30 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
 
     public func recoverFromSystemWake(reason: String) async {
         let recoveryStartedAt = now()
-        let captured = suspendedStreams.sorted { $0.key < $1.key }
+        var capturedByStreamID = suspendedStreams
+        if let statusStore {
+            do {
+                for status in try statusStore.statuses()
+                where shouldRecoverPersistedStatus(status) && streamRuns[status.streamID] == nil
+                    && capturedByStreamID[status.streamID] == nil
+                {
+                    capturedByStreamID[status.streamID] =
+                        status.lifecycleEvidence?.suspendedAt.flatMap(timestampFormatter.date(from:))
+                        ?? recoveryStartedAt
+                }
+            } catch {
+                diagnosticsLog.recordEvent(
+                    "runtime.wake.statusFallback.failed",
+                    phase: "runtime.recover",
+                    fields: ["error": IngestRedaction.redact(String(describing: error))]
+                )
+            }
+        }
+        let captured = capturedByStreamID.sorted { $0.key < $1.key }
         guard !captured.isEmpty else { return }
         suspendedStreams.removeAll()
+        let playbackOwnerToRecover = suspendedPlaybackOwnerStreamID
+        suspendedPlaybackOwnerStreamID = nil
         for (streamID, suspendedAt) in captured {
             let latency = recoveryStartedAt.timeIntervalSince(suspendedAt)
             let evidence = AppStreamRuntimeLifecycleEvidence(
@@ -420,25 +457,74 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                 ),
                 attempt: latestAttempt(streamID: streamID)
             )
-            do {
-                try beginRun(
+            await recoverStreamAfterWake(
+                streamID: streamID,
+                evidence: evidence,
+                restoresPlaybackOwner: playbackOwnerToRecover == streamID
+            )
+        }
+    }
+
+    private func replacePlaybackOwner(with streamID: Int64, phase: String) async {
+        if currentStreamID == streamID {
+            await playbackSelection?.select(streamID: streamID)
+            return
+        }
+        if let previousStreamID = currentStreamID,
+            let playbackController,
+            let playbackTimeline
+        {
+            diagnosticsLog.recordEvent(
+                "runtime.playback.owner.replaced",
+                streamID: streamID,
+                phase: phase,
+                fields: ["previousStreamID": String(previousStreamID)]
+            )
+            await stopPlaybackForRuntimeStop(
+                playbackController,
+                timeline: playbackTimeline,
+                streamID: previousStreamID
+            )
+        }
+        currentStreamID = streamID
+        await playbackSelection?.select(streamID: streamID)
+    }
+
+    private func recoverStreamAfterWake(
+        streamID: Int64,
+        evidence: AppStreamRuntimeLifecycleEvidence,
+        restoresPlaybackOwner: Bool
+    ) async {
+        do {
+            if restoresPlaybackOwner {
+                await replacePlaybackOwner(with: streamID, phase: "runtime.recover")
+            }
+            try beginRun(
                     streamID: streamID,
                     connectionMessagePrefix: "Recovering",
                     recoveryEvidence: evidence
                 )
-            } catch {
-                let redacted = IngestRedaction.redact(String(describing: error))
-                publish(
-                    AppStreamRuntimeEvent(
-                        streamID: streamID,
-                        phase: .error(message: redacted),
-                        message: "Recovery failed for stream \(streamID): \(redacted).",
-                        lifecycleEvidence: evidence
-                    ),
-                    attempt: latestAttempt(streamID: streamID),
-                    failureMessage: redacted
-                )
-            }
+        } catch {
+            let redacted = IngestRedaction.redact(String(describing: error))
+            publish(
+                AppStreamRuntimeEvent(
+                    streamID: streamID,
+                    phase: .error(message: redacted),
+                    message: "Recovery failed for stream \(streamID): \(redacted).",
+                    lifecycleEvidence: evidence
+                ),
+                attempt: latestAttempt(streamID: streamID),
+                failureMessage: redacted
+            )
+        }
+    }
+
+    private func shouldRecoverPersistedStatus(_ status: AppStreamRuntimeStatusSnapshot) -> Bool {
+        switch status.phase {
+        case .connecting, .running, .suspended, .recovering, .reconnecting:
+            return true
+        case .paused, .stopped, .error:
+            return false
         }
     }
 
@@ -460,6 +546,29 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     }
 
     public func setMuted(streamID: Int64, isMuted: Bool) async {
+        // Mute-as-switch UX: only one stream is audible at a time. Unmuting a stream
+        // that isn't the current playback owner makes it the owner and mutes the
+        // siblings. Muting just lowers the volume snapshot for the affected stream.
+        if !isMuted {
+            await replacePlaybackOwner(with: streamID, phase: "runtime.setMuted.unmute")
+            let siblings = streamRuns.keys.filter { $0 != streamID }.sorted()
+            for siblingID in siblings {
+                await playbackCommands.setMuted(streamID: siblingID, isMuted: true)
+                if let existing = latestEvents[siblingID] {
+                    publish(
+                        AppStreamRuntimeEvent(
+                            streamID: siblingID,
+                            kind: .controlFeedback,
+                            phase: existing.phase,
+                            message: "Stream \(siblingID) muted.",
+                            result: existing.result,
+                            lifecycleEvidence: existing.lifecycleEvidence
+                        ),
+                        attempt: latestAttempt(streamID: siblingID)
+                    )
+                }
+            }
+        }
         await playbackCommands.setMuted(streamID: streamID, isMuted: isMuted)
         if let existing = latestEvents[streamID] {
             publish(
@@ -603,11 +712,12 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         event: AppStreamRuntimeEvent,
         attempt: Int,
         failureMessage: String? = nil
-    ) {
+    ) async {
         guard streamRuns[streamID]?.token == token else { return }
         streamRuns.removeValue(forKey: streamID)
         if currentStreamID == streamID {
-            currentStreamID = streamRuns.keys.min()
+            currentStreamID = nil
+            await playbackSelection?.clear(ifStreamID: streamID)
         }
         publish(event, attempt: attempt, failureMessage: failureMessage)
     }

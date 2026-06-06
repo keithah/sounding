@@ -73,7 +73,10 @@ struct ContentView: View {
                     )
                 } else {
                     ForEach(viewModel.streams) { stream in
-                        StreamRow(item: stream)
+                        StreamRow(
+                            item: stream,
+                            isMuted: viewModel.isMuted(streamID: stream.id)
+                        )
                             .tag(stream.id)
                             .contextMenu {
                                 Button("Edit Stream", systemImage: "pencil") {
@@ -399,6 +402,7 @@ struct ContentView: View {
             persistenceError = "Sounding runtime unavailable."
             return
         }
+        applyStartAsUnmute(for: streamID)
         Task {
             diagnosticsLog.recordEvent(
                 "ui.start.clicked",
@@ -419,6 +423,7 @@ struct ContentView: View {
             persistenceError = "Sounding runtime unavailable."
             return
         }
+        applyStartAsUnmute(for: streamID)
         Task {
             diagnosticsLog.recordEvent(
                 "ui.restart.clicked",
@@ -431,6 +436,22 @@ struct ContentView: View {
             } catch {
                 persistenceError = IngestRedaction.redact(String(describing: error))
             }
+        }
+    }
+
+    private func applyStartAsUnmute(for streamID: Int64) {
+        // Start (and Restart) act like an unmute: the started stream becomes
+        // audible, all siblings get muted so only one stream plays at a time.
+        for other in viewModel.streams where other.id != streamID {
+            if !viewModel.isMuted(streamID: other.id) {
+                viewModel.updateMuted(streamID: other.id, isMuted: true)
+                let otherID = other.id
+                Task { await runtime?.setMuted(streamID: otherID, isMuted: true) }
+            }
+        }
+        if viewModel.isMuted(streamID: streamID) {
+            viewModel.updateMuted(streamID: streamID, isMuted: false)
+            Task { await runtime?.setMuted(streamID: streamID, isMuted: false) }
         }
     }
 
@@ -616,6 +637,14 @@ struct ContentView: View {
     }
 
     private func updateMuted(for streamID: Int64, isMuted: Bool) {
+        if !isMuted {
+            // Mute-as-switch UX: unmuting this stream auto-mutes the others so
+            // only one stream is audible at a time. The runtime mirrors this on
+            // its side (via setMuted) and also transfers the playback owner.
+            for other in viewModel.streams where other.id != streamID {
+                viewModel.updateMuted(streamID: other.id, isMuted: true)
+            }
+        }
         viewModel.updateMuted(streamID: streamID, isMuted: isMuted)
         diagnosticsLog.recordEvent(
             "ui.mute.changed",
@@ -771,13 +800,11 @@ struct ContentView: View {
                 return
             }
             guard !Task.isCancelled, streamID == viewModel.selectedStreamID else { return }
-            if viewModel.selectedStream?.item.status == .running {
-                if let runtime, let streamID, let event = await runtime.snapshot(streamID: streamID) {
-                    viewModel.applyRuntimeEvent(event)
-                }
-                refreshRuntimeStatuses()
-                refreshSelectedTimeline()
+            if let runtime, let streamID, let event = await runtime.snapshot(streamID: streamID) {
+                viewModel.applyRuntimeEvent(event)
             }
+            refreshRuntimeStatuses()
+            refreshSelectedTimeline()
         }
     }
 
