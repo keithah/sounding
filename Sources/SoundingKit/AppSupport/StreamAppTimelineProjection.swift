@@ -3,6 +3,7 @@ import Foundation
 struct StreamAppTimelineMetadataIndex: Sendable {
     private let songMetadata: [StreamAppMetadataItem]
     private let confirmedSongMetadata: [StreamAppMetadataItem]
+    private let adBoundaryMetadata: [StreamAppMetadataItem]
     private let songBoundaryStarts: [Double]
     private let artistSongMetadata: [StreamAppMetadataItem]
 
@@ -12,6 +13,7 @@ struct StreamAppTimelineMetadataIndex: Sendable {
             .sorted(by: StreamAppTimelineProjection.metadataSort)
         self.songMetadata = songMetadata
         self.confirmedSongMetadata = songMetadata.filter(Self.isConfirmedMusicMetadata)
+        self.adBoundaryMetadata = metadataChanges.filter(Self.isAdBoundaryMetadata)
         self.songBoundaryStarts = songMetadata.map(\.startSeconds).sorted()
         self.artistSongMetadata = songMetadata
             .filter { Self.firstNonEmpty([$0.artist]) != nil }
@@ -56,6 +58,13 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         }
     }
 
+    func overlapsAdBoundary(startSeconds: Double, endSeconds: Double) -> Bool {
+        adBoundaryMetadata.contains { item in
+            let itemEnd = item.endSeconds ?? item.startSeconds + 60
+            return max(startSeconds, item.startSeconds) < min(endSeconds, itemEnd)
+        }
+    }
+
     private func firstBoundaryIndex(greaterThan lowerBound: Double) -> Int {
         var low = 0
         var high = songBoundaryStarts.count
@@ -85,6 +94,24 @@ struct StreamAppTimelineMetadataIndex: Sendable {
             source: ProgramMetadataSource(raw: item.source),
             isUnknown: item.kind != .song || item.isUnknown
         )
+    }
+
+    private static func isAdBoundaryMetadata(_ item: StreamAppMetadataItem) -> Bool {
+        let text = [
+            item.id,
+            item.title,
+            item.subtitle ?? "",
+            item.source ?? "",
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        return text.contains("ad break start")
+            || text.contains("ad break end")
+            || text.contains(" advertisement ")
+            || text.contains("cue-out")
+            || text.contains("cue-in")
+            || text.contains("scte35") && (text.contains("duration") || text.contains(" ad"))
+            || text.split(separator: " ").contains("ad")
     }
 }
 
@@ -148,6 +175,7 @@ public struct StreamAppTimelineProjection: Sendable {
                 endTimestamp: item.endTimestamp,
                 title: item.title,
                 subtitle: item.subtitle,
+                source: item.source,
                 speakerDisplay: Self.metadataSpeakerDisplay(for: item),
                 isSeekable: isSeekable(item.startSeconds)
             )
@@ -165,20 +193,35 @@ public struct StreamAppTimelineProjection: Sendable {
     }
 
     static func coalescedMetadataChanges(_ items: [StreamAppMetadataItem]) -> [StreamAppMetadataItem] {
-        let eventItems = items.filter { $0.kind != .song }
-        let songItems = items.filter { $0.kind == .song }
+        let normalizedItems = items.map(normalizedMetadataKindForDisplay)
+        let eventItems = normalizedItems.filter { $0.kind != .song }
+        let songItems = normalizedItems.filter { $0.kind == .song }
         let samplesByTimestamp = Dictionary(grouping: songItems) { item in
             Int((item.startSeconds * 10).rounded())
         }
         let sorted = (samplesByTimestamp.values.compactMap(Self.preferredMetadataSample) + eventItems).sorted {
             if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            if $0.kind != $1.kind { return $0.kind == .song }
             return $0.id < $1.id
         }
         var coalesced: [StreamAppMetadataItem] = []
+        var activeSongIndex: Int?
         for item in sorted {
+            if let activeSongIndex,
+               activeSongIndex < coalesced.count,
+               shouldMergeIntoActiveTrack(coalesced[activeSongIndex], candidate: item)
+            {
+                coalesced[activeSongIndex] = mergedTrackRun(coalesced[activeSongIndex], item)
+                continue
+            }
             if item.kind != .song {
                 coalesced.append(item)
                 continue
+            }
+            var item = item
+            if firstNonEmpty([item.artist]) != nil {
+                item = Self.removingPromotedTitleOnlyDuplicates(from: &coalesced, for: item)
+                activeSongIndex = nil
             }
             if let last = coalesced.last {
                 if Self.shouldSuppressFingerprintGuess(after: last, candidate: item) {
@@ -187,6 +230,9 @@ public struct StreamAppTimelineProjection: Sendable {
                         item.endSeconds ?? item.startSeconds
                     )
                     coalesced[coalesced.count - 1].endTimestamp = item.endTimestamp
+                    if coalesced[coalesced.count - 1].kind == .song {
+                        activeSongIndex = coalesced.count - 1
+                    }
                     continue
                 }
                 if Self.isSameMetadataChange(last, item) {
@@ -195,16 +241,343 @@ public struct StreamAppTimelineProjection: Sendable {
                         item.endSeconds ?? item.startSeconds
                     )
                     coalesced[coalesced.count - 1].endTimestamp = item.endTimestamp
+                    if coalesced[coalesced.count - 1].kind == .song {
+                        activeSongIndex = coalesced.count - 1
+                    }
                     continue
                 }
-                coalesced[coalesced.count - 1].endSeconds = item.startSeconds
-                coalesced[coalesced.count - 1].endTimestamp = item.startTimestamp
+                if let activeSongIndex, activeSongIndex < coalesced.count {
+                    coalesced[activeSongIndex].endSeconds = item.startSeconds
+                    coalesced[activeSongIndex].endTimestamp = item.startTimestamp
+                } else if coalesced[coalesced.count - 1].kind == .song {
+                    coalesced[coalesced.count - 1].endSeconds = item.startSeconds
+                    coalesced[coalesced.count - 1].endTimestamp = item.startTimestamp
+                }
             }
             var next = item
             next.endSeconds = item.endSeconds ?? item.startSeconds + 8
             coalesced.append(next)
+            activeSongIndex = coalesced.count - 1
         }
-        return coalesced
+        return coalescedTitleOnlyMetadataEchoes(
+            coalescedEventDuplicatesAgainstSongs(coalesced)
+        )
+    }
+
+    private static func coalescedTitleOnlyMetadataEchoes(
+        _ items: [StreamAppMetadataItem]
+    ) -> [StreamAppMetadataItem] {
+        // Suppression policy: once an artist-backed song row exists for a given
+        // title, drop matching title-only echoes until the track changes (i.e.,
+        // until a different artist-backed title takes over). This is what the
+        // user expects when an ICY title repeats while the same song is playing.
+        var artistBackedTitleKeys = Set<String>()
+        for item in items
+        where item.kind == .song
+            && firstNonEmpty([item.artist]) != nil
+            && !isAdBoundaryEvent(item) {
+            artistBackedTitleKeys.insert(metadataTitleKey(item))
+        }
+
+        var result: [StreamAppMetadataItem] = []
+        var activeTitleOnlyIndexByKey: [String: Int] = [:]
+        var activeArtistBackedTitleKey: String?
+        for item in items {
+            guard !isAdBoundaryEvent(item),
+                  !metadataTitleKey(item).isEmpty,
+                  !ProgramMetadataClassifier.looksLikeNonMusic(
+                    title: item.title,
+                    artist: item.artist,
+                    album: item.subtitle
+                  )
+            else {
+                result.append(item)
+                continue
+            }
+
+            let titleKey = metadataTitleKey(item)
+            let isArtistBacked = firstNonEmpty([item.artist]) != nil
+
+            if isArtistBacked && item.kind == .song {
+                activeArtistBackedTitleKey = titleKey
+            }
+
+            if !isArtistBacked,
+               artistBackedTitleKeys.contains(titleKey),
+               activeArtistBackedTitleKey == titleKey
+            {
+                // We've already shown the artist-backed row for the active
+                // track; suppress repeated title-only echoes until the track
+                // changes.
+                continue
+            }
+
+            let key = titleOnlyRunKey(item)
+            if !isArtistBacked,
+               let index = activeTitleOnlyIndexByKey[key],
+               index < result.count,
+               shouldMergeTitleOnlyEcho(result[index], item)
+            {
+                result[index] = mergedTrackRun(result[index], item)
+                continue
+            }
+
+            result.append(item)
+            if !isArtistBacked {
+                activeTitleOnlyIndexByKey[key] = result.count - 1
+            } else {
+                activeTitleOnlyIndexByKey.removeValue(forKey: key)
+            }
+        }
+        return result
+    }
+
+    private static func titleOnlyItem(
+        _ item: StreamAppMetadataItem,
+        isCoveredBy artistBackedSongs: [StreamAppMetadataItem]
+    ) -> Bool {
+        artistBackedSongs.contains { song in
+            guard metadataTitleKey(song) == metadataTitleKey(item),
+                  metadataArtistsAreCompatible(song, item)
+            else { return false }
+            let songEnd = song.endSeconds ?? song.startSeconds
+            let itemEnd = item.endSeconds ?? item.startSeconds
+            return item.startSeconds <= songEnd + 180
+                && itemEnd >= song.startSeconds - 180
+        }
+    }
+
+    private static func shouldMergeTitleOnlyEcho(
+        _ existing: StreamAppMetadataItem,
+        _ candidate: StreamAppMetadataItem
+    ) -> Bool {
+        guard firstNonEmpty([existing.artist]) == nil,
+              firstNonEmpty([candidate.artist]) == nil,
+              titleOnlyRunKey(existing) == titleOnlyRunKey(candidate)
+        else { return false }
+        let existingEnd = existing.endSeconds ?? existing.startSeconds
+        let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
+        return candidate.startSeconds <= existingEnd + 300
+            || candidateEnd <= existingEnd + 300
+    }
+
+    private static func titleOnlyRunKey(_ item: StreamAppMetadataItem) -> String {
+        [
+            metadataTitleKey(item),
+            normalizedMetadataText(item.subtitle)
+        ].joined(separator: "|")
+    }
+
+    private static func coalescedEventDuplicatesAgainstSongs(
+        _ items: [StreamAppMetadataItem]
+    ) -> [StreamAppMetadataItem] {
+        var result: [StreamAppMetadataItem] = []
+        var latestEventIndexByKey: [String: Int] = [:]
+        for item in items {
+            if item.kind == .event && shouldSuppressEventDuplicate(item, in: result) {
+                continue
+            }
+            if item.kind == .event && !isAdBoundaryEvent(item) {
+                let key = eventDuplicateKey(item)
+                if let index = latestEventIndexByKey[key], index < result.count,
+                   shouldMergeRepeatedEvent(result[index], item)
+                {
+                    result[index].endSeconds = max(
+                        result[index].endSeconds ?? result[index].startSeconds,
+                        item.endSeconds ?? item.startSeconds
+                    )
+                    result[index].endTimestamp = item.endTimestamp ?? result[index].endTimestamp
+                    continue
+                }
+                latestEventIndexByKey[key] = result.count
+            }
+            result.append(item)
+        }
+        return result
+    }
+
+    private static func shouldSuppressEventDuplicate(
+        _ event: StreamAppMetadataItem,
+        in items: [StreamAppMetadataItem]
+    ) -> Bool {
+        guard !isAdBoundaryEvent(event),
+              !metadataTitleKey(event).isEmpty
+        else { return false }
+        return items.contains { existing in
+            guard existing.kind == .song,
+                  metadataTitleKey(existing) == metadataTitleKey(event),
+                  metadataArtistsAreCompatible(existing, event)
+            else { return false }
+            let existingEnd = existing.endSeconds ?? existing.startSeconds
+            let eventEnd = event.endSeconds ?? event.startSeconds
+            return event.startSeconds <= existingEnd + 180
+                && eventEnd >= existing.startSeconds - 180
+        }
+    }
+
+    private static func shouldMergeRepeatedEvent(
+        _ existing: StreamAppMetadataItem,
+        _ candidate: StreamAppMetadataItem
+    ) -> Bool {
+        guard existing.kind == .event,
+              candidate.kind == .event,
+              !isAdBoundaryEvent(existing),
+              !isAdBoundaryEvent(candidate),
+              eventDuplicateKey(existing) == eventDuplicateKey(candidate)
+        else { return false }
+        let existingEnd = existing.endSeconds ?? existing.startSeconds
+        let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
+        return candidate.startSeconds <= existingEnd + 180
+            || candidateEnd <= existingEnd + 180
+    }
+
+    private static func eventDuplicateKey(_ item: StreamAppMetadataItem) -> String {
+        [
+            metadataTitleKey(item),
+            normalizedMetadataText(item.artist),
+            normalizedMetadataText(item.subtitle)
+        ].joined(separator: "|")
+    }
+
+    private static func normalizedMetadataKindForDisplay(
+        _ item: StreamAppMetadataItem
+    ) -> StreamAppMetadataItem {
+        guard item.kind == .event, isSongLikeMetadataEvent(item) else {
+            return item
+        }
+        var normalized = item
+        normalized.kind = .song
+        return normalized
+    }
+
+    private static func isSongLikeMetadataEvent(_ item: StreamAppMetadataItem) -> Bool {
+        guard item.kind == .event else { return false }
+        guard !isAdBoundaryEvent(item) else { return false }
+        guard !ProgramMetadataClassifier.looksLikeNonMusic(
+            title: item.title,
+            artist: item.artist,
+            album: item.subtitle
+        ) else {
+            return false
+        }
+        if firstNonEmpty([item.artist]) != nil {
+            return true
+        }
+        let source = metadataSourceText(item)
+        if ProgramMetadataSource(raw: source).isTimedMetadata {
+            return true
+        }
+        return source.contains("hls_segment")
+            || source.contains("icy_stream")
+            || source.contains("timed")
+            || source.contains("id3")
+    }
+
+    private static func isAdBoundaryEvent(_ item: StreamAppMetadataItem) -> Bool {
+        let text = [
+            item.id,
+            item.title,
+            item.subtitle ?? "",
+            item.source ?? "",
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        return text.contains("ad break start")
+            || text.contains("ad break end")
+            || text.contains(" advertisement ")
+            || text.contains("cue-out")
+            || text.contains("cue-in")
+            || normalizedMetadataText(item.title) == "ad"
+    }
+
+    private static func removingPromotedTitleOnlyDuplicates(
+        from coalesced: inout [StreamAppMetadataItem],
+        for artistBackedSong: StreamAppMetadataItem
+    ) -> StreamAppMetadataItem {
+        var promoted = artistBackedSong
+        coalesced.removeAll { candidate in
+            guard metadataTitleKey(candidate) == metadataTitleKey(artistBackedSong),
+                  metadataArtistMatchesOrIsMissing(candidate, artistBackedSong),
+                  !ProgramMetadataClassifier.looksLikeNonMusic(
+                    title: candidate.title,
+                    artist: candidate.artist,
+                    album: candidate.subtitle
+                  )
+            else {
+                return false
+            }
+            let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
+            let nearPromotedSong = candidate.startSeconds <= artistBackedSong.startSeconds + 180
+                && candidateEnd >= artistBackedSong.startSeconds - 180
+            guard nearPromotedSong else { return false }
+            if candidate.startSeconds < promoted.startSeconds {
+                promoted.startSeconds = candidate.startSeconds
+                promoted.startTimestamp = candidate.startTimestamp ?? promoted.startTimestamp
+            }
+            promoted.endSeconds = max(
+                promoted.endSeconds ?? promoted.startSeconds,
+                candidate.endSeconds ?? candidate.startSeconds
+            )
+            promoted.endTimestamp = candidate.endTimestamp ?? promoted.endTimestamp
+            return true
+        }
+        return promoted
+    }
+
+    private static func metadataArtistMatchesOrIsMissing(
+        _ candidate: StreamAppMetadataItem,
+        _ artistBackedSong: StreamAppMetadataItem
+    ) -> Bool {
+        metadataArtistsAreCompatible(candidate, artistBackedSong)
+    }
+
+    private static func metadataArtistsAreCompatible(
+        _ lhs: StreamAppMetadataItem,
+        _ rhs: StreamAppMetadataItem
+    ) -> Bool {
+        let lhsArtist = normalizedMetadataText(lhs.artist)
+        let rhsArtist = normalizedMetadataText(rhs.artist)
+        if lhsArtist.isEmpty || rhsArtist.isEmpty { return true }
+        return lhsArtist == rhsArtist
+    }
+
+    private static func shouldMergeIntoActiveTrack(
+        _ active: StreamAppMetadataItem,
+        candidate: StreamAppMetadataItem
+    ) -> Bool {
+        guard active.kind == .song,
+              metadataTitleKey(active) == metadataTitleKey(candidate),
+              metadataArtistsAreCompatible(active, candidate),
+              !ProgramMetadataClassifier.looksLikeNonMusic(
+                title: candidate.title,
+                artist: candidate.artist,
+                album: candidate.subtitle
+              )
+        else {
+            return false
+        }
+        let activeEnd = active.endSeconds ?? active.startSeconds
+        let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
+        let overlapsOrFollows = candidate.startSeconds <= activeEnd + 180
+            || candidateEnd <= activeEnd + 180
+        return overlapsOrFollows
+    }
+
+    private static func mergedTrackRun(
+        _ active: StreamAppMetadataItem,
+        _ duplicate: StreamAppMetadataItem
+    ) -> StreamAppMetadataItem {
+        var merged = preferredMetadataSample([active, duplicate]) ?? active
+        merged.startSeconds = min(active.startSeconds, duplicate.startSeconds)
+        merged.startTimestamp = active.startSeconds <= duplicate.startSeconds
+            ? (active.startTimestamp ?? duplicate.startTimestamp)
+            : (duplicate.startTimestamp ?? active.startTimestamp)
+        merged.endSeconds = max(
+            active.endSeconds ?? active.startSeconds,
+            duplicate.endSeconds ?? duplicate.startSeconds
+        )
+        merged.endTimestamp = duplicate.endTimestamp ?? active.endTimestamp
+        return merged
     }
 
     private static func filteredParagraphs(
@@ -219,7 +592,13 @@ public struct StreamAppTimelineProjection: Sendable {
             return []
         case .nonSongs:
             return paragraphs.filter { paragraph in
-                !metadataIndex.overlapsConfirmedSong(
+                if metadataIndex.overlapsAdBoundary(
+                    startSeconds: paragraph.startSeconds,
+                    endSeconds: paragraph.endSeconds
+                ) {
+                    return true
+                }
+                return !metadataIndex.overlapsConfirmedSong(
                     startSeconds: paragraph.startSeconds,
                     endSeconds: paragraph.endSeconds
                 )
@@ -240,6 +619,7 @@ public struct StreamAppTimelineProjection: Sendable {
     private static func metadataPreferenceScore(_ item: StreamAppMetadataItem) -> Int {
         var score = item.kind == .song ? 100 : 0
         if isTrustedTimedMetadata(item) { score += 40 }
+        if item.id.hasPrefix("song:") { score += 10 }
         if isFingerprintMetadata(item) { score -= 20 }
         if Self.firstNonEmpty([item.artist]) != nil { score += 20 }
         if !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { score += 10 }
@@ -255,10 +635,24 @@ public struct StreamAppTimelineProjection: Sendable {
         _ lhs: StreamAppMetadataItem,
         _ rhs: StreamAppMetadataItem
     ) -> Bool {
-        lhs.kind == rhs.kind
-            && lhs.title == rhs.title
-            && lhs.artist == rhs.artist
-            && lhs.subtitle == rhs.subtitle
+        guard lhs.kind == rhs.kind,
+              metadataTitleKey(lhs) == metadataTitleKey(rhs)
+        else { return false }
+        if lhs.kind == .song {
+            return metadataArtistsAreCompatible(lhs, rhs)
+        }
+        return normalizedMetadataText(lhs.artist) == normalizedMetadataText(rhs.artist)
+            && normalizedMetadataText(lhs.subtitle) == normalizedMetadataText(rhs.subtitle)
+    }
+
+    private static func metadataTitleKey(_ item: StreamAppMetadataItem) -> String {
+        normalizedMetadataText(item.title)
+    }
+
+    private static func normalizedMetadataText(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     private static func shouldSuppressFingerprintGuess(
@@ -281,11 +675,24 @@ public struct StreamAppTimelineProjection: Sendable {
     }
 
     fileprivate static func isTrustedTimedMetadata(_ item: StreamAppMetadataItem) -> Bool {
-        let source = (item.source ?? item.id).lowercased()
+        let source = metadataSourceText(item)
         return source.contains("scte")
+            || source.contains("icy")
+            || source.contains("icecast")
             || source.contains("id3")
             || source.contains("timed")
             || item.id.hasPrefix("event:")
+    }
+
+    private static func metadataSourceText(_ item: StreamAppMetadataItem) -> String {
+        [
+            item.source,
+            item.subtitle,
+            item.id
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ")
+        .lowercased()
     }
 
     fileprivate static func isFingerprintMetadata(_ item: StreamAppMetadataItem) -> Bool {

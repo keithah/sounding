@@ -91,6 +91,10 @@ public enum SCTE35MarkerMapper {
         fields["SegmentationEventID"] = .string(hex(segmentation.segmentationEventID, width: 8))
         if let segmentationTypeID = segmentation.segmentationTypeID {
             fields["SegmentationTypeID"] = .string(hex(segmentationTypeID, width: 2))
+            if let name = segmentationTypeName(for: segmentationTypeID) {
+                fields["SegmentationTypeName"] = .string(name)
+                fields["Title"] = .string(name)
+            }
         }
         if let upidType = segmentation.segmentationUPIDType {
             fields["SegmentationUPIDType"] = .string(hex(upidType, width: 2))
@@ -128,6 +132,9 @@ public enum SCTE35MarkerMapper {
         }
         if let segmentationTypeID = segmentation.segmentationTypeID {
             object["SegmentationTypeID"] = .string(hex(segmentationTypeID, width: 2))
+            if let name = segmentationTypeName(for: segmentationTypeID) {
+                object["SegmentationTypeName"] = .string(name)
+            }
         }
         if let segmentNumber = segmentation.segmentNumber {
             object["SegmentNumber"] = .number(Double(segmentNumber))
@@ -161,6 +168,73 @@ public enum SCTE35MarkerMapper {
             return "TIME_SIGNAL"
         default:
             return cue.commandName.uppercased().replacingOccurrences(of: " ", with: "_")
+        }
+    }
+
+    private static func segmentationTypeName(for id: UInt8) -> String? {
+        switch id {
+        case 0x10:
+            return "Program start"
+        case 0x11:
+            return "Program end"
+        case 0x20:
+            return "Chapter start"
+        case 0x21:
+            return "Chapter end"
+        case 0x22:
+            return "Breakaway start"
+        case 0x23:
+            return "Breakaway end"
+        case 0x30:
+            return "Provider advertisement start"
+        case 0x31:
+            return "Provider advertisement end"
+        case 0x32:
+            return "Distributor advertisement start"
+        case 0x33:
+            return "Distributor advertisement end"
+        case 0x34:
+            return "Provider placement opportunity start"
+        case 0x35:
+            return "Provider placement opportunity end"
+        case 0x36:
+            return "Distributor placement opportunity start"
+        case 0x37:
+            return "Distributor placement opportunity end"
+        case 0x38:
+            return "Provider overlay placement opportunity start"
+        case 0x39:
+            return "Provider overlay placement opportunity end"
+        case 0x40:
+            return "Provider unscheduled event start"
+        case 0x41:
+            return "Provider unscheduled event end"
+        case 0x42:
+            return "Distributor unscheduled event start"
+        case 0x43:
+            return "Distributor unscheduled event end"
+        case 0x44:
+            return "Alternate content opportunity start"
+        case 0x45:
+            return "Alternate content opportunity end"
+        case 0x46:
+            return "Provider promo start"
+        case 0x47:
+            return "Provider promo end"
+        case 0x48:
+            return "Distributor promo start"
+        case 0x49:
+            return "Distributor promo end"
+        case 0x4A:
+            return "Provider network start"
+        case 0x4B:
+            return "Provider network end"
+        case 0x4C:
+            return "Distributor network start"
+        case 0x4D:
+            return "Distributor network end"
+        default:
+            return nil
         }
     }
 

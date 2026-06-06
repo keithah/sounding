@@ -24,7 +24,7 @@ public enum StreamAppTimelineRailProjection {
         let orderedVisibleStartSeconds = min(finiteVisibleStartSeconds, finiteVisibleEndSeconds)
         let orderedVisibleEndSeconds = max(finiteVisibleStartSeconds, finiteVisibleEndSeconds)
         let duration = max(orderedVisibleEndSeconds - orderedVisibleStartSeconds, 0)
-        let spans = items
+        let songSpans = items
             .filter { $0.kind == .song }
             .compactMap { item in
                 span(
@@ -34,8 +34,16 @@ public enum StreamAppTimelineRailProjection {
                     duration: duration
                 )
             }
+        let adSpans = adBreakSpans(
+            from: items.filter { $0.kind == .event },
+            visibleStartSeconds: orderedVisibleStartSeconds,
+            visibleEndSeconds: orderedVisibleEndSeconds,
+            duration: duration
+        )
+        let spans = (songSpans + adSpans)
             .sorted {
                 if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+                if $0.isAd != $1.isAd { return !$0.isAd && $1.isAd }
                 return $0.id < $1.id
             }
         let markers = items
@@ -77,6 +85,7 @@ public enum StreamAppTimelineRailProjection {
                 endTimestamp: item.endTimestamp,
                 title: item.title,
                 subtitle: item.subtitle,
+                source: item.source,
                 speakerDisplay: metadataSpeakerDisplay(for: item),
                 isSeekable: false
             )
@@ -91,6 +100,7 @@ public enum StreamAppTimelineRailProjection {
                 endTimestamp: item.endTimestamp,
                 title: item.title,
                 subtitle: item.subtitle,
+                source: item.source,
                 isSeekable: false
             )
         }
@@ -137,7 +147,12 @@ public enum StreamAppTimelineRailProjection {
 
     private static func isTrusted(_ item: StreamAppMetadataItem) -> Bool {
         let source = (item.source ?? item.id).lowercased()
-        return source.contains("id3") || source.contains("scte") || source.contains("timed") || item.id.hasPrefix("event:")
+        return source.contains("id3")
+            || source.contains("scte")
+            || source.contains("icy")
+            || source.contains("icecast")
+            || source.contains("timed")
+            || item.id.hasPrefix("event:")
     }
 
     private static func isFingerprint(_ item: StreamAppMetadataItem) -> Bool {
@@ -182,6 +197,117 @@ public enum StreamAppTimelineRailProjection {
         )
     }
 
+    private static func adBreakSpans(
+        from events: [StreamAppTimelineItem],
+        visibleStartSeconds: Double,
+        visibleEndSeconds: Double,
+        duration: Double
+    ) -> [StreamAppTimelineRailSpan] {
+        guard duration > 0 else { return [] }
+        let orderedEvents = events.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            return $0.id < $1.id
+        }
+        var spans: [StreamAppTimelineRailSpan] = []
+        var pendingStart: StreamAppTimelineItem?
+        for event in orderedEvents {
+            let source = markerSource(for: event)
+            let startsAdBreak = isAdBreakStart(event)
+            let endsAdBreak = isAdBreakEnd(event)
+            guard source == .scte35 || startsAdBreak || endsAdBreak else { continue }
+            if startsAdBreak {
+                if let completed = adSpan(
+                    start: event,
+                    end: explicitAdEndSeconds(for: event),
+                    visibleStartSeconds: visibleStartSeconds,
+                    visibleEndSeconds: visibleEndSeconds,
+                    duration: duration
+                ) {
+                    spans.append(completed)
+                    pendingStart = nil
+                } else {
+                    pendingStart = event
+                }
+                continue
+            }
+            if endsAdBreak, let start = pendingStart {
+                if let completed = adSpan(
+                    start: start,
+                    end: max(event.startSeconds, start.startSeconds),
+                    visibleStartSeconds: visibleStartSeconds,
+                    visibleEndSeconds: visibleEndSeconds,
+                    duration: duration
+                ) {
+                    spans.append(completed)
+                }
+                pendingStart = nil
+            }
+        }
+        return spans
+    }
+
+    private static func explicitAdEndSeconds(for event: StreamAppTimelineItem) -> Double? {
+        if let end = event.endSeconds, end > event.startSeconds {
+            return end
+        }
+        guard let duration = adDurationSeconds(for: event), duration > 0 else {
+            return nil
+        }
+        return event.startSeconds + duration
+    }
+
+    private static func adDurationSeconds(for item: StreamAppTimelineItem) -> Double? {
+        let text = timelineText(for: item)
+        let patterns = [
+            #"duration\s+([0-9]+(?:\.[0-9]+)?)\s*s?"#,
+            #"breakduration["':\s]+([0-9]+(?:\.[0-9]+)?)"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  match.numberOfRanges > 1,
+                  let valueRange = Range(match.range(at: 1), in: text),
+                  let value = Double(text[valueRange])
+            else {
+                continue
+            }
+            return value
+        }
+        return nil
+    }
+
+    private static func adSpan(
+        start: StreamAppTimelineItem,
+        end: Double?,
+        visibleStartSeconds: Double,
+        visibleEndSeconds: Double,
+        duration: Double
+    ) -> StreamAppTimelineRailSpan? {
+        guard let end, end > start.startSeconds else { return nil }
+        guard end >= visibleStartSeconds && start.startSeconds <= visibleEndSeconds else {
+            return nil
+        }
+        let clampedStart = clamp(start.startSeconds, lower: visibleStartSeconds, upper: visibleEndSeconds)
+        let clampedEnd = clamp(end, lower: visibleStartSeconds, upper: visibleEndSeconds)
+        let source = markerSource(for: start)
+        return StreamAppTimelineRailSpan(
+            id: "ad:\(start.id)",
+            title: "AD",
+            subtitle: adSubtitle(for: start, source: source),
+            source: source,
+            isAd: true,
+            startSeconds: start.startSeconds,
+            endSeconds: end,
+            normalizedStart: normalized(clampedStart, visibleStartSeconds: visibleStartSeconds, duration: duration),
+            normalizedEnd: normalized(clampedEnd, visibleStartSeconds: visibleStartSeconds, duration: duration),
+            colorToken: "ad",
+            isSeekable: start.isSeekable
+        )
+    }
+
     private static func marker(
         for item: StreamAppTimelineItem,
         visibleStartSeconds: Double,
@@ -196,20 +322,78 @@ public enum StreamAppTimelineRailProjection {
         let source = markerSource(for: item)
         return StreamAppTimelineRailMarker(
             id: item.id,
-            title: item.title,
+            title: isAdEvent(item) ? "AD" : item.title,
             source: source,
             seconds: item.startSeconds,
             normalizedPosition: normalized(item.startSeconds, visibleStartSeconds: visibleStartSeconds, duration: duration),
-            colorToken: markerColorToken(for: source),
+            colorToken: isAdEvent(item) ? "ad" : markerColorToken(for: source),
             isSeekable: item.isSeekable
         )
     }
 
     private static func markerSource(for item: StreamAppTimelineItem) -> StreamAppTimelineMarkerSource {
-        let text = [item.id, item.title, item.subtitle ?? ""].joined(separator: " ").lowercased()
+        let text = timelineText(for: item)
         if scte35Markers.contains(where: { containsMarker($0, in: text) }) { return .scte35 }
+        if icyMarkers.contains(where: { containsMarker($0, in: text) }) { return .icy }
         if timedID3Markers.contains(where: { containsMarker($0, in: text) }) { return .timedID3 }
         return .unknown
+    }
+
+    private static func isAdBreakStart(_ item: StreamAppTimelineItem) -> Bool {
+        let text = timelineText(for: item)
+        return text.contains("ad break start")
+            || text.contains(" advertisement ")
+            || text.contains("break start")
+            || text.contains("cue-out")
+            || text.contains("ext-x-cue-out")
+            || text.contains("splice_insert")
+            || text.contains("splice insert")
+    }
+
+    private static func isAdEvent(_ item: StreamAppTimelineItem) -> Bool {
+        normalized(item.title) == "ad"
+            || isAdBreakStart(item)
+            || isAdBreakEnd(item)
+    }
+
+    private static func isAdBreakEnd(_ item: StreamAppTimelineItem) -> Bool {
+        let text = timelineText(for: item)
+        return text.contains("ad break end")
+            || text.contains("break end")
+            || text.contains("cue-in")
+            || text.contains("ext-x-cue-in")
+    }
+
+    private static func timelineText(for item: StreamAppTimelineItem) -> String {
+        [item.id, item.title, item.subtitle ?? "", item.source ?? ""]
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    private static func adSubtitle(
+        for item: StreamAppTimelineItem,
+        source: StreamAppTimelineMarkerSource = .scte35
+    ) -> String {
+        let sourceLabel = adSourceLabel(for: source)
+        var parts = [sourceLabel]
+        if let subtitle = item.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !subtitle.isEmpty,
+           !subtitle.localizedCaseInsensitiveContains(sourceLabel) {
+            parts.append(subtitle)
+        }
+        if let end = explicitAdEndSeconds(for: item), end > item.startSeconds {
+            parts.append(String(format: "%.0fs", end - item.startSeconds))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func adSourceLabel(for source: StreamAppTimelineMarkerSource) -> String {
+        switch source {
+        case .scte35: return "SCTE-35"
+        case .icy: return "ICY"
+        case .timedID3: return "ID3"
+        case .unknown: return "Ad cue"
+        }
     }
 
     private static let scte35Markers = [
@@ -229,6 +413,12 @@ public enum StreamAppTimelineRailProjection {
         "timed-id3",
     ]
 
+    private static let icyMarkers = [
+        "icy",
+        "icy_stream",
+        "icecast",
+    ]
+
     private static func containsMarker(_ marker: String, in text: String) -> Bool {
         let pattern = "(^|[^a-z0-9])" + NSRegularExpression.escapedPattern(for: marker) + "([^a-z0-9]|$)"
         return text.range(of: pattern, options: .regularExpression) != nil
@@ -239,10 +429,16 @@ public enum StreamAppTimelineRailProjection {
         case .timedID3:
             return "orange"
         case .scte35:
-            return "red"
+            return "ad"
+        case .icy:
+            return "blue"
         case .unknown:
             return "gray"
         }
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private static func normalized(

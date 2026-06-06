@@ -99,9 +99,21 @@ public struct MarkerClassifier: Sendable {
             if let outOfNetworkIndicator = outOfNetworkIndicator(from: marker) {
                 return outOfNetworkIndicator ? .adStart : .adEnd
             }
-            return .unknown
+            return .adStart
         case "TIME_SIGNAL":
-            return classifySegmentationTypeIDs(segmentationTypeIDs(from: marker))
+            let ids = segmentationTypeIDs(from: marker)
+            if ids.isEmpty {
+                if hasSegmentationIntent(marker) {
+                    // Caller provided a segmentation field/descriptor but we
+                    // couldn't parse it — fail closed rather than guess.
+                    return .unknown
+                }
+                // TIME_SIGNAL without any segmentation descriptor is, in
+                // practice, almost always an ad insertion cue. Default to
+                // adStart so it doesn't appear as UNKNOWN in the timeline.
+                return .adStart
+            }
+            return classifySegmentationTypeIDs(ids)
         default:
             return .unknown
         }
@@ -150,6 +162,15 @@ public struct MarkerClassifier: Sendable {
         return .unknown
     }
 
+    private static func hasSegmentationIntent(_ marker: AdMarker) -> Bool {
+        if marker.fields["SegmentationTypeID"] != nil { return true }
+        for descriptor in marker.descriptors {
+            guard case let .object(object) = descriptor else { continue }
+            if object["SegmentationTypeID"] != nil { return true }
+        }
+        return false
+    }
+
     private static func segmentationTypeIDs(from marker: AdMarker) -> [Int] {
         var ids = [Int]()
 
@@ -169,11 +190,17 @@ public struct MarkerClassifier: Sendable {
     }
 
     private static func isAdStartSegmentationTypeID(_ id: Int) -> Bool {
-        [0x30, 0x32, 0x34, 0x36, 0x38].contains(id)
+        // Provider/Distributor ad (0x30/32), placement opportunities (0x34/36),
+        // overlay placement (0x38), unscheduled events (0x40/42), alternate
+        // content (0x44), promo (0x46/48), network (0x4A/4C). Even IDs in the
+        // 0x30-0x4F band are starts per SCTE-35.
+        [0x30, 0x32, 0x34, 0x36, 0x38, 0x40, 0x42, 0x44, 0x46, 0x48, 0x4A, 0x4C]
+            .contains(id)
     }
 
     private static func isAdEndSegmentationTypeID(_ id: Int) -> Bool {
-        [0x31, 0x33, 0x35, 0x37, 0x39].contains(id)
+        [0x31, 0x33, 0x35, 0x37, 0x39, 0x41, 0x43, 0x45, 0x47, 0x49, 0x4B, 0x4D]
+            .contains(id)
     }
 
     private static func id3TextCandidates(from marker: AdMarker) -> [String] {
@@ -216,7 +243,7 @@ public struct MarkerClassifier: Sendable {
 
     private static func containsStartWord(_ text: String) -> Bool {
         let normalized = text.lowercased()
-        return ["ad", "spot", "promo", "commercial"].contains { word in
+        return ["ad", "advertisement", "spot", "promo", "commercial"].contains { word in
             containsWord(word, in: normalized)
         }
     }
@@ -228,7 +255,7 @@ public struct MarkerClassifier: Sendable {
         } ?? trimmed.endIndex
         guard firstWordStart < trimmed.endIndex else { return false }
         let candidate = String(trimmed[firstWordStart...])
-        return ["ad", "spot", "promo", "commercial"].contains { word in
+        return ["ad", "advertisement", "spot", "promo", "commercial"].contains { word in
             guard candidate.hasPrefix(word) else { return false }
             let end = candidate.index(candidate.startIndex, offsetBy: word.count)
             return isBoundary(after: end, in: candidate)
