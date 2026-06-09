@@ -568,6 +568,50 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         XCTAssertEqual(ad?.endSeconds, 34)
     }
 
+    func testNonSongPolicyKeepsTranscriptUntilExplicitAdEndAfterCoalescedGenericAdStarts() {
+        let speaker = display(StreamAppSpeakerDisplayProjection.unknownSpeakerLabel)
+        let projection = StreamAppTimelineProjection(
+            paragraphs: [
+                paragraph(1, speaker: speaker, start: 7980, end: 7990, text: "Ad copy after the last repeated marker."),
+                paragraph(2, speaker: speaker, start: 7860, end: 7870, text: "Song lyric before the break."),
+            ],
+            metadata: [
+                metadata(
+                    "song:stale",
+                    title: "Current Song",
+                    artist: "Current Artist",
+                    start: 7800,
+                    end: 8010,
+                    source: "icy"
+                ),
+                metadata(
+                    "event:ad:coalesced",
+                    title: "AD",
+                    artist: nil,
+                    start: 7884,
+                    end: 7974,
+                    kind: .event,
+                    source: "icy_stream | Advertisement | ICY"
+                ),
+                metadata(
+                    "event:ad:end",
+                    title: "Ad break end",
+                    artist: nil,
+                    start: 8004,
+                    end: 8004,
+                    kind: .event,
+                    source: "icy"
+                ),
+            ],
+            transcriptionPolicy: .nonSongs
+        )
+
+        XCTAssertEqual(
+            projection.timelineItems(limit: 10).filter { $0.kind == .transcript }.map(\.subtitle),
+            ["Ad copy after the last repeated marker."]
+        )
+    }
+
     private func display(_ label: String) -> StreamAppSpeakerDisplay {
         StreamAppSpeakerDisplay(
             rawLabel: label,

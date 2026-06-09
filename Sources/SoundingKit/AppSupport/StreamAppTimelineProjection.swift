@@ -187,12 +187,23 @@ struct StreamAppTimelineMetadataIndex: Sendable {
 
     private static func explicitAdEndSeconds(for item: StreamAppMetadataItem) -> Double? {
         if let end = item.endSeconds, end > item.startSeconds {
+            guard !isGenericAdStartWithoutDuration(item) else {
+                return nil
+            }
             return end
         }
         guard let duration = adDurationSeconds(for: item), duration > 0 else {
             return nil
         }
         return item.startSeconds + duration
+    }
+
+    private static func isGenericAdStartWithoutDuration(_ item: StreamAppMetadataItem) -> Bool {
+        let title = item.title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard title == "ad" || title == "advertisement" else { return false }
+        return adDurationSeconds(for: item) == nil
     }
 
     private static func adDurationSeconds(for item: StreamAppMetadataItem) -> Double? {
