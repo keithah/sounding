@@ -87,6 +87,21 @@ final class TranscriptAdScorerTests: XCTestCase {
         XCTAssertTrue((scores[fragments[0].id]?.signals ?? []).contains { $0.contains("cluster") })
     }
 
+    func testSplitBankingAdCopyReinforcesAcrossNearbyFragments() {
+        let fragments = [
+            paragraph("There he is Mr. Bigtime Capital One Bank Guy.", start: 0, end: 4),
+            paragraph("Well, look at this Capital One Cafe. I just might move in.", start: 4, end: 8),
+            paragraph("There's no fees or minimums on Capital One checking.", start: 8, end: 30),
+            paragraph("Terms apply. Visit capitalone.com/bank for details.", start: 31, end: 37),
+        ]
+
+        let scores = TranscriptAdScorer.scores(for: fragments)
+
+        XCTAssertGreaterThanOrEqual(scores[fragments[0].id]?.confidence ?? 0, 0.50)
+        XCTAssertGreaterThanOrEqual(scores[fragments[2].id]?.confidence ?? 0, 0.50)
+        XCTAssertGreaterThanOrEqual(scores[fragments[3].id]?.confidence ?? 0, 0.50)
+    }
+
     private func paragraph(
         _ text: String,
         start: Double = 0,

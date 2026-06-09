@@ -65,17 +65,30 @@ public struct TranscriptAdScoringPipelineResult: Equatable, Sendable {
     public var heuristic: TranscriptAdScorer.Score
     public var verification: TranscriptAdVerification?
     public var verifierError: String?
+    var heuristicAdType: TranscriptAdVerification.AdType?
+    var heuristicBrand: String?
+    var heuristicProduct: String?
 
     public init(
         isAd: Bool,
         heuristic: TranscriptAdScorer.Score,
         verification: TranscriptAdVerification?,
-        verifierError: String?
+        verifierError: String?,
+        heuristicAdType: TranscriptAdVerification.AdType? = nil,
+        heuristicBrand: String? = nil,
+        heuristicProduct: String? = nil
     ) {
         self.isAd = isAd
         self.heuristic = heuristic
         self.verification = verification
         self.verifierError = verifierError
+        self.heuristicAdType = heuristicAdType
+        self.heuristicBrand = heuristicBrand
+        self.heuristicProduct = heuristicProduct
+    }
+
+    func cacheEntryForTesting(segmentID: Int64, classifiedAt: String) -> TranscriptAdClassificationCacheEntry {
+        cacheEntry(segmentID: segmentID, classifiedAt: classifiedAt)
     }
 }
 
@@ -178,6 +191,11 @@ public struct TranscriptAdScoringPipeline: Sendable {
     ) async -> TranscriptAdScoringPipelineResult {
         let boundedNeighbors = Self.boundedNeighbors(around: paragraph, in: neighbors)
         let heuristic = TranscriptAdScorer.score(paragraph: paragraph, neighbors: boundedNeighbors)
+        let heuristicAttribution = Self.heuristicAttribution(
+            paragraph: paragraph,
+            neighbors: boundedNeighbors,
+            heuristic: heuristic
+        )
         if let cachedVerification, cachedVerification.verdict != .ad {
             return TranscriptAdScoringPipelineResult(
                 isAd: false,
@@ -204,7 +222,10 @@ public struct TranscriptAdScoringPipeline: Sendable {
                 isAd: cachedVerification?.verdict == .ad || heuristic.confidence >= adThreshold,
                 heuristic: heuristic,
                 verification: cachedVerification,
-                verifierError: nil
+                verifierError: nil,
+                heuristicAdType: heuristicAttribution?.adType,
+                heuristicBrand: heuristicAttribution?.brand,
+                heuristicProduct: heuristicAttribution?.product
             )
         }
 
@@ -224,9 +245,53 @@ public struct TranscriptAdScoringPipeline: Sendable {
                 isAd: heuristic.confidence >= adThreshold,
                 heuristic: heuristic,
                 verification: nil,
-                verifierError: String(describing: error)
+                verifierError: String(describing: error),
+                heuristicAdType: heuristicAttribution?.adType,
+                heuristicBrand: heuristicAttribution?.brand,
+                heuristicProduct: heuristicAttribution?.product
             )
         }
+    }
+
+    private struct HeuristicAttribution: Sendable {
+        var adType: TranscriptAdVerification.AdType
+        var brand: String
+        var product: String?
+    }
+
+    private static func heuristicAttribution(
+        paragraph: StreamAppTranscriptParagraph,
+        neighbors: [StreamAppTranscriptParagraph],
+        heuristic: TranscriptAdScorer.Score
+    ) -> HeuristicAttribution? {
+        guard heuristic.confidence >= 0.50 else { return nil }
+        let text = ([paragraph] + neighbors)
+            .map(\.text)
+            .joined(separator: " ")
+            .lowercased()
+        guard let brand = knownBrand(in: text) else { return nil }
+        return HeuristicAttribution(
+            adType: .commercialSpot,
+            brand: brand,
+            product: nil
+        )
+    }
+
+    private static func knownBrand(in text: String) -> String? {
+        let candidates: [(needle: String, brand: String)] = [
+            ("capital one", "Capital One"),
+            ("zocdoc", "Zocdoc"),
+            ("zokdok", "Zocdoc"),
+            ("zok-dok", "Zocdoc"),
+            ("zock dock", "Zocdoc"),
+            ("zokta", "Zocdoc"),
+            ("legalzoom", "LegalZoom"),
+            ("legal zoom", "LegalZoom"),
+            ("wells fargo", "Wells Fargo"),
+            ("tune in", "TuneIn"),
+            ("tunein", "TuneIn"),
+        ]
+        return candidates.first { text.contains($0.needle) }?.brand
     }
 
     private func shouldVerify(
@@ -312,9 +377,9 @@ private extension TranscriptAdScoringPipelineResult {
             confidence: cacheConfidence,
             signals: cacheSignals,
             verdict: verification?.verdict.rawValue,
-            adType: verification?.adType?.rawValue,
-            brand: verification?.brand,
-            product: verification?.product,
+            adType: verification?.adType?.rawValue ?? heuristicAdType?.rawValue,
+            brand: verification?.brand ?? heuristicBrand,
+            product: verification?.product ?? heuristicProduct,
             reason: verification?.reason,
             modelIdentifier: verification?.modelIdentifier,
             classifiedAt: classifiedAt
@@ -337,6 +402,9 @@ private extension TranscriptAdScoringPipelineResult {
         }
         if let verifierError, !verifierError.isEmpty {
             signals.append("verifier-error")
+        }
+        if heuristicBrand != nil {
+            signals.append("heuristic-brand")
         }
         if signals.isEmpty {
             signals.append("heuristic:no-signals")

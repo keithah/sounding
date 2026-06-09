@@ -187,6 +187,31 @@ final class TranscriptAdScoringPipelineTests: XCTestCase {
         XCTAssertEqual(calls.count, 0)
     }
 
+    func testHeuristicClassificationPersistsKnownBrandAttributionWhenVerifierIsDisabled() async throws {
+        let result = await TranscriptAdScoringPipeline(
+            isVerifierEnabled: false,
+            now: { "2026-05-01T10:00:00Z" }
+        ).classify(
+            paragraph: paragraph(
+                1,
+                "Terms apply. Visit capitalone.com/bank for details.",
+                start: 0,
+                end: 8
+            ),
+            neighbors: [
+                paragraph(2, "There's no fees or minimums on Capital One checking.", start: 9, end: 25)
+            ]
+        )
+
+        let entry = result.cacheEntryForTesting(segmentID: 1, classifiedAt: "2026-05-01T10:00:00Z")
+
+        XCTAssertTrue(result.isAd)
+        XCTAssertNil(result.verification)
+        XCTAssertEqual(entry.brand, "Capital One")
+        XCTAssertEqual(entry.adType, "commercialSpot")
+        XCTAssertTrue(entry.signals.contains("heuristic-brand"))
+    }
+
     func testClassificationRefresherPersistsOnlyMissingParagraphs() async throws {
         let temporary = try TemporarySoundingDatabase()
         let firstSegmentID = try makeTranscriptSegment(

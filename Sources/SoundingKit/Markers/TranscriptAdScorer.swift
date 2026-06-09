@@ -2,7 +2,7 @@ import Foundation
 
 public enum TranscriptAdScorer {
     public static let classifier = "transcript-ad-heuristic"
-    public static let classifierVersion = "2"
+    public static let classifierVersion = "3"
 
     public struct Score: Equatable, Sendable {
         public let confidence: Double
@@ -162,6 +162,10 @@ public enum TranscriptAdScorer {
             medium += 0.25
             signals.append("tunein-promo")
         }
+        if containsBankingPitch(in: normalized) {
+            medium += 0.25
+            signals.append("banking-pitch")
+        }
         medium = min(medium, 0.45)
 
         var weak = 0.0
@@ -222,6 +226,17 @@ public enum TranscriptAdScorer {
             )
     }
 
+    private static func containsBankingPitch(in text: String) -> Bool {
+        text.contains("no fees")
+            || text.contains("no fee")
+            || text.contains("minimums")
+            || text.contains("checking")
+            || text.contains("bank guy")
+            || text.contains("banking")
+            || text.contains("what's in your wallet")
+            || text.contains("capital one cafe")
+    }
+
     private static func containsKnownCommercialBrand(in text: String) -> Bool {
         knownCommercialBrands.contains { text.contains($0) }
     }
@@ -258,6 +273,7 @@ public enum TranscriptAdScorer {
 
     private static let legalDisclaimers = [
         "rates may apply",
+        "terms apply",
         "terms and conditions",
         "member fdic",
         "see store for details",
@@ -312,6 +328,7 @@ public enum TranscriptAdScorer {
         "zok-dok",
         "zock dock",
         "zokta",
+        "capital one",
         "legalzoom",
         "legal zoom",
         "wells fargo",
