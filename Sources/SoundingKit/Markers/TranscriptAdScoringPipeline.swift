@@ -281,6 +281,12 @@ private extension TranscriptAdScoringPipelineResult {
             isAd: isAd,
             confidence: cacheConfidence,
             signals: cacheSignals,
+            verdict: verification?.verdict.rawValue,
+            adType: verification?.adType?.rawValue,
+            brand: verification?.brand,
+            product: verification?.product,
+            reason: verification?.reason,
+            modelIdentifier: verification?.modelIdentifier,
             classifiedAt: classifiedAt
         )
     }

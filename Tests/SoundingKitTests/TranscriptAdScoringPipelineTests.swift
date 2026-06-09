@@ -269,6 +269,10 @@ final class TranscriptAdScoringPipelineTests: XCTestCase {
         XCTAssertTrue(cachedSecond.isAd)
         XCTAssertEqual(cachedSecond.updatedAt, "2026-05-01T10:00:00Z")
         XCTAssertTrue(cachedSecond.signals.contains("verified:ad"))
+        XCTAssertEqual(cachedSecond.verdict, "ad")
+        XCTAssertEqual(cachedSecond.adType, "commercialSpot")
+        XCTAssertEqual(cachedSecond.brand, "Example")
+        XCTAssertEqual(cachedSecond.modelIdentifier, "mock")
     }
 
     func testClassificationRefresherCachesNegativeHeuristicResult() async throws {

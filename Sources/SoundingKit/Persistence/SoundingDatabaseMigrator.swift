@@ -539,6 +539,22 @@ enum SoundingDatabaseMigrator {
             )
         }
 
+        migrator.registerMigration("addTranscriptAdClassificationAttribution") { db in
+            try db.alter(table: "transcript_ad_classification_cache") { table in
+                table.add(column: "verdict", .text)
+                table.add(column: "ad_type", .text)
+                table.add(column: "brand", .text)
+                table.add(column: "product", .text)
+                table.add(column: "reason", .text)
+                table.add(column: "model_identifier", .text)
+            }
+            try db.create(
+                index: "transcript_ad_classification_cache_on_brand",
+                on: "transcript_ad_classification_cache",
+                columns: ["brand"]
+            )
+        }
+
         try migrator.migrate(writer)
     }
 }

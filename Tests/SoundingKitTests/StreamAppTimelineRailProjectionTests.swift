@@ -373,8 +373,51 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertEqual(adSpan.colorToken, "ad")
         XCTAssertNil(adSpan.confidence)
         XCTAssertEqual(adSpan.signals, [])
+        XCTAssertNil(adSpan.brand)
+        XCTAssertNil(adSpan.product)
+        XCTAssertNil(adSpan.adType)
         XCTAssertEqual(adSpan.startSeconds, 10, accuracy: 0.001)
         XCTAssertEqual(adSpan.endSeconds, 50, accuracy: 0.001)
+    }
+
+    func testCachedVerifierAttributionLabelsTranscriptAdSpanWithBrand() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            metadata: [],
+            paragraphs: [
+                paragraph(10, start: 20, end: 50, text: "Mobile carriers message and data rates may apply. Wells Fargo Bank member FDIC."),
+            ],
+            adClassifications: [
+                10: TranscriptAdClassificationCacheRow(
+                    id: 1,
+                    identity: TranscriptAdClassificationCacheIdentity(
+                        segmentID: 10,
+                        classifier: TranscriptAdScorer.classifier,
+                        classifierVersion: TranscriptAdScorer.classifierVersion
+                    ),
+                    isAd: true,
+                    confidence: 0.93,
+                    signals: ["verified:ad", "disclaimerx2"],
+                    verdict: "ad",
+                    adType: "commercialSpot",
+                    brand: "Wells Fargo",
+                    product: "Clear Access Banking",
+                    reason: "Banking disclaimer and CTA.",
+                    modelIdentifier: "mock",
+                    createdAt: "2026-05-01T10:00:00Z",
+                    updatedAt: "2026-05-01T10:00:00Z"
+                )
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 60
+        )
+
+        let adSpan = try XCTUnwrap(rail.spans.first)
+        XCTAssertEqual(adSpan.title, "Wells Fargo")
+        XCTAssertEqual(adSpan.brand, "Wells Fargo")
+        XCTAssertEqual(adSpan.product, "Clear Access Banking")
+        XCTAssertEqual(adSpan.adType, "commercialSpot")
+        XCTAssertEqual(adSpan.colorToken, "ad-inferred")
+        XCTAssertTrue(try XCTUnwrap(adSpan.subtitle).contains("Clear Access Banking"))
     }
 
     private func timeline(

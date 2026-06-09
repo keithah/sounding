@@ -18,6 +18,12 @@ public struct TranscriptAdClassificationCacheEntry: Equatable, Sendable {
     public var isAd: Bool
     public var confidence: Double
     public var signals: [String]
+    public var verdict: String?
+    public var adType: String?
+    public var brand: String?
+    public var product: String?
+    public var reason: String?
+    public var modelIdentifier: String?
     public var classifiedAt: String
 
     public init(
@@ -25,13 +31,33 @@ public struct TranscriptAdClassificationCacheEntry: Equatable, Sendable {
         isAd: Bool,
         confidence: Double,
         signals: [String],
+        verdict: String? = nil,
+        adType: String? = nil,
+        brand: String? = nil,
+        product: String? = nil,
+        reason: String? = nil,
+        modelIdentifier: String? = nil,
         classifiedAt: String
     ) {
         self.identity = identity
         self.isAd = isAd
         self.confidence = confidence
         self.signals = signals
+        self.verdict = Self.normalized(verdict)
+        self.adType = Self.normalized(adType)
+        self.brand = Self.normalized(brand)
+        self.product = Self.normalized(product)
+        self.reason = Self.normalized(reason)
+        self.modelIdentifier = Self.normalized(modelIdentifier)
         self.classifiedAt = classifiedAt
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 
@@ -41,6 +67,12 @@ public struct TranscriptAdClassificationCacheRow: Equatable, Sendable {
     public var isAd: Bool
     public var confidence: Double
     public var signals: [String]
+    public var verdict: String?
+    public var adType: String?
+    public var brand: String?
+    public var product: String?
+    public var reason: String?
+    public var modelIdentifier: String?
     public var createdAt: String
     public var updatedAt: String
 }
@@ -68,7 +100,8 @@ public final class TranscriptAdClassificationCache {
                     db,
                     sql: """
                     SELECT id, segment_id, classifier, classifier_version, is_ad, confidence,
-                           signals_json, created_at, updated_at
+                           signals_json, verdict, ad_type, brand, product, reason,
+                           model_identifier, created_at, updated_at
                     FROM transcript_ad_classification_cache
                     WHERE segment_id = ?
                       AND classifier = ?
@@ -107,7 +140,8 @@ public final class TranscriptAdClassificationCache {
             db,
             sql: """
             SELECT id, segment_id, classifier, classifier_version, is_ad, confidence,
-                   signals_json, created_at, updated_at
+                   signals_json, verdict, ad_type, brand, product, reason,
+                   model_identifier, created_at, updated_at
             FROM transcript_ad_classification_cache
             WHERE segment_id IN (\(placeholders))
               AND classifier = ?
@@ -157,12 +191,19 @@ public final class TranscriptAdClassificationCache {
             sql: """
             INSERT INTO transcript_ad_classification_cache (
                 segment_id, classifier, classifier_version, is_ad, confidence,
-                signals_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                signals_json, verdict, ad_type, brand, product, reason,
+                model_identifier, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(segment_id, classifier, classifier_version) DO UPDATE SET
                 is_ad = excluded.is_ad,
                 confidence = excluded.confidence,
                 signals_json = excluded.signals_json,
+                verdict = excluded.verdict,
+                ad_type = excluded.ad_type,
+                brand = excluded.brand,
+                product = excluded.product,
+                reason = excluded.reason,
+                model_identifier = excluded.model_identifier,
                 updated_at = excluded.updated_at
             """,
             arguments: [
@@ -172,6 +213,12 @@ public final class TranscriptAdClassificationCache {
                 entry.isAd,
                 confidence,
                 signalsJSON,
+                normalized(entry.verdict),
+                normalized(entry.adType),
+                normalized(entry.brand),
+                normalized(entry.product),
+                normalized(entry.reason),
+                normalized(entry.modelIdentifier),
                 entry.classifiedAt,
                 entry.classifiedAt,
             ]
@@ -228,9 +275,23 @@ public final class TranscriptAdClassificationCache {
             isAd: row["is_ad"],
             confidence: row["confidence"],
             signals: signals,
+            verdict: row["verdict"],
+            adType: row["ad_type"],
+            brand: row["brand"],
+            product: row["product"],
+            reason: row["reason"],
+            modelIdentifier: row["model_identifier"],
             createdAt: row["created_at"],
             updatedAt: row["updated_at"]
         )
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 

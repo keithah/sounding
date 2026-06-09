@@ -1,6 +1,12 @@
 import Foundation
 
 public enum StreamAppTimelineRailProjection {
+    private struct TranscriptAdSpanCandidate {
+        var paragraph: StreamAppTranscriptParagraph
+        var score: TranscriptAdScorer.Score
+        var classification: TranscriptAdClassificationCacheRow?
+    }
+
     public static func project(
         metadata: [StreamAppMetadataItem],
         visibleStartSeconds: Double,
@@ -126,38 +132,38 @@ public enum StreamAppTimelineRailProjection {
             $0.endSeconds >= visibleStartSeconds && $0.startSeconds <= visibleEndSeconds
         }
         let scores = TranscriptAdScorer.scores(for: visibleParagraphs.filter { adClassifications[$0.id] == nil })
-        let scored = visibleParagraphs.compactMap { paragraph -> (StreamAppTranscriptParagraph, TranscriptAdScorer.Score)? in
+        let scored = visibleParagraphs.compactMap { paragraph -> TranscriptAdSpanCandidate? in
             if let classification = adClassifications[paragraph.id] {
                 guard classification.isAd else { return nil }
-                return (
-                    paragraph,
-                    TranscriptAdScorer.Score(
+                return TranscriptAdSpanCandidate(
+                    paragraph: paragraph,
+                    score: TranscriptAdScorer.Score(
                         confidence: classification.confidence,
                         signals: classification.signals
-                    )
+                    ),
+                    classification: classification
                 )
             }
             guard let score = scores[paragraph.id],
                   score.confidence >= 0.50 else { return nil }
-            return (paragraph, score)
+            return TranscriptAdSpanCandidate(paragraph: paragraph, score: score, classification: nil)
         }
 
-        var grouped: [(paragraphs: [StreamAppTranscriptParagraph], scores: [TranscriptAdScorer.Score])] = []
+        var grouped: [[TranscriptAdSpanCandidate]] = []
         for entry in scored {
             if var last = grouped.last,
-               let previous = last.paragraphs.last,
-               entry.0.startSeconds <= previous.endSeconds + 10 {
-                last.paragraphs.append(entry.0)
-                last.scores.append(entry.1)
+               let previous = last.last?.paragraph,
+               entry.paragraph.startSeconds <= previous.endSeconds + 10 {
+                last.append(entry)
                 grouped[grouped.count - 1] = last
             } else {
-                grouped.append(([entry.0], [entry.1]))
+                grouped.append([entry])
             }
         }
 
         return grouped.compactMap { group in
-            guard let first = group.paragraphs.first,
-                  let last = group.paragraphs.last else {
+            guard let first = group.first?.paragraph,
+                  let last = group.last?.paragraph else {
                 return nil
             }
             let start = first.startSeconds
@@ -165,12 +171,21 @@ public enum StreamAppTimelineRailProjection {
             guard end > start else { return nil }
             let clampedStart = clamp(start, lower: visibleStartSeconds, upper: visibleEndSeconds)
             let clampedEnd = clamp(end, lower: visibleStartSeconds, upper: visibleEndSeconds)
-            let confidence = group.scores.map(\.confidence).max()
-            let signals = Array(Set(group.scores.flatMap(\.signals))).sorted()
+            let confidence = group.map(\.score.confidence).max()
+            let signals = Array(Set(group.flatMap(\.score.signals))).sorted()
+            let brand = firstNonEmpty(group.map(\.classification?.brand))
+            let product = firstNonEmpty(group.map(\.classification?.product))
+            let adType = firstNonEmpty(group.map(\.classification?.adType))
             return StreamAppTimelineRailSpan(
                 id: "ad-inferred:\(first.id)",
-                title: "AD",
-                subtitle: inferredAdSubtitle(confidence: confidence, signals: signals),
+                title: brand ?? "AD",
+                subtitle: inferredAdSubtitle(
+                    confidence: confidence,
+                    signals: signals,
+                    brand: brand,
+                    product: product,
+                    adType: adType
+                ),
                 source: .transcript,
                 isAd: true,
                 startSeconds: start,
@@ -180,16 +195,41 @@ public enum StreamAppTimelineRailProjection {
                 colorToken: "ad-inferred",
                 isSeekable: false,
                 confidence: confidence,
-                signals: signals
+                signals: signals,
+                brand: brand,
+                product: product,
+                adType: adType
             )
         }
     }
 
-    private static func inferredAdSubtitle(confidence: Double?, signals: [String]) -> String {
+    private static func inferredAdSubtitle(
+        confidence: Double?,
+        signals: [String],
+        brand: String? = nil,
+        product: String? = nil,
+        adType: String? = nil
+    ) -> String {
         let confidenceLabel = confidence.map { "\(Int(($0 * 100).rounded()))%" } ?? "Inferred"
+        let attribution = [product, adTypeLabel(adType)]
+            .compactMap { firstNonEmpty([$0]) }
         let labels = friendlySignalLabels(for: signals)
-        guard !labels.isEmpty else { return "Transcript inferred · \(confidenceLabel)" }
-        return "Transcript inferred · \(confidenceLabel) · \(labels.prefix(4).joined(separator: ", "))"
+        let prefix = brand == nil ? "Transcript inferred" : "Transcript inferred AD"
+        let parts = [prefix, confidenceLabel] + attribution
+        guard !labels.isEmpty else { return parts.joined(separator: " · ") }
+        return (parts + [labels.prefix(4).joined(separator: ", ")]).joined(separator: " · ")
+    }
+
+    private static func adTypeLabel(_ adType: String?) -> String? {
+        guard let adType = firstNonEmpty([adType]) else { return nil }
+        switch adType {
+        case "commercialSpot": return "commercial spot"
+        case "hostReadAd": return "host read"
+        case "sponsorBillboard": return "sponsor billboard"
+        case "stationPromo": return "station promo"
+        case "psa": return "PSA"
+        default: return adType
+        }
     }
 
     private static func friendlySignalLabels(for signals: [String]) -> [String] {
@@ -215,6 +255,13 @@ public enum StreamAppTimelineRailProjection {
                 return $0.key < $1.key
             }
             .map(\.key)
+    }
+
+    private static func firstNonEmpty(_ values: [String?]) -> String? {
+        values.compactMap { value -> String? in
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed?.isEmpty == false ? trimmed : nil
+        }.first
     }
 
     private static func coalescedAdSpans(

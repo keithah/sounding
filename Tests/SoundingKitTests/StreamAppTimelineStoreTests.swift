@@ -184,6 +184,12 @@ final class StreamAppTimelineStoreTests: XCTestCase {
                 isAd: true,
                 confidence: 0.91,
                 signals: ["verifier:cached"],
+                verdict: "ad",
+                adType: "commercialSpot",
+                brand: "Example",
+                product: "Example Plus",
+                reason: "Fixture verifier result.",
+                modelIdentifier: "mock",
                 classifiedAt: "2026-05-01T15:55:03Z"
             )
         )
@@ -209,11 +215,18 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(cachedSpan.endSeconds, 65)
         XCTAssertEqual(cachedSpan.confidence, 0.91)
         XCTAssertEqual(cachedSpan.signals, ["verifier:cached"])
+        XCTAssertEqual(cachedSpan.title, "Example")
+        XCTAssertEqual(cachedSpan.brand, "Example")
+        XCTAssertEqual(cachedSpan.product, "Example Plus")
+        XCTAssertEqual(cachedSpan.adType, "commercialSpot")
         let cachedItem = try XCTUnwrap(snapshot.timelineItems.first { $0.id == "transcript:\(segmentID)" })
         XCTAssertTrue(cachedItem.isAd)
         XCTAssertEqual(cachedItem.colorToken, "ad-inferred")
         XCTAssertEqual(cachedItem.confidence, 0.91)
         XCTAssertEqual(cachedItem.signals, ["verifier:cached"])
+        XCTAssertEqual(cachedItem.brand, "Example")
+        XCTAssertEqual(cachedItem.product, "Example Plus")
+        XCTAssertEqual(cachedItem.adType, "commercialSpot")
     }
 
     func testAsyncSnapshotRefreshesMissingClassificationsWithVerifier() async throws {

@@ -221,6 +221,9 @@ public struct StreamAppTimelineStore: Sendable {
             updated.colorToken = span.colorToken
             updated.confidence = span.confidence
             updated.signals = span.signals
+            updated.brand = span.brand
+            updated.product = span.product
+            updated.adType = span.adType
             return updated
         }
     }

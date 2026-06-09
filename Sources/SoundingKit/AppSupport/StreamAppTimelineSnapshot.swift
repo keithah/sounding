@@ -245,6 +245,9 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
     public var colorToken: String?
     public var confidence: Double?
     public var signals: [String]
+    public var brand: String?
+    public var product: String?
+    public var adType: String?
 
     public init(
         id: String,
@@ -262,7 +265,10 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         isAd: Bool = false,
         colorToken: String? = nil,
         confidence: Double? = nil,
-        signals: [String] = []
+        signals: [String] = [],
+        brand: String? = nil,
+        product: String? = nil,
+        adType: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -280,6 +286,9 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         self.colorToken = colorToken
         self.confidence = confidence
         self.signals = signals
+        self.brand = brand
+        self.product = product
+        self.adType = adType
     }
 }
 
@@ -305,6 +314,9 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
     public var isSeekable: Bool
     public var confidence: Double?
     public var signals: [String]
+    public var brand: String?
+    public var product: String?
+    public var adType: String?
 
     public init(
         id: String,
@@ -319,7 +331,10 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
         colorToken: String,
         isSeekable: Bool,
         confidence: Double? = nil,
-        signals: [String] = []
+        signals: [String] = [],
+        brand: String? = nil,
+        product: String? = nil,
+        adType: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -334,6 +349,9 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
         self.isSeekable = isSeekable
         self.confidence = confidence
         self.signals = signals
+        self.brand = brand
+        self.product = product
+        self.adType = adType
     }
 }
 

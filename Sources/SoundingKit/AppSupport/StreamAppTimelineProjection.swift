@@ -1093,7 +1093,10 @@ public struct StreamAppTimelineProjection: Sendable {
             isAd: preferred.isAd,
             colorToken: preferred.colorToken,
             confidence: preferred.confidence,
-            signals: preferred.signals
+            signals: preferred.signals,
+            brand: preferred.brand,
+            product: preferred.product,
+            adType: preferred.adType
         )
     }
 

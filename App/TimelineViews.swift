@@ -541,7 +541,10 @@ struct TimelineRailView: View {
             colorToken: span.colorToken,
             isSeekable: span.isSeekable,
             confidence: span.confidence,
-            signals: span.signals
+            signals: span.signals,
+            brand: span.brand,
+            product: span.product,
+            adType: span.adType
         )
     }
 
@@ -582,7 +585,15 @@ struct TimelineRailView: View {
     private func spanHelp(_ span: StreamAppTimelineRailSpan) -> String {
         let range = "\(timeLabel(span.startSeconds))-\(timeLabel(span.endSeconds))"
         if span.isAd {
-            return [span.title, span.subtitle, range]
+            let brand = span.brand?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayBrand = brand == span.title ? nil : brand
+            let attribution = [displayBrand, span.product, displayAdType(span.adType)]
+                .compactMap { value -> String? in
+                    guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !value.isEmpty else { return nil }
+                    return value
+                }
+            return ([span.title] + attribution + [span.subtitle, range])
                 .compactMap { value in
                     guard let value, !value.isEmpty else { return nil }
                     return value
@@ -598,6 +609,21 @@ struct TimelineRailView: View {
     private func markerHelp(_ marker: StreamAppTimelineRailMarker) -> String {
         let label = marker.source == .scte35 ? "Ad marker" : marker.source.rawValue
         return "\(label): \(marker.title) · \(timeLabel(marker.seconds))"
+    }
+
+    private func displayAdType(_ adType: String?) -> String? {
+        guard let adType = adType?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !adType.isEmpty else {
+            return nil
+        }
+        switch adType {
+        case "commercialSpot": return "commercial spot"
+        case "hostReadAd": return "host read"
+        case "sponsorBillboard": return "sponsor billboard"
+        case "stationPromo": return "station promo"
+        case "psa": return "PSA"
+        default: return adType
+        }
     }
 
     private func railColor(_ token: String) -> Color {
@@ -647,7 +673,7 @@ struct TimelineItemButton: View {
         if item.kind == .transcript, !isDiarizationEnabled {
             return nil
         }
-        let parts = [item.subtitle, sourceLabel]
+        let parts = [adAttributionText, item.subtitle, sourceLabel]
             .compactMap { value -> String? in
                 guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !value.isEmpty
@@ -676,6 +702,20 @@ struct TimelineItemButton: View {
         return source
     }
 
+    private var adAttributionText: String? {
+        guard item.isAd else { return nil }
+        let parts = [item.brand, item.product, displayAdType(item.adType)]
+            .compactMap { value -> String? in
+                guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !value.isEmpty else {
+                    return nil
+                }
+                return value
+            }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " · ")
+    }
+
     private var rowColor: Color {
         if item.colorToken == "ad" {
             return Color(red: 1.0, green: 0.14, blue: 0.34)
@@ -695,8 +735,27 @@ struct TimelineItemButton: View {
     }
 
     private var adBadgeText: String {
+        if let brand = item.brand?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !brand.isEmpty {
+            return "AD"
+        }
         guard let confidence = item.confidence, confidence.isFinite else { return "AD" }
         return "AD \(Int((confidence * 100).rounded()))%"
+    }
+
+    private func displayAdType(_ adType: String?) -> String? {
+        guard let adType = adType?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !adType.isEmpty else {
+            return nil
+        }
+        switch adType {
+        case "commercialSpot": return "commercial spot"
+        case "hostReadAd": return "host read"
+        case "sponsorBillboard": return "sponsor billboard"
+        case "stationPromo": return "station promo"
+        case "psa": return "PSA"
+        default: return adType
+        }
     }
 
     var body: some View {

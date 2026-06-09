@@ -14,6 +14,12 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
                 isAd: true,
                 confidence: 0.82,
                 signals: ["url:domain", "ctax2"],
+                verdict: "ad",
+                adType: "commercialSpot",
+                brand: "Wells Fargo",
+                product: "Clear Access Banking",
+                reason: "Banking disclaimer and CTA.",
+                modelIdentifier: "mock",
                 classifiedAt: "2026-05-01T10:00:00Z"
             )
         )
@@ -34,6 +40,12 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
         XCTAssertEqual(row.isAd, true)
         XCTAssertEqual(row.confidence, 0.82)
         XCTAssertEqual(row.signals, ["url:domain", "ctax2"])
+        XCTAssertEqual(row.verdict, "ad")
+        XCTAssertEqual(row.adType, "commercialSpot")
+        XCTAssertEqual(row.brand, "Wells Fargo")
+        XCTAssertEqual(row.product, "Clear Access Banking")
+        XCTAssertEqual(row.reason, "Banking disclaimer and CTA.")
+        XCTAssertEqual(row.modelIdentifier, "mock")
         XCTAssertEqual(row.createdAt, "2026-05-01T10:00:00Z")
         XCTAssertEqual(row.updatedAt, "2026-05-01T10:00:00Z")
     }
@@ -49,7 +61,10 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
         let rows = try temporary.database.read { db in
             try Row.fetchAll(
                 db,
-                sql: "SELECT is_ad, confidence, signals_json, created_at, updated_at FROM transcript_ad_classification_cache"
+                sql: """
+                SELECT is_ad, confidence, signals_json, verdict, ad_type, brand, product, created_at, updated_at
+                FROM transcript_ad_classification_cache
+                """
             )
         }
 
@@ -57,6 +72,10 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
         XCTAssertEqual(rows[0]["is_ad"] as Bool, true)
         XCTAssertEqual(rows[0]["confidence"] as Double, 0.73)
         XCTAssertEqual(rows[0]["signals_json"] as String, #"["disclaimerx2"]"#)
+        XCTAssertNil(rows[0]["verdict"] as String?)
+        XCTAssertNil(rows[0]["ad_type"] as String?)
+        XCTAssertNil(rows[0]["brand"] as String?)
+        XCTAssertNil(rows[0]["product"] as String?)
         XCTAssertEqual(rows[0]["created_at"] as String, "2026-05-01T10:00:00Z")
         XCTAssertEqual(rows[0]["updated_at"] as String, "2026-05-01T10:05:00Z")
     }
@@ -172,6 +191,12 @@ private extension TranscriptAdClassificationCacheEntry {
         isAd: Bool = true,
         confidence: Double = 0.82,
         signals: [String] = ["url:domain"],
+        verdict: String? = nil,
+        adType: String? = nil,
+        brand: String? = nil,
+        product: String? = nil,
+        reason: String? = nil,
+        modelIdentifier: String? = nil,
         classifiedAt: String = "2026-05-01T10:00:00Z"
     ) -> TranscriptAdClassificationCacheEntry {
         TranscriptAdClassificationCacheEntry(
@@ -183,6 +208,12 @@ private extension TranscriptAdClassificationCacheEntry {
             isAd: isAd,
             confidence: confidence,
             signals: signals,
+            verdict: verdict,
+            adType: adType,
+            brand: brand,
+            product: product,
+            reason: reason,
+            modelIdentifier: modelIdentifier,
             classifiedAt: classifiedAt
         )
     }
