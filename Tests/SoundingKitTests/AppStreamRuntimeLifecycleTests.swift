@@ -287,7 +287,7 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         await gate.release()
     }
 
-    func testMuteUnmuteSwitchingDoesNotStopSharedPlayback() async throws {
+    func testMuteUnmuteSwitchingStopsMutedOwnerThenReplaysSelectedLiveBuffer() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
         let first = try registry.add(
@@ -333,7 +333,7 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
 
         await runtime.setMuted(streamID: second.id, isMuted: true)
         let secondSelectedAfterMute = await playbackSelection.isSelected(streamID: second.id)
-        XCTAssertTrue(secondSelectedAfterMute)
+        XCTAssertFalse(secondSelectedAfterMute)
 
         _ = await rollingBuffer.append([
             SharedPCMFrame(
@@ -349,11 +349,47 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         XCTAssertTrue(firstSelectedAfterUnmute)
 
         let playbackActions = await player.actions()
-        XCTAssertEqual(playbackActions, ["play:9"])
+        XCTAssertEqual(playbackActions, ["stop", "play:9"])
         await gate.release()
     }
 
-    func testMuteUnmuteCurrentPlaybackOwnerKeepsSelectionAndDoesNotReplay() async throws {
+    func testMutingCurrentPlaybackOwnerStopsSilentPlaybackSelection() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Selected ICY",
+            streamType: "icy",
+            source: "https://example.test/selected.mp3"
+        )
+        let gate = RuntimeGate()
+        let ingester = RecordingBlockingAppRuntimeIngester(gate: gate)
+        let player = RecordingRuntimePlaybackAdapter()
+        let playbackSelection = AppPlaybackStreamSelection()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            playbackTimeline: AppPlayerTimelineClock(),
+            playbackController: player,
+            playbackSelection: playbackSelection
+        )
+
+        try await runtime.start(streamID: stream.id)
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        await runtime.setMuted(streamID: stream.id, isMuted: true)
+
+        let selectedAfterMute = await playbackSelection.isSelected(streamID: stream.id)
+        let playbackActions = await player.actions()
+        XCTAssertFalse(selectedAfterMute)
+        XCTAssertEqual(playbackActions, ["stop"])
+        await gate.release()
+    }
+
+    func testMuteUnmuteCurrentPlaybackOwnerStopsThenReplaysLiveBuffer() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
         let stream = try registry.add(
@@ -409,8 +445,8 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         let preparedStreamsAfterUnmute = await player.preparedStreams()
         let playbackActionsAfterUnmute = await player.actions()
         XCTAssertTrue(selectedAfterUnmute)
-        XCTAssertEqual(preparedStreamsAfterUnmute, [stream.id])
-        XCTAssertEqual(playbackActionsAfterUnmute, [])
+        XCTAssertEqual(preparedStreamsAfterUnmute, [stream.id, stream.id])
+        XCTAssertEqual(playbackActionsAfterUnmute, ["stop", "play:11"])
         await gate.release()
     }
 

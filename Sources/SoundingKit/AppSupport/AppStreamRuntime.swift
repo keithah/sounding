@@ -632,11 +632,20 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         } else {
             await playbackCommands.setMuted(streamID: streamID, isMuted: true)
             if currentStreamID == streamID {
+                currentStreamID = nil
+                await playbackSelection?.clear(ifStreamID: streamID)
+                if let playbackController, let playbackTimeline {
+                    await stopPlaybackForRuntimeStop(
+                        playbackController,
+                        timeline: playbackTimeline,
+                        streamID: streamID
+                    )
+                }
                 diagnosticsLog.recordEvent(
-                    "runtime.playback.owner.retained_muted",
+                    "runtime.playback.owner.cleared_muted",
                     streamID: streamID,
                     phase: "runtime.setMuted.mute",
-                    fields: ["stopsPlayback": "false"]
+                    fields: ["stopsPlayback": "true"]
                 )
             }
         }
