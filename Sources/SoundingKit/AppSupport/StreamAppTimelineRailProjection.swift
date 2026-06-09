@@ -239,10 +239,16 @@ public enum StreamAppTimelineRailProjection {
             if signal.hasPrefix("sponsor:") { return ("sponsor", 2) }
             if signal.hasPrefix("cta") { return ("call to action", 3) }
             if signal == "commercial-pitch" { return ("commercial pitch", 4) }
-            if signal == "music-sfx" { return ("music/SFX cue", 5) }
-            if signal.hasPrefix("keyword") { return ("ad keyword", 6) }
-            if signal.hasPrefix("neighbor-reinforced") { return ("nearby ad copy", 7) }
-            if signal == "length>=20s" { return ("long read", 8) }
+            if signal == "app-cta" { return ("app call to action", 5) }
+            if signal == "platform-pitch" { return ("platform promo", 6) }
+            if signal == "service-pitch" { return ("service pitch", 7) }
+            if signal == "tunein-promo" { return ("platform promo", 8) }
+            if signal == "known-brand" { return ("brand mention", 9) }
+            if signal == "music-sfx" { return ("music/SFX cue", 10) }
+            if signal.hasPrefix("keyword") { return ("ad keyword", 11) }
+            if signal.hasPrefix("neighbor-reinforced") { return ("nearby ad copy", 12) }
+            if signal.hasPrefix("ad-cluster") { return ("nearby ad copy", 13) }
+            if signal == "length>=20s" { return ("long read", 14) }
             return nil
         }
         var bestPriorityByLabel: [String: Int] = [:]
@@ -293,12 +299,46 @@ public enum StreamAppTimelineRailProjection {
     ) -> [StreamAppTimelineRailSpan] {
         var result = definiteSpans
         for transcriptSpan in transcriptSpans {
-            guard result.contains(where: { overlapsDefiniteAdSpan($0, transcriptSpan) }) else {
+            guard let index = result.firstIndex(where: { overlapsDefiniteAdSpan($0, transcriptSpan) }) else {
                 result.append(transcriptSpan)
                 continue
             }
+            result[index] = enrichDefiniteAdSpan(result[index], with: transcriptSpan)
         }
         return result
+    }
+
+    private static func enrichDefiniteAdSpan(
+        _ definiteSpan: StreamAppTimelineRailSpan,
+        with transcriptSpan: StreamAppTimelineRailSpan
+    ) -> StreamAppTimelineRailSpan {
+        var enriched = definiteSpan
+        let brand = firstNonEmpty([enriched.brand, transcriptSpan.brand])
+        enriched.brand = brand
+        enriched.product = firstNonEmpty([enriched.product, transcriptSpan.product])
+        enriched.adType = firstNonEmpty([enriched.adType, transcriptSpan.adType])
+        enriched.confidence = maxOptional(enriched.confidence, transcriptSpan.confidence)
+        enriched.signals = Array(Set(enriched.signals + transcriptSpan.signals)).sorted()
+        if let brand {
+            enriched.title = brand
+            enriched.subtitle = inferredAdSubtitle(
+                confidence: enriched.confidence,
+                signals: enriched.signals,
+                brand: brand,
+                product: enriched.product,
+                adType: enriched.adType
+            )
+        }
+        return enriched
+    }
+
+    private static func maxOptional(_ lhs: Double?, _ rhs: Double?) -> Double? {
+        switch (lhs, rhs) {
+        case let (.some(lhs), .some(rhs)): return max(lhs, rhs)
+        case let (.some(lhs), .none): return lhs
+        case let (.none, .some(rhs)): return rhs
+        case (.none, .none): return nil
+        }
     }
 
     private static func overlapsDefiniteAdSpan(

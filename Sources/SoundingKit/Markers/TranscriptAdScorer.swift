@@ -2,7 +2,7 @@ import Foundation
 
 public enum TranscriptAdScorer {
     public static let classifier = "transcript-ad-heuristic"
-    public static let classifierVersion = "1"
+    public static let classifierVersion = "2"
 
     public struct Score: Equatable, Sendable {
         public let confidence: Double
@@ -87,11 +87,24 @@ public enum TranscriptAdScorer {
             abs(midpoint(entry.paragraph) - midpoint(paragraph)) <= 60
                 && entry.score.confidence >= 0.40
         }
-        let reinforcement = min(Double(reinforcingNeighbors.count) * 0.10, 0.20)
+        var reinforcement = min(Double(reinforcingNeighbors.count) * 0.10, 0.20)
+        var reinforcementSignal: String?
+
+        let clusteredNeighbors = neighborScores.filter { entry in
+            abs(midpoint(entry.paragraph) - midpoint(paragraph)) <= 60
+                && entry.score.confidence >= 0.25
+        }
+        if raw.confidence >= 0.25, clusteredNeighbors.count >= 2 {
+            reinforcement = max(reinforcement, 0.20)
+            reinforcementSignal = "ad-cluster+0.20"
+        } else if reinforcement > 0 {
+            reinforcementSignal = String(format: "neighbor-reinforced+%.2f", reinforcement)
+        }
+
         if reinforcement > 0 {
             score = Score(
                 confidence: score.confidence + reinforcement,
-                signals: score.signals + [String(format: "neighbor-reinforced+%.2f", reinforcement)]
+                signals: score.signals + [reinforcementSignal ?? String(format: "neighbor-reinforced+%.2f", reinforcement)]
             )
         }
         return score
@@ -133,6 +146,22 @@ public enum TranscriptAdScorer {
             medium += 0.30
             signals.append("commercial-pitch")
         }
+        if containsAppCTA(in: normalized) {
+            medium += 0.25
+            signals.append("app-cta")
+        }
+        if containsPlatformPitch(in: normalized) {
+            medium += 0.25
+            signals.append("platform-pitch")
+        }
+        if normalized.contains("find a doctor") || normalized.contains("eye doctor") {
+            medium += 0.25
+            signals.append("service-pitch")
+        }
+        if containsTuneInPromo(in: normalized) {
+            medium += 0.25
+            signals.append("tunein-promo")
+        }
         medium = min(medium, 0.45)
 
         var weak = 0.0
@@ -140,6 +169,10 @@ public enum TranscriptAdScorer {
         if keywordCount > 0 {
             weak += min(Double(keywordCount) * 0.15, 0.25)
             signals.append("keywordx\(keywordCount)")
+        }
+        if containsKnownCommercialBrand(in: normalized) {
+            weak += 0.15
+            signals.append("known-brand")
         }
         if duration >= 20 {
             weak += 0.05
@@ -164,6 +197,33 @@ public enum TranscriptAdScorer {
             return "url:path"
         }
         return nil
+    }
+
+    private static func containsAppCTA(in text: String) -> Bool {
+        text.contains("app")
+            && ["download", "find", "search", "ask"].contains { containsWord($0, in: text) }
+    }
+
+    private static func containsPlatformPitch(in text: String) -> Bool {
+        text.contains("audio platform")
+            || text.contains("one simple app")
+            || text.contains("stream stations")
+            || text.contains("podcasts")
+    }
+
+    private static func containsTuneInPromo(in text: String) -> Bool {
+        text.contains("tune in")
+            && (
+                text.contains("listening")
+                    || text.contains("audio platform")
+                    || text.contains("one simple app")
+                    || text.contains("podcast")
+                    || text.contains("stations")
+            )
+    }
+
+    private static func containsKnownCommercialBrand(in text: String) -> Bool {
+        knownCommercialBrands.contains { text.contains($0) }
     }
 
     private static func containsWord(_ word: String, in text: String) -> Bool {
@@ -244,5 +304,18 @@ public enum TranscriptAdScorer {
         "sponsor",
         "commercial",
         "promo",
+    ]
+
+    private static let knownCommercialBrands = [
+        "zocdoc",
+        "zokdok",
+        "zok-dok",
+        "zock dock",
+        "zokta",
+        "legalzoom",
+        "legal zoom",
+        "wells fargo",
+        "tune in",
+        "tunein",
     ]
 }

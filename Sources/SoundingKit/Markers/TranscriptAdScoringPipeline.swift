@@ -118,10 +118,20 @@ public struct TranscriptAdClassificationRefresher: Sendable {
         let cached = try database.read { db in
             try TranscriptAdClassificationCache.fetch(segmentIDs: segmentIDs, db: db)
         }
+        let currentScores = TranscriptAdScorer.scores(for: orderedParagraphs)
         let cache = TranscriptAdClassificationCache(database: database)
         var classifiedCount = 0
+        var skippedCachedCount = 0
 
-        for paragraph in orderedParagraphs where cached[paragraph.id] == nil {
+        for paragraph in orderedParagraphs {
+            if let cachedRow = cached[paragraph.id],
+               !pipeline.shouldRefreshCachedClassification(
+                    cachedRow,
+                    currentScore: currentScores[paragraph.id]
+               ) {
+                skippedCachedCount += 1
+                continue
+            }
             let result = await pipeline.classify(
                 paragraph: paragraph,
                 neighbors: orderedParagraphs.filter { $0.id != paragraph.id }
@@ -132,7 +142,7 @@ public struct TranscriptAdClassificationRefresher: Sendable {
 
         return TranscriptAdClassificationRefreshResult(
             consideredCount: orderedParagraphs.count,
-            skippedCachedCount: cached.count,
+            skippedCachedCount: skippedCachedCount,
             classifiedCount: classifiedCount
         )
     }
@@ -229,6 +239,26 @@ public struct TranscriptAdScoringPipeline: Sendable {
             return cachedVerification.map { !Self.hasBrand($0) } ?? true
         }
         return heuristic.confidence >= verifierThreshold
+    }
+
+    fileprivate func shouldRefreshCachedClassification(
+        _ row: TranscriptAdClassificationCacheRow,
+        currentScore: TranscriptAdScorer.Score?
+    ) -> Bool {
+        guard isVerifierEnabled, verifier != nil else { return false }
+        if row.modelIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return false
+        }
+        if row.verdict?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return false
+        }
+        if row.isAd {
+            return row.brand?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        }
+        if row.confidence >= verifierThreshold {
+            return true
+        }
+        return (currentScore?.confidence ?? 0) >= verifierThreshold
     }
 
     private func finalAdVerdict(

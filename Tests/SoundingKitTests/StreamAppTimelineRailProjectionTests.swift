@@ -353,7 +353,7 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertFalse(subtitle.contains("sponsor:"), subtitle)
     }
 
-    func testDefiniteAdSpanWinsOverOverlappingTranscriptInferredSpan() throws {
+    func testDefiniteAdSpanInheritsOverlappingTranscriptAttribution() throws {
         let rail = StreamAppTimelineRailProjection.project(
             metadata: [
                 metadata("event:ad:start", kind: .event, title: "Ad break start", artist: nil, start: 10, end: 10, source: "scte35"),
@@ -362,6 +362,27 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
             paragraphs: [
                 paragraph(1, start: 20, end: 30, text: "Visit acme dot com. Terms and conditions apply."),
             ],
+            adClassifications: [
+                1: TranscriptAdClassificationCacheRow(
+                    id: 1,
+                    identity: TranscriptAdClassificationCacheIdentity(
+                        segmentID: 1,
+                        classifier: TranscriptAdScorer.classifier,
+                        classifierVersion: TranscriptAdScorer.classifierVersion
+                    ),
+                    isAd: true,
+                    confidence: 0.91,
+                    signals: ["verified:ad", "verified-brand"],
+                    verdict: "ad",
+                    adType: "commercialSpot",
+                    brand: "Acme",
+                    product: "Acme App",
+                    reason: "Verified ad copy.",
+                    modelIdentifier: "mock",
+                    createdAt: "2026-05-01T10:00:00Z",
+                    updatedAt: "2026-05-01T10:00:00Z"
+                )
+            ],
             visibleStartSeconds: 0,
             visibleEndSeconds: 60
         )
@@ -369,13 +390,14 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         let adSpans = rail.spans.filter(\.isAd)
         XCTAssertEqual(adSpans.count, 1)
         let adSpan = try XCTUnwrap(adSpans.first)
+        XCTAssertEqual(adSpan.title, "Acme")
         XCTAssertEqual(adSpan.source, .scte35)
         XCTAssertEqual(adSpan.colorToken, "ad")
-        XCTAssertNil(adSpan.confidence)
-        XCTAssertEqual(adSpan.signals, [])
-        XCTAssertNil(adSpan.brand)
-        XCTAssertNil(adSpan.product)
-        XCTAssertNil(adSpan.adType)
+        XCTAssertEqual(adSpan.confidence, 0.91)
+        XCTAssertTrue(adSpan.signals.contains("verified:ad"))
+        XCTAssertEqual(adSpan.brand, "Acme")
+        XCTAssertEqual(adSpan.product, "Acme App")
+        XCTAssertEqual(adSpan.adType, "commercialSpot")
         XCTAssertEqual(adSpan.startSeconds, 10, accuracy: 0.001)
         XCTAssertEqual(adSpan.endSeconds, 50, accuracy: 0.001)
     }

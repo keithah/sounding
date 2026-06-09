@@ -275,6 +275,72 @@ final class TranscriptAdScoringPipelineTests: XCTestCase {
         XCTAssertEqual(cachedSecond.modelIdentifier, "mock")
     }
 
+    func testClassificationRefresherUpgradesCachedAmbiguousRowsWithVerifierAttribution() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let segmentID = try makeTranscriptSegment(
+            database: temporary.database,
+            sequence: 1,
+            text: "No matter what you're listening for, you can always find it on Tune In.",
+            startSeconds: 0,
+            endSeconds: 12
+        )
+        let cache = TranscriptAdClassificationCache(database: temporary.database)
+        try cache.upsert(
+            TranscriptAdClassificationCacheEntry(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentID,
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                ),
+                isAd: false,
+                confidence: 0.30,
+                signals: ["ctax3"],
+                classifiedAt: "2026-05-01T09:59:00Z"
+            )
+        )
+        let verifier = RecordingAdVerifier(response: .ad(brand: "TuneIn", product: "TuneIn"))
+        let refresher = TranscriptAdClassificationRefresher(
+            database: temporary.database,
+            pipeline: TranscriptAdScoringPipeline(
+                verifier: verifier,
+                isVerifierEnabled: true,
+                now: { "2026-05-01T10:00:00Z" }
+            ),
+            now: { "2026-05-01T10:00:00Z" }
+        )
+
+        let result = try await refresher.refresh(
+            paragraphs: [
+                paragraph(
+                    segmentID,
+                    "No matter what you're listening for, you can always find it on Tune In.",
+                    start: 0,
+                    end: 12
+                )
+            ]
+        )
+        let row = try XCTUnwrap(
+            try cache.fetch(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentID,
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                )
+            )
+        )
+        let calls = await verifier.recordedCalls()
+
+        XCTAssertEqual(result.skippedCachedCount, 0)
+        XCTAssertEqual(result.classifiedCount, 1)
+        XCTAssertEqual(calls.map(\.paragraph.id), [segmentID])
+        XCTAssertTrue(row.isAd)
+        XCTAssertEqual(row.brand, "TuneIn")
+        XCTAssertEqual(row.product, "TuneIn")
+        XCTAssertEqual(row.adType, "commercialSpot")
+        XCTAssertEqual(row.modelIdentifier, "mock")
+        XCTAssertEqual(row.updatedAt, "2026-05-01T10:00:00Z")
+    }
+
     func testClassificationRefresherCachesNegativeHeuristicResult() async throws {
         let temporary = try TemporarySoundingDatabase()
         let segmentID = try makeTranscriptSegment(

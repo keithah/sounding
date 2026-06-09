@@ -56,6 +56,37 @@ final class TranscriptAdScorerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(score.confidence, 0.80)
     }
 
+    func testSplitDoctorAppAdCopyReinforcesAcrossNearbyFragments() {
+        let fragments = [
+            paragraph("I'm going on Zocdoc and finding you an eye doctor.", start: 0, end: 8),
+            paragraph("You've got options.", start: 9, end: 12),
+            paragraph("Download the Zocdoc app today.", start: 13, end: 18),
+        ]
+
+        let scores = TranscriptAdScorer.scores(for: fragments)
+
+        XCTAssertGreaterThanOrEqual(scores[fragments[0].id]?.confidence ?? 0, 0.50)
+        XCTAssertGreaterThanOrEqual(scores[fragments[2].id]?.confidence ?? 0, 0.50)
+        XCTAssertTrue((scores[fragments[2].id]?.signals ?? []).contains { signal in
+            signal.contains("cluster") || signal.contains("neighbor-reinforced")
+        })
+    }
+
+    func testSplitTuneInPromoCopyReinforcesAcrossNearbyFragments() {
+        let fragments = [
+            paragraph("No matter what you're listening for, you can always find it on Tune In.", start: 0, end: 12),
+            paragraph("News, sports, music, and today's hits. One simple app.", start: 13, end: 25),
+            paragraph("Tune In is the audio platform with something forever.", start: 26, end: 34),
+            paragraph("And even podcasts, whatever you love.", start: 35, end: 40),
+        ]
+
+        let scores = TranscriptAdScorer.scores(for: fragments)
+
+        XCTAssertGreaterThanOrEqual(scores[fragments[0].id]?.confidence ?? 0, 0.50)
+        XCTAssertGreaterThanOrEqual(scores[fragments[2].id]?.confidence ?? 0, 0.50)
+        XCTAssertTrue((scores[fragments[0].id]?.signals ?? []).contains { $0.contains("cluster") })
+    }
+
     private func paragraph(
         _ text: String,
         start: Double = 0,
