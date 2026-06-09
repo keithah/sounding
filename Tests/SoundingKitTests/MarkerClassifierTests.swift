@@ -54,6 +54,7 @@ final class MarkerClassifierTests: XCTestCase {
     func testClassifiesSCTE35TimeSignalSegmentationTypeIDsFromFieldsAndDescriptors() {
         var classifier = MarkerClassifier()
         let fieldStart = scte35Marker(commandName: "TIME_SIGNAL", fields: ["SegmentationTypeID": "0x34"])
+        let unscheduledStart = scte35Marker(commandName: "TIME_SIGNAL", fields: ["SegmentationTypeID": "0x40"])
         let descriptorEnd = AdMarker(
             type: "SCTE35",
             classification: .unknown,
@@ -61,9 +62,18 @@ final class MarkerClassifierTests: XCTestCase {
             command: ["Name": "Time Signal"],
             descriptors: [["Tag": "SegmentationDescriptor", "SegmentationTypeID": 0x35]]
         )
+        let unscheduledEnd = AdMarker(
+            type: "SCTE35",
+            classification: .unknown,
+            source: "hls_segment",
+            command: ["Name": "Time Signal"],
+            descriptors: [["Tag": "SegmentationDescriptor", "SegmentationTypeID": 0x43]]
+        )
 
         XCTAssertEqual(classifier.classify(fieldStart).classification, .adStart)
+        XCTAssertEqual(classifier.classify(unscheduledStart).classification, .adStart)
         XCTAssertEqual(classifier.classify(descriptorEnd).classification, .adEnd)
+        XCTAssertEqual(classifier.classify(unscheduledEnd).classification, .adEnd)
     }
 
     func testClassifiesSCTE35SpliceNullAsUnknown() {
@@ -96,6 +106,13 @@ final class MarkerClassifierTests: XCTestCase {
         let marker = id3Marker(tags: ["TXXX:marker": "ad_end promo commercial"])
 
         XCTAssertEqual(classifier.classify(marker).classification, .adEnd)
+    }
+
+    func testClassifiesID3AdvertisementFrameAsAdStart() {
+        var classifier = MarkerClassifier()
+        let marker = id3Marker(tags: ["TXXX:ADVERTISEMENT": "ADVERTISEMENT"])
+
+        XCTAssertEqual(classifier.classify(marker).classification, .adStart)
     }
 
     func testFalsePositiveWordsDoNotMatchAdStartKeywords() {
@@ -136,6 +153,57 @@ final class MarkerClassifierTests: XCTestCase {
         }
 
         XCTAssertEqual(classifications, [.unknown, .adStart, .adEnd])
+    }
+
+    func testClassifiesIcyBreakPhrasesAsAdTransitions() {
+        var classifier = MarkerClassifier()
+        let titles = ["Morning Show", "Will be right back", "Morning Show"]
+
+        let classifications = titles.map { title in
+            classifier.classify(icyMarker(title: title)).classification
+        }
+
+        XCTAssertEqual(classifications, [.unknown, .adStart, .adEnd])
+    }
+
+    func testClassifiesIcyAdFieldsWithoutStreamTitle() {
+        var classifier = MarkerClassifier()
+        let tiadMarker = AdMarker(
+            type: "ICY",
+            classification: .unknown,
+            source: "icy_stream",
+            fields: ["TIAD": .string("1"), "TIGENBUMPE": .string("Ad bumper")]
+        )
+        let repeatedAdMarker = AdMarker(
+            type: "ICY",
+            classification: .unknown,
+            source: "icy_stream",
+            fields: ["TIAD": .string("1"), "TIGENBUMPE": .string("Different ad bumper")]
+        )
+
+        XCTAssertEqual(classifier.classify(tiadMarker).classification, .adStart)
+        XCTAssertEqual(classifier.classify(repeatedAdMarker).classification, .unknown)
+        XCTAssertEqual(classifier.classify(icyMarker(title: "Morning Show")).classification, .adEnd)
+    }
+
+    func testClassifiesRawIcyAdStartAndEndNames() {
+        var classifier = MarkerClassifier()
+
+        let start = AdMarker(
+            type: "ICY",
+            classification: .unknown,
+            source: "icy_stream",
+            fields: ["StreamTitle": .string("TIADSTART")]
+        )
+        let end = AdMarker(
+            type: "ICY",
+            classification: .unknown,
+            source: "icy_stream",
+            fields: ["StreamTitle": .string("TIADEND")]
+        )
+
+        XCTAssertEqual(classifier.classify(start).classification, .adStart)
+        XCTAssertEqual(classifier.classify(end).classification, .adEnd)
     }
 
     func testRepeatedAdLikeTitlesOnlyStartOnce() {

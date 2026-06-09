@@ -69,6 +69,33 @@ final class RollingBufferTests: XCTestCase {
         XCTAssertEqual(range, RollingBufferRange(startSeconds: 10, endSeconds: 14))
     }
 
+    func testSeekToLiveCanTargetStreamWhenOtherStreamsHaveNewerFrames() async throws {
+        let buffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 60,
+                hotMemoryDurationSeconds: 60,
+                maximumSpillBytes: 0
+            )
+        )
+        await buffer.start(streamID: 21)
+        _ = await buffer.append([
+            frame(streamID: 21, sequence: 0, start: 0, end: 5, bytes: [21]),
+            frame(streamID: 22, sequence: 0, start: 0, end: 5, bytes: [22]),
+            frame(streamID: 21, sequence: 1, start: 5, end: 10, bytes: [31]),
+            frame(streamID: 22, sequence: 1, start: 10, end: 15, bytes: [32]),
+        ])
+
+        guard case .available(let live) = await buffer.seekToLive(streamID: 21) else {
+            return XCTFail("Expected stream-specific live edge frame")
+        }
+
+        XCTAssertEqual(live.streamID, 21)
+        XCTAssertEqual(live.sequence, 1)
+        XCTAssertEqual(live.audio, Data([31]))
+        let snapshot = await buffer.snapshot(streamID: 21)
+        XCTAssertEqual(snapshot.bufferedRange, RollingBufferRange(startSeconds: 0, endSeconds: 10))
+    }
+
     func testAppendDeduplicatesPCMAndHLSFrames() async throws {
         let buffer = RollingPCMBuffer(
             configuration: RollingBufferConfiguration(

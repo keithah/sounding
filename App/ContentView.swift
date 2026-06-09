@@ -441,18 +441,16 @@ struct ContentView: View {
 
     private func applyStartAsUnmute(for streamID: Int64) {
         // Start (and Restart) act like an unmute: the started stream becomes
-        // audible, all siblings get muted so only one stream plays at a time.
+        // audible, all siblings appear muted in the UI so only one stream is
+        // shown as audible at a time. The actual playback ownership transfer
+        // happens inside runtime.start (via replacePlaybackOwner); don't fire
+        // additional runtime.setMuted calls per-stream — concurrent
+        // setMuted/start operations cascade into multiple parallel
+        // playerNode.stop() calls that deadlock each other.
         for other in viewModel.streams where other.id != streamID {
-            if !viewModel.isMuted(streamID: other.id) {
-                viewModel.updateMuted(streamID: other.id, isMuted: true)
-                let otherID = other.id
-                Task { await runtime?.setMuted(streamID: otherID, isMuted: true) }
-            }
+            viewModel.updateMuted(streamID: other.id, isMuted: true)
         }
-        if viewModel.isMuted(streamID: streamID) {
-            viewModel.updateMuted(streamID: streamID, isMuted: false)
-            Task { await runtime?.setMuted(streamID: streamID, isMuted: false) }
-        }
+        viewModel.updateMuted(streamID: streamID, isMuted: false)
     }
 
     private func pauseRuntime(for streamID: Int64) {

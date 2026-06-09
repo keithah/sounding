@@ -194,6 +194,209 @@ final class SongTimelinePersistenceTests: XCTestCase {
         XCTAssertEqual(plays[0]["end_seconds"] as Double, 84)
     }
 
+    func testICYSongRefreshesMergeAcrossCadenceGap() throws {
+        let fixture = try makeFixture()
+
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.firstChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 0, endSeconds: 6, confidence: 1, source: "icy")],
+                createdAt: "2026-05-01T10:00:06Z"
+            )
+        )
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.secondChunkID,
+                songPlays: [SongPlayDraft(song: knownSong, startSeconds: 18, endSeconds: 24, confidence: 1, source: "icy")],
+                createdAt: "2026-05-01T10:00:24Z"
+            )
+        )
+
+        let plays = try fixture.temporary.database.read { db in
+            try Row.fetchAll(db, sql: "SELECT start_seconds, end_seconds, source FROM song_plays")
+        }
+
+        XCTAssertEqual(plays.count, 1)
+        XCTAssertEqual(plays[0]["start_seconds"] as Double, 0)
+        XCTAssertEqual(plays[0]["end_seconds"] as Double, 24)
+        XCTAssertEqual(plays[0]["source"] as String, "icy")
+    }
+
+    func testArtistBackedTimedMetadataPromotesNearbyTitleOnlyPlay() throws {
+        let fixture = try makeFixture()
+        let titleOnly = UnresolvedSongDraft(
+            songKey: "timed_id3::beautiful things:",
+            title: "Beautiful Things",
+            displayName: "Beautiful Things"
+        )
+        let artistBacked = UnresolvedSongDraft(
+            songKey: "timed_id3:benson boone:beautiful things:",
+            title: "Beautiful Things",
+            artist: "Benson Boone",
+            displayName: "Benson Boone - Beautiful Things"
+        )
+
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.firstChunkID,
+                songPlays: [SongPlayDraft(song: titleOnly, startSeconds: 0, endSeconds: 6, confidence: 1, source: "ID3")],
+                createdAt: "2026-05-01T10:00:06Z"
+            )
+        )
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.secondChunkID,
+                songPlays: [SongPlayDraft(song: artistBacked, startSeconds: 18, endSeconds: 24, confidence: 1, source: "ID3")],
+                createdAt: "2026-05-01T10:00:24Z"
+            )
+        )
+
+        let plays = try fixture.temporary.database.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT song_plays.start_seconds, song_plays.end_seconds, songs.title, songs.artist
+                    FROM song_plays
+                    JOIN songs ON songs.id = song_plays.song_id
+                    ORDER BY song_plays.start_seconds
+                    """
+            )
+        }
+
+        XCTAssertEqual(plays.count, 1)
+        XCTAssertEqual(plays[0]["start_seconds"] as Double, 0)
+        XCTAssertEqual(plays[0]["end_seconds"] as Double, 24)
+        XCTAssertEqual(plays[0]["title"] as String, "Beautiful Things")
+        XCTAssertEqual(plays[0]["artist"] as String, "Benson Boone")
+    }
+
+    func testTitleOnlyMetadataMarkerInsideActiveArtistBackedPlayIsNotPersistedAsEvent() throws {
+        let fixture = try makeFixture()
+        let artistBacked = UnresolvedSongDraft(
+            songKey: "timed_id3:noah kahan:the great divide:",
+            title: "The Great Divide",
+            artist: "Noah Kahan",
+            displayName: "Noah Kahan - The Great Divide"
+        )
+
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.firstChunkID,
+                songPlays: [SongPlayDraft(song: artistBacked, startSeconds: 40, endSeconds: 64, confidence: 1, source: "ID3")],
+                createdAt: "2026-05-01T10:01:04Z"
+            )
+        )
+        try fixture.writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: fixture.runID,
+                chunkID: fixture.secondChunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "ID3",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 53,
+                        tags: [
+                            "TIT2": .string("The Great Divide"),
+                            "TALB": .string("The Great Divide"),
+                        ]
+                    )
+                ],
+                createdAt: "2026-05-01T10:01:13Z"
+            )
+        )
+
+        let counts = try fixture.temporary.database.read { db in
+            try [
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+                "ad_events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+            ]
+        }
+
+        XCTAssertEqual(counts, ["song_plays": 1, "ad_events": 0])
+    }
+
+    func testRepeatedGenericAdvertisementMetadataPersistsOnlyFirstPulse() throws {
+        let fixture = try makeFixture()
+
+        for (index, pts) in [10.0, 22.0, 34.0].enumerated() {
+            let chunkID = index == 0 ? fixture.firstChunkID : try fixture.writer.createChunk(
+                runID: fixture.runID,
+                sequence: 200 + index,
+                segmentURI: "segment-ad-\(index).ts",
+                startedAt: "2026-05-01T10:02:\(String(format: "%02d", index * 12))Z",
+                endedAt: "2026-05-01T10:02:\(String(format: "%02d", index * 12 + 6))Z"
+            )
+            try fixture.writer.persistTimeline(
+                IngestChunkTimeline(
+                    runID: fixture.runID,
+                    chunkID: chunkID,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: pts,
+                            tags: ["TXXX:ADVERTISEMENT": .string("ADVERTISEMENT")]
+                        )
+                    ],
+                    createdAt: "2026-05-01T10:02:\(String(format: "%02d", index * 12 + 6))Z"
+                )
+            )
+        }
+
+        let events = try fixture.temporary.database.read { db in
+            try Row.fetchAll(db, sql: "SELECT classification, pts, payload_json FROM ad_events ORDER BY pts")
+        }
+
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0]["classification"] as String, MarkerClassification.unknown.rawValue)
+        XCTAssertEqual(events[0]["pts"] as Double, 10)
+    }
+
+    func testRepeatedClassifiedAdvertisementMetadataPersistsOnlyFirstPulse() throws {
+        let fixture = try makeFixture()
+
+        for (index, pts) in [10.0, 22.0, 34.0].enumerated() {
+            let chunkID = index == 0 ? fixture.firstChunkID : try fixture.writer.createChunk(
+                runID: fixture.runID,
+                sequence: 300 + index,
+                segmentURI: "segment-classified-ad-\(index).ts",
+                startedAt: "2026-05-01T10:03:\(String(format: "%02d", index * 12))Z",
+                endedAt: "2026-05-01T10:03:\(String(format: "%02d", index * 12 + 6))Z"
+            )
+            try fixture.writer.persistTimeline(
+                IngestChunkTimeline(
+                    runID: fixture.runID,
+                    chunkID: chunkID,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ICY",
+                            classification: .adStart,
+                            source: "icy_stream",
+                            pts: pts,
+                            fields: ["StreamTitle": .string("Advertisement")]
+                        )
+                    ],
+                    createdAt: "2026-05-01T10:03:\(String(format: "%02d", index * 12 + 6))Z"
+                )
+            )
+        }
+
+        let events = try fixture.temporary.database.read { db in
+            try Row.fetchAll(db, sql: "SELECT classification, pts, payload_json FROM ad_events ORDER BY pts")
+        }
+
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0]["classification"] as String, MarkerClassification.adStart.rawValue)
+        XCTAssertEqual(events[0]["pts"] as Double, 10)
+    }
+
     func testAdjacentSameSongChunksWithTimelineGapRemainSeparatePlays() throws {
         let fixture = try makeFixture()
 

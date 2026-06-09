@@ -28,7 +28,8 @@ public actor ICYStreamingSession {
     private var readerTask: Task<Void, Never>?
     private var streamClosed: Bool
     private var streamError: Error?
-    private var bytesAvailableContinuations: [CheckedContinuation<Void, Never>]
+    private var bytesAvailableContinuations: [UUID: CheckedContinuation<Void, Error>]
+    private let diagnosticsLog: AppRuntimeDiagnosticsLog
 
     /// Hard cap on the pending audio buffer. Prevents unbounded growth if a
     /// consumer stops reading. 4 MB ≈ 5.5 minutes at 96 kbps mp3.
@@ -84,7 +85,8 @@ public actor ICYStreamingSession {
         self.bytesUntilNextMetadata = metaInt ?? Int.max
         self.streamClosed = false
         self.streamError = nil
-        self.bytesAvailableContinuations = []
+        self.bytesAvailableContinuations = [:]
+        self.diagnosticsLog = AppRuntimeDiagnosticsLog()
     }
 
     /// Reads up to `byteCount` audio bytes from the buffered stream. Waits if
@@ -93,12 +95,19 @@ public actor ICYStreamingSession {
     public func read(byteCount: Int) async throws -> ReadResult {
         precondition(byteCount > 0)
         while pendingAudio.count < byteCount {
+            try Task.checkCancellation()
             if let error = streamError { throw error }
             if streamClosed { break }
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                bytesAvailableContinuations.append(cont)
+            let waiterID = UUID()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    bytesAvailableContinuations[waiterID] = cont
+                }
+            } onCancel: { [weak self] in
+                Task { await self?.cancelReadWaiter(waiterID) }
             }
         }
+        try Task.checkCancellation()
         let take = min(byteCount, pendingAudio.count)
         let audio = Data(pendingAudio.prefix(take))
         pendingAudio.removeFirst(take)
@@ -121,10 +130,15 @@ public actor ICYStreamingSession {
 
     private func resumeWaiters() {
         let waiters = bytesAvailableContinuations
-        bytesAvailableContinuations = []
-        for waiter in waiters {
-            waiter.resume()
+        bytesAvailableContinuations = [:]
+        for waiter in waiters.values {
+            waiter.resume(returning: ())
         }
+    }
+
+    private func cancelReadWaiter(_ waiterID: UUID) {
+        guard let waiter = bytesAvailableContinuations.removeValue(forKey: waiterID) else { return }
+        waiter.resume(throwing: CancellationError())
     }
 
     private func startReader() {
@@ -213,12 +227,43 @@ public actor ICYStreamingSession {
             }
             metadata.append(byte)
         }
+        let fields = ICYMetadataParser.parseFields(from: metadata)
+        recordMetadataBlock(fields)
         guard var marker = parser.marker(fromMetadataBlock: metadata) else { return }
         if let byteRate, byteRate > 0 {
             marker.pts = Double(totalAudioBytes) / byteRate
         }
         marker.segment = "icy-\(pendingMarkers.count)"
         pendingMarkers.append(marker)
+    }
+
+    private func recordMetadataBlock(_ fields: [String: String]) {
+        guard !fields.isEmpty else { return }
+        var diagnosticFields = fields.reduce(into: [String: String]()) { partial, pair in
+            partial["icy.\(pair.key)"] = Self.boundedDiagnosticValue(pair.value)
+        }
+        diagnosticFields["fieldNames"] = fields.keys.sorted().joined(separator: ",")
+        diagnosticFields["containsAD"] = Self.metadataContainsAD(fields) ? "true" : "false"
+        diagnosticsLog.recordEvent(
+            "icy.metadata.block",
+            source: url.absoluteString,
+            phase: "icy.metadata",
+            message: Self.metadataContainsAD(fields) ? "ICY metadata block contains AD signal." : "ICY metadata block received.",
+            fields: diagnosticFields
+        )
+    }
+
+    private static func metadataContainsAD(_ fields: [String: String]) -> Bool {
+        fields.contains { key, value in
+            key.range(of: "AD", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+                || value.range(of: "AD", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+    }
+
+    private static func boundedDiagnosticValue(_ value: String) -> String {
+        let redacted = IngestRedaction.redact(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard redacted.count > 240 else { return redacted }
+        return String(redacted.prefix(240)) + "..."
     }
 
     private static func icyMetaInt(from headers: [String: String]) -> Int? {

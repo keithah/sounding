@@ -162,7 +162,7 @@ final class AppStreamRuntimePipelineRunnerTests: AppStreamRuntimeTestCase {
         XCTAssertGreaterThanOrEqual(evidence?["chunk_count"] as Int? ?? 0, 2)
     }
 
-    func testPipelineRunnerCancellationDoesNotWaitForeverForPlaybackStop() async throws {
+    func testPipelineRunnerCancellationDoesNotStopLiveSharedPlayback() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
         let stream = try registry.add(
@@ -196,7 +196,6 @@ final class AppStreamRuntimePipelineRunnerTests: AppStreamRuntimeTestCase {
             try await runner.run(request)
         }
         await decoder.waitForCalls(1)
-        let startedAt = Date()
         task.cancel()
 
         do {
@@ -207,10 +206,142 @@ final class AppStreamRuntimePipelineRunnerTests: AppStreamRuntimeTestCase {
             XCTFail("Unexpected error: \(error)")
         }
 
-        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
         let stopCallCount = await stopGate.callCount()
-        XCTAssertEqual(stopCallCount, 1)
+        XCTAssertEqual(stopCallCount, 0)
+    }
 
-        await stopGate.release()
+    func testPipelineRunnerStopsSelectedLivePlaybackOnDecodeFailure() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Selected HLS",
+            streamType: "hls",
+            source: "https://example.test/selected.m3u8"
+        )
+        let player = RecordingRuntimePlaybackAdapter()
+        let timeline = AppPlayerTimelineClock()
+        let playbackSelection = AppPlaybackStreamSelection(selectedStreamID: stream.id)
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: ThrowingAudioDecoder(message: "reader could not start"),
+            transcriber: FixtureTranscriber(),
+            diarizer: FixtureDiarizer(),
+            player: player,
+            timeline: timeline,
+            playbackSelection: playbackSelection,
+            ingestMode: .livePolling(maxChunksPerPass: 1),
+            now: { "2026-05-01T00:00:00Z" }
+        )
+        let request = AppStreamRuntimeRequest(
+            streamID: stream.id,
+            name: stream.name,
+            source: "https://example.test/selected.m3u8",
+            sourceDescription: stream.sourceDescription,
+            streamType: .hls
+        )
+
+        do {
+            _ = try await runner.run(request)
+            XCTFail("Expected decode failure")
+        } catch let error as RuntimeFailure {
+            XCTAssertEqual(error.message, "reader could not start")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let actions = await player.actions()
+        XCTAssertEqual(actions, ["stop"])
+        let snapshot = await timeline.snapshot()
+        XCTAssertEqual(snapshot.state, .failed(message: "reader could not start"))
+    }
+
+    func testPipelineRunnerDoesNotPoisonSharedTimelineWhenBackgroundLiveStreamFails() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let background = try registry.add(
+            name: "Background HLS",
+            streamType: "hls",
+            source: "https://example.test/background.m3u8"
+        )
+        let selectedID = background.id + 100
+        let player = RecordingRuntimePlaybackAdapter()
+        let timeline = AppPlayerTimelineClock()
+        await timeline.reset(streamID: selectedID)
+        await timeline.updatePlayerState(.playing, message: "Selected stream is playing.")
+        let playbackSelection = AppPlaybackStreamSelection(selectedStreamID: selectedID)
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: ThrowingAudioDecoder(message: "background network lost"),
+            transcriber: FixtureTranscriber(),
+            diarizer: FixtureDiarizer(),
+            player: player,
+            timeline: timeline,
+            playbackSelection: playbackSelection,
+            ingestMode: .livePolling(maxChunksPerPass: 1),
+            now: { "2026-05-01T00:00:00Z" }
+        )
+        let request = AppStreamRuntimeRequest(
+            streamID: background.id,
+            name: background.name,
+            source: "https://example.test/background.m3u8",
+            sourceDescription: background.sourceDescription,
+            streamType: .hls
+        )
+
+        do {
+            _ = try await runner.run(request)
+            XCTFail("Expected decode failure")
+        } catch let error as RuntimeFailure {
+            XCTAssertEqual(error.message, "background network lost")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let actions = await player.actions()
+        XCTAssertEqual(actions, [])
+        let snapshot = await timeline.snapshot()
+        XCTAssertEqual(snapshot.state, .playing)
+        XCTAssertEqual(snapshot.lastMessage, "Selected stream is playing.")
+    }
+
+    func testPipelineRunnerTimesOutStalledLivePolls() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Stalled HLS",
+            streamType: "hls",
+            source: "https://example.test/stalled.m3u8"
+        )
+        let decoder = HangingPollingFixtureDecoder()
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: decoder,
+            transcriber: FixtureTranscriber(),
+            diarizer: FixtureDiarizer(),
+            player: RecordingRuntimePlaybackAdapter(),
+            timeline: AppPlayerTimelineClock(),
+            ingestMode: .livePolling(maxChunksPerPass: 1),
+            livePollTimeoutNanoseconds: 10_000_000,
+            playbackStopTimeoutNanoseconds: 1_000_000,
+            now: { "2026-05-01T00:00:00Z" }
+        )
+        let request = AppStreamRuntimeRequest(
+            streamID: stream.id,
+            name: stream.name,
+            source: "https://example.test/stalled.m3u8",
+            sourceDescription: stream.sourceDescription,
+            streamType: .hls
+        )
+
+        let startedAt = Date()
+        do {
+            _ = try await runner.run(request)
+            XCTFail("Expected live poll timeout")
+        } catch let error as StreamIngestAppRuntimeRunnerError {
+            XCTAssertEqual(error, .livePollTimedOut(seconds: 0.01))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
     }
 }

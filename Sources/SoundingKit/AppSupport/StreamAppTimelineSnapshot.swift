@@ -188,6 +188,7 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
     public var subtitle: String?
     public var confidence: Double?
     public var source: String?
+    public var rawMetadata: String?
     public var isUnknown: Bool
 
     public init(
@@ -202,6 +203,7 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         subtitle: String? = nil,
         confidence: Double? = nil,
         source: String? = nil,
+        rawMetadata: String? = nil,
         isUnknown: Bool = false
     ) {
         self.id = id
@@ -215,6 +217,7 @@ public struct StreamAppMetadataItem: Equatable, Identifiable, Sendable {
         self.subtitle = subtitle
         self.confidence = confidence
         self.source = source
+        self.rawMetadata = rawMetadata
         self.isUnknown = isUnknown
     }
 }
@@ -234,7 +237,9 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
     public var endTimestamp: String?
     public var title: String
     public var subtitle: String?
+    public var source: String?
     public var speakerDisplay: StreamAppSpeakerDisplay?
+    public var rawMetadata: String?
     public var isSeekable: Bool
 
     public init(
@@ -246,7 +251,9 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         endTimestamp: String? = nil,
         title: String,
         subtitle: String? = nil,
+        source: String? = nil,
         speakerDisplay: StreamAppSpeakerDisplay? = nil,
+        rawMetadata: String? = nil,
         isSeekable: Bool
     ) {
         self.id = id
@@ -257,7 +264,9 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         self.endTimestamp = endTimestamp
         self.title = title
         self.subtitle = subtitle
+        self.source = source
         self.speakerDisplay = speakerDisplay
+        self.rawMetadata = rawMetadata
         self.isSeekable = isSeekable
     }
 }
@@ -265,6 +274,7 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
 public enum StreamAppTimelineMarkerSource: String, Equatable, Sendable {
     case timedID3
     case scte35
+    case icy
     case unknown
 }
 
@@ -272,6 +282,8 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
     public var id: String
     public var title: String
     public var subtitle: String?
+    public var source: StreamAppTimelineMarkerSource?
+    public var isAd: Bool
     public var startSeconds: Double
     public var endSeconds: Double
     public var normalizedStart: Double
@@ -283,6 +295,8 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
         id: String,
         title: String,
         subtitle: String?,
+        source: StreamAppTimelineMarkerSource? = nil,
+        isAd: Bool = false,
         startSeconds: Double,
         endSeconds: Double,
         normalizedStart: Double,
@@ -293,6 +307,8 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
         self.id = id
         self.title = title
         self.subtitle = subtitle
+        self.source = source
+        self.isAd = isAd
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
         self.normalizedStart = normalizedStart

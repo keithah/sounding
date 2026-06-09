@@ -58,6 +58,9 @@ public enum HLSManifestMarkerExtractor {
                 segment: segment.mediaSequence
             )
             marker.tags.merge(safeTags(for: segment, source: source, tag: tag)) { _, new in new }
+            marker.fields.merge(displayFields(for: tag)) { current, _ in current }
+            var classifier = MarkerClassifier()
+            marker = classifier.classify(marker)
             return marker
         } catch {
             throw MonitorError.operationFailed(
@@ -75,7 +78,7 @@ public enum HLSManifestMarkerExtractor {
         segment: HLSManifestMediaSegment,
         source: String
     ) -> AdMarker {
-        AdMarker(
+        var marker = AdMarker(
             type: "SCTE35",
             classification: .unknown,
             source: "hls_manifest",
@@ -83,8 +86,33 @@ public enum HLSManifestMarkerExtractor {
             segment: segment.mediaSequence,
             rawBase64: nil,
             tags: safeTags(for: segment, source: source, tag: tag),
-            fields: tag.fields
+            fields: displayFields(for: tag)
         )
+        var classifier = MarkerClassifier()
+        marker = classifier.classify(marker)
+        return marker
+    }
+
+    private static func displayFields(for tag: HLSManifestSCTE35Tag) -> [String: JSONValue] {
+        var fields = tag.fields
+        switch tag.rawTagName.uppercased() {
+        case "#EXT-X-CUE-OUT":
+            fields["Title"] = .string("Ad break start")
+            if let duration = fields["DURATION"] ?? fields["duration"] {
+                fields["Series"] = .string("Duration \(stringValue(from: duration) ?? "")s".trimmingCharacters(in: .whitespaces))
+            }
+        case "#EXT-X-CUE-IN":
+            fields["Title"] = .string("Ad break end")
+        default:
+            break
+        }
+        return fields
+    }
+
+    private static func stringValue(from value: JSONValue) -> String? {
+        guard case let .string(raw) = value else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func safeTags(

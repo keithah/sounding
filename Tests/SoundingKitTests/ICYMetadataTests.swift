@@ -23,9 +23,22 @@ final class ICYMetadataTests: XCTestCase {
         XCTAssertEqual(fields, [:])
     }
 
-    func testMissingOrEmptyStreamTitleDoesNotCreateMarker() {
+    func testMissingOrEmptyMetadataDoesNotCreateMarker() {
         XCTAssertNil(ICYMetadataParser.marker(from: [:]))
         XCTAssertNil(ICYMetadataParser.marker(from: ["StreamTitle": "   "]))
+    }
+
+    func testCreatesMarkerFromNonTitleIcyFields() throws {
+        let marker = try XCTUnwrap(ICYMetadataParser.marker(from: [
+            "TIAD": "1",
+            "TIGENBUMPE": "Ad bumper"
+        ]))
+
+        XCTAssertEqual(marker.type, "ICY")
+        XCTAssertEqual(marker.source, "icy_stream")
+        XCTAssertEqual(marker.fields["TIAD"], .string("1"))
+        XCTAssertEqual(marker.fields["TIGENBUMPE"], .string("Ad bumper"))
+        XCTAssertNil(marker.fields["StreamTitle"])
     }
 
     func testCreatesUnknownIcyMarkerFromNonEmptyStreamTitle() throws {
@@ -39,10 +52,12 @@ final class ICYMetadataTests: XCTestCase {
         XCTAssertEqual(marker.classification, .unknown)
         XCTAssertNil(marker.rawBase64)
         XCTAssertEqual(marker.fields["StreamTitle"], .string("Agency - Spot"))
+        XCTAssertEqual(marker.fields["Artist"], .string("Agency"))
+        XCTAssertEqual(marker.fields["Title"], .string("Spot"))
         XCTAssertEqual(marker.fields["StreamUrl"], .string("https://example.test/tracker?secret=value"))
     }
 
-    func testParserSkipsZeroLengthMissingEmptyAndDuplicateTitles() throws {
+    func testParserSkipsZeroLengthMissingEmptyAndDuplicateMetadata() throws {
         var parser = ICYMetadataParser()
 
         XCTAssertNil(parser.marker(fromMetadataBlock: Data()))
@@ -54,6 +69,10 @@ final class ICYMetadataTests: XCTestCase {
 
         let second = try XCTUnwrap(parser.marker(fromMetadataBlock: Data("StreamTitle='Different Title';".utf8)))
         XCTAssertEqual(second.fields["StreamTitle"], .string("Different Title"))
+
+        let ad = try XCTUnwrap(parser.marker(fromMetadataBlock: Data("TIAD='1';TIGENBUMPE='Ad bumper';".utf8)))
+        XCTAssertEqual(ad.fields["TIAD"], .string("1"))
+        XCTAssertNil(parser.marker(fromMetadataBlock: Data("TIGENBUMPE='Ad bumper';TIAD='1';".utf8)))
     }
 
     func testStreamReaderReadsAudioLengthAndMetadataFrame() throws {

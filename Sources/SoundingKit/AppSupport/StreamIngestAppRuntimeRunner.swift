@@ -19,6 +19,17 @@ public enum StreamIngestAppRuntimeMode: Equatable, Sendable {
     }
 }
 
+public enum StreamIngestAppRuntimeRunnerError: Error, CustomStringConvertible, Equatable, Sendable {
+    case livePollTimedOut(seconds: Double)
+
+    public var description: String {
+        switch self {
+        case .livePollTimedOut(let seconds):
+            return "Live ingest poll timed out after \(String(format: "%.1f", seconds))s."
+        }
+    }
+}
+
 public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     private let database: SoundingDatabase
     private let decoder: any AudioDecoding
@@ -31,10 +42,13 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     private let player: (any AppPCMPlaybackAdapting)?
     private let timeline: AppPlayerTimelineClock
     private let rollingBuffer: RollingPCMBuffer?
+    private let playbackSelection: AppPlaybackStreamSelection?
     private let audioArchiveStore: AudioArchiveStore?
     private let diagnosticsLog: AppRuntimeDiagnosticsLog
     private let ingestMode: StreamIngestAppRuntimeMode
     private let livePollIntervalNanoseconds: UInt64
+    private let hlsEmptyPollIntervalNanoseconds: UInt64
+    private let livePollTimeoutNanoseconds: UInt64
     private let playbackStopTimeoutNanoseconds: UInt64
 
     public init(
@@ -47,10 +61,13 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         player: (any AppPCMPlaybackAdapting)? = nil,
         timeline: AppPlayerTimelineClock = AppPlayerTimelineClock(),
         rollingBuffer: RollingPCMBuffer? = nil,
+        playbackSelection: AppPlaybackStreamSelection? = nil,
         audioArchiveStore: AudioArchiveStore? = nil,
         diagnosticsLog: AppRuntimeDiagnosticsLog = AppRuntimeDiagnosticsLog(),
         ingestMode: StreamIngestAppRuntimeMode = .singlePass,
         livePollIntervalNanoseconds: UInt64 = 2_000_000_000,
+        hlsEmptyPollIntervalNanoseconds: UInt64 = 500_000_000,
+        livePollTimeoutNanoseconds: UInt64 = 45_000_000_000,
         playbackStopTimeoutNanoseconds: UInt64 = 2_000_000_000,
         diarizerFactory: (@Sendable (Bool) -> any SpeakerDiarization)? = nil,
         now: @escaping StreamIngestPipeline.TimestampProvider = { SoundingTimestampClock.timestamp() }
@@ -65,10 +82,13 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         self.player = player
         self.timeline = timeline
         self.rollingBuffer = rollingBuffer
+        self.playbackSelection = playbackSelection
         self.audioArchiveStore = audioArchiveStore
         self.diagnosticsLog = diagnosticsLog
         self.ingestMode = ingestMode
         self.livePollIntervalNanoseconds = livePollIntervalNanoseconds
+        self.hlsEmptyPollIntervalNanoseconds = hlsEmptyPollIntervalNanoseconds
+        self.livePollTimeoutNanoseconds = livePollTimeoutNanoseconds
         self.playbackStopTimeoutNanoseconds = playbackStopTimeoutNanoseconds
         self.now = now
     }
@@ -96,25 +116,43 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 await rollingBuffer.start(streamID: request.streamID)
                 await timeline.updateRollingBuffer(await rollingBuffer.snapshot())
             }
-            try await player.prepare(
-                streamID: request.streamID,
-                sourceDescription: request.sourceDescription,
-                timeline: timeline
-            )
-            diagnosticsLog.recordEvent(
-                "runner.playback.prepared",
-                streamID: request.streamID,
-                streamName: request.name,
-                source: request.source,
-                sourceDescription: request.sourceDescription,
-                phase: "runner.playback"
-            )
+            let streamOwnsPlayback = if let playbackSelection {
+                await playbackSelection.isSelected(streamID: request.streamID)
+            } else {
+                true
+            }
+            if streamOwnsPlayback {
+                try await player.prepare(
+                    streamID: request.streamID,
+                    sourceDescription: request.sourceDescription,
+                    timeline: timeline
+                )
+                diagnosticsLog.recordEvent(
+                    "runner.playback.prepared",
+                    streamID: request.streamID,
+                    streamName: request.name,
+                    source: request.source,
+                    sourceDescription: request.sourceDescription,
+                    phase: "runner.playback"
+                )
+            } else {
+                diagnosticsLog.recordEvent(
+                    "runner.playback.prepare.skipped",
+                    streamID: request.streamID,
+                    streamName: request.name,
+                    source: request.source,
+                    sourceDescription: request.sourceDescription,
+                    phase: "runner.playback",
+                    fields: ["reason": "stream is not selected for playback"]
+                )
+            }
             runtimeDecoder = SinglePathPCMDecoder(
                 streamID: request.streamID,
                 upstream: decoder,
                 player: player,
                 timeline: timeline,
                 rollingBuffer: rollingBuffer,
+                playbackSelection: playbackSelection,
                 database: database
             )
         } else {
@@ -128,7 +166,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 var totalDiagnostics = 0
                 var lastRunID: Int64?
                 while !Task.isCancelled {
-                    let result = try await runIngestPass(
+                    let result = try await runLiveIngestPassWithTimeout(
                         request,
                         decoder: runtimeDecoder,
                         diarizer: runtimeDiarizer,
@@ -153,7 +191,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                         ]
                     )
                     if result.processedChunks == 0 {
-                        try await Task.sleep(nanoseconds: livePollIntervalNanoseconds)
+                        try await Task.sleep(nanoseconds: emptyPollIntervalNanoseconds(for: request))
                     }
                 }
                 return AppStreamRuntimeResult(
@@ -171,7 +209,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 diarizer: runtimeDiarizer,
                 maxChunks: ingestMode.maxChunksPerPass
             )
-            if let player {
+            if let player, !ingestMode.isLivePolling {
                 diagnosticsLog.recordEvent(
                     "runner.playback.auto-stop",
                     streamID: request.streamID,
@@ -202,12 +240,14 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 sourceDescription: request.sourceDescription,
                 phase: "runner.cancel"
             )
-            if let player {
+            if let player, !ingestMode.isLivePolling {
                 await stopPlaybackDuringCleanup(
                     player,
                     request: request,
                     reason: "cancelled"
                 )
+            } else if player != nil {
+                recordLivePlaybackStopSkipped(request: request, reason: "cancelled")
             }
             if let rollingBuffer {
                 await timeline.updateRollingBuffer(await rollingBuffer.cleanup())
@@ -222,7 +262,7 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 phase: diagnosticPhase(for: error),
                 error: error
             )
-            if let player {
+            if let player, !ingestMode.isLivePolling {
                 await stopPlaybackDuringCleanup(
                     player,
                     request: request,
@@ -231,12 +271,31 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
                 await timeline.updatePlayerState(
                     .failed(message: String(describing: error)),
                     message: "Runtime playback failed: \(error).")
+            } else if player != nil {
+                if await streamOwnsPlayback(request.streamID) {
+                    await stopPlaybackDuringCleanup(
+                        player!,
+                        request: request,
+                        reason: "failed"
+                    )
+                    await timeline.updatePlayerState(
+                        .failed(message: String(describing: error)),
+                        message: "Runtime playback failed: \(error).")
+                } else {
+                    recordLivePlaybackStopSkipped(request: request, reason: "failed-non-owner")
+                }
             }
             if let rollingBuffer {
                 await timeline.updateRollingBuffer(await rollingBuffer.cleanup())
             }
             throw error
         }
+    }
+
+    private func emptyPollIntervalNanoseconds(for request: AppStreamRuntimeRequest) -> UInt64 {
+        request.streamType == .hls
+            ? hlsEmptyPollIntervalNanoseconds
+            : livePollIntervalNanoseconds
     }
 
     private func stopPlaybackDuringCleanup(
@@ -285,6 +344,29 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         }
     }
 
+    private func recordLivePlaybackStopSkipped(
+        request: AppStreamRuntimeRequest,
+        reason: String
+    ) {
+        diagnosticsLog.recordEvent(
+            "runner.playback.stop.skipped",
+            streamID: request.streamID,
+            streamName: request.name,
+            source: request.source,
+            sourceDescription: request.sourceDescription,
+            phase: "runner.stop",
+            fields: [
+                "reason": reason,
+                "mode": "livePolling",
+            ]
+        )
+    }
+
+    private func streamOwnsPlayback(_ streamID: Int64) async -> Bool {
+        guard let playbackSelection else { return true }
+        return await playbackSelection.isSelected(streamID: streamID)
+    }
+
     private func runIngestPass(
         _ request: AppStreamRuntimeRequest,
         decoder runtimeDecoder: any AudioDecoding,
@@ -322,6 +404,38 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
             ]
         )
         return result
+    }
+
+    private func runLiveIngestPassWithTimeout(
+        _ request: AppStreamRuntimeRequest,
+        decoder runtimeDecoder: any AudioDecoding,
+        diarizer runtimeDiarizer: any SpeakerDiarization,
+        maxChunks: Int?
+    ) async throws -> StreamIngestResult {
+        let timeoutNanoseconds = livePollTimeoutNanoseconds
+        return try await withThrowingTaskGroup(of: StreamIngestResult.self) { group in
+            group.addTask {
+                try await runIngestPass(
+                    request,
+                    decoder: runtimeDecoder,
+                    diarizer: runtimeDiarizer,
+                    maxChunks: maxChunks
+                )
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw StreamIngestAppRuntimeRunnerError.livePollTimedOut(
+                    seconds: Double(timeoutNanoseconds) / 1_000_000_000
+                )
+            }
+
+            guard let result = try await group.next() else {
+                group.cancelAll()
+                throw CancellationError()
+            }
+            group.cancelAll()
+            return result
+        }
     }
 
     private func diagnosticPhase(for error: any Error) -> String {

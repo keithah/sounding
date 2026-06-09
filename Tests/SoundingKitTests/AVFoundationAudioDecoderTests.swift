@@ -320,6 +320,37 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         }
     }
 
+    func testNonHLSAssetDecodeSlicesPCMPerChunk() async throws {
+        let url = temporaryWAVURL(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let decoder = AVFoundationAudioDecoder(chunkDurationSeconds: 1)
+
+        let chunks = try await decoder.decodedChunks(
+            for: AudioDecodeRequest(
+                source: url.path,
+                streamType: .icecast,
+                durationSeconds: 2,
+                maxChunks: 2
+            ))
+
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks.map(\.startSeconds), [0, 1])
+        XCTAssertEqual(chunks.map(\.endSeconds), [1, 2])
+        XCTAssertEqual(chunks[0].audioFormat.payloadKind, .linearPCM)
+        XCTAssertLessThan(chunks[0].audio.count, chunks[0].audio.count + chunks[1].audio.count)
+        XCTAssertNotEqual(chunks[0].audio, chunks[1].audio)
+    }
+
+    func testICYTimelineStartUsesPersistentByteOffset() {
+        let start = AVFoundationAudioDecoder.icyTimelineStartSeconds(
+            totalAudioBytesAfterRead: 320_000,
+            readAudioByteCount: 160_000,
+            byteRate: 16_000
+        )
+
+        XCTAssertEqual(start, 10, accuracy: 0.001)
+    }
+
     func testDurationBoundCanEndBeforeAnyHLSChunk() async throws {
         let manifestURL = temporaryManifestURL(
             contents: """
@@ -395,6 +426,55 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         let manifest = directory.appendingPathComponent("manifest.m3u8")
         try! contents.data(using: .utf8)!.write(to: manifest)
         return manifest
+    }
+
+    private func temporaryWAVURL(seconds: Double) -> URL {
+        let sampleRate = 44_100
+        let channelCount = 1
+        let bitDepth = 16
+        let frameCount = Int(Double(sampleRate) * seconds)
+        var pcm = Data()
+        pcm.reserveCapacity(frameCount * MemoryLayout<Int16>.size)
+        for frame in 0..<frameCount {
+            var sample = Int16(clamping: frame % Int(Int16.max))
+            withUnsafeBytes(of: &sample) { pcm.append(contentsOf: $0) }
+        }
+
+        var wav = Data()
+        appendASCII("RIFF", to: &wav)
+        appendUInt32LE(UInt32(36 + pcm.count), to: &wav)
+        appendASCII("WAVE", to: &wav)
+        appendASCII("fmt ", to: &wav)
+        appendUInt32LE(16, to: &wav)
+        appendUInt16LE(1, to: &wav)
+        appendUInt16LE(UInt16(channelCount), to: &wav)
+        appendUInt32LE(UInt32(sampleRate), to: &wav)
+        appendUInt32LE(UInt32(sampleRate * channelCount * bitDepth / 8), to: &wav)
+        appendUInt16LE(UInt16(channelCount * bitDepth / 8), to: &wav)
+        appendUInt16LE(UInt16(bitDepth), to: &wav)
+        appendASCII("data", to: &wav)
+        appendUInt32LE(UInt32(pcm.count), to: &wav)
+        wav.append(pcm)
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sounding-fixture-\(UUID().uuidString)")
+            .appendingPathExtension("wav")
+        try! wav.write(to: url, options: .atomic)
+        return url
+    }
+
+    private func appendASCII(_ value: String, to data: inout Data) {
+        data.append(contentsOf: value.utf8)
+    }
+
+    private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+        var value = value.littleEndian
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
+    }
+
+    private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+        var value = value.littleEndian
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
     }
 }
 

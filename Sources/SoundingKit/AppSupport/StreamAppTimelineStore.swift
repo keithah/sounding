@@ -571,27 +571,30 @@ public struct StreamAppTimelineStore: Sendable {
         let rows = try Row.fetchAll(
             db,
             sql: """
-                SELECT
-                    song_plays.id,
-                    song_plays.start_seconds,
-                    song_plays.end_seconds,
-                    song_plays.confidence,
-                    ingest_runs.started_at AS run_started_at,
-                    song_plays.source,
-                    songs.title,
-                    songs.artist,
-                    songs.display_name,
-                    songs.album,
-                    songs.is_unknown
-                FROM song_plays INDEXED BY song_plays_on_stream_start_id
-                JOIN ingest_runs ON ingest_runs.id = song_plays.run_id
-                JOIN songs ON songs.id = song_plays.song_id
-                WHERE song_plays.stream_id = ?
-                  \(unknownFilterClause)
-                  \(windowClause)
-                  \(wallClockClause)
-                ORDER BY song_plays.start_seconds, song_plays.id
-                LIMIT ?
+                SELECT * FROM (
+                    SELECT
+                        song_plays.id,
+                        song_plays.start_seconds,
+                        song_plays.end_seconds,
+                        song_plays.confidence,
+                        ingest_runs.started_at AS run_started_at,
+                        song_plays.source,
+                        songs.title,
+                        songs.artist,
+                        songs.display_name,
+                        songs.album,
+                        songs.is_unknown
+                    FROM song_plays INDEXED BY song_plays_on_stream_start_id
+                    JOIN ingest_runs ON ingest_runs.id = song_plays.run_id
+                    JOIN songs ON songs.id = song_plays.song_id
+                    WHERE song_plays.stream_id = ?
+                      \(unknownFilterClause)
+                      \(windowClause)
+                      \(wallClockClause)
+                    ORDER BY song_plays.start_seconds DESC, song_plays.id DESC
+                    LIMIT ?
+                ) AS bounded_song_metadata
+                ORDER BY start_seconds, id
                 """,
             arguments: arguments
         )
@@ -652,26 +655,41 @@ public struct StreamAppTimelineStore: Sendable {
         let rows = try Row.fetchAll(
             db,
             sql: """
-                SELECT
-                    ad_events.id,
-                    ad_events.classification,
-                    ad_events.marker_type,
-                    ad_events.pts,
-                    ad_events.segment,
-                    ad_events.source,
-                    ingest_runs.started_at AS run_started_at,
-                    COALESCE(
+                SELECT * FROM (
+                    SELECT
+                        ad_events.id,
+                        ad_events.classification,
+                        ad_events.marker_type,
+                        ad_events.pts,
+                        ad_events.segment,
+                        ad_events.source,
+                        ad_events.payload_json,
+                        ingest_runs.started_at AS run_started_at,
+                        CASE
+                        WHEN ad_events.marker_type = 'SCTE35'
+                          AND json_extract(ad_events.payload_json, '$.Tag') = '#EXT-X-CUE-OUT'
+                        THEN 'Ad break start'
+                        WHEN ad_events.marker_type = 'SCTE35'
+                          AND json_extract(ad_events.payload_json, '$.Tag') = '#EXT-X-CUE-IN'
+                        THEN 'Ad break end'
+                        WHEN ad_events.marker_type = 'ID3'
+                          AND lower(ad_events.payload_json) LIKE '%advertisement%'
+                        THEN 'AD'
+                        ELSE COALESCE(
                         json_extract(ad_events.payload_json, '$.Tags.TIT2'),
                         json_extract(ad_events.payload_json, '$.Tags.Title'),
                         json_extract(ad_events.payload_json, '$.Fields.TIT2'),
                         json_extract(ad_events.payload_json, '$.Fields.Title'),
                         json_extract(ad_events.payload_json, '$.Fields.title'),
+                        json_extract(ad_events.payload_json, '$.Fields.StreamTitle'),
                         json_extract(ad_events.payload_json, '$.Fields.ProgramTitle'),
                         json_extract(ad_events.payload_json, '$.Fields.Program'),
+                        json_extract(ad_events.payload_json, '$.Fields.SegmentationTypeName'),
                         json_extract(ad_events.payload_json, '$.Command.Title'),
                         json_extract(ad_events.payload_json, '$.Command.ProgramTitle')
-                    ) AS marker_title,
-                    COALESCE(
+                        )
+                        END AS marker_title,
+                        COALESCE(
                         json_extract(ad_events.payload_json, '$.Tags.TPE1'),
                         json_extract(ad_events.payload_json, '$.Tags.Artist'),
                         json_extract(ad_events.payload_json, '$.Fields.TPE1'),
@@ -681,8 +699,8 @@ public struct StreamAppTimelineStore: Sendable {
                         json_extract(ad_events.payload_json, '$.Fields.Provider'),
                         json_extract(ad_events.payload_json, '$.Command.Artist'),
                         json_extract(ad_events.payload_json, '$.Command.Provider')
-                    ) AS marker_artist,
-                    COALESCE(
+                        ) AS marker_artist,
+                        COALESCE(
                         json_extract(ad_events.payload_json, '$.Tags.TALB'),
                         json_extract(ad_events.payload_json, '$.Tags.Album'),
                         json_extract(ad_events.payload_json, '$.Fields.TALB'),
@@ -690,23 +708,35 @@ public struct StreamAppTimelineStore: Sendable {
                         json_extract(ad_events.payload_json, '$.Fields.album'),
                         json_extract(ad_events.payload_json, '$.Fields.Series'),
                         json_extract(ad_events.payload_json, '$.Command.Album')
-                    ) AS marker_album
-                FROM ad_events
-                JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
-                WHERE ingest_runs.stream_id = ?
-                  AND ad_events.pts IS NOT NULL
-                  AND (
-                    ad_events.marker_type != 'ID3'
-                    OR json_extract(ad_events.payload_json, '$.Tags.TIT2') IS NOT NULL
-                    OR json_extract(ad_events.payload_json, '$.Tags.TPE1') IS NOT NULL
-                    OR json_extract(ad_events.payload_json, '$.Tags.TALB') IS NOT NULL
-                    OR json_extract(ad_events.payload_json, '$.Fields.Title') IS NOT NULL
-                    OR json_extract(ad_events.payload_json, '$.Fields.Artist') IS NOT NULL
-                  )
-                  \(windowClause)
-                  \(wallClockClause)
-                ORDER BY ad_events.pts, ad_events.observed_at, ad_events.id
-                LIMIT ?
+                        ) AS marker_album,
+                        COALESCE(
+                        json_extract(ad_events.payload_json, '$.BreakDuration'),
+                        json_extract(ad_events.payload_json, '$.Fields.BreakDuration'),
+                        json_extract(ad_events.payload_json, '$.Command.BreakDuration'),
+                        CAST(json_extract(ad_events.payload_json, '$.Fields.durationMilliseconds') AS REAL) / 1000.0,
+                        CAST(json_extract(ad_events.payload_json, '$.Fields.DurationMilliseconds') AS REAL) / 1000.0,
+                        CAST(json_extract(ad_events.payload_json, '$.Fields.durationMs') AS REAL) / 1000.0,
+                        CAST(json_extract(ad_events.payload_json, '$.Fields.DurationMs') AS REAL) / 1000.0
+                        ) AS marker_break_duration
+                    FROM ad_events
+                    JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
+                    WHERE ingest_runs.stream_id = ?
+                      AND ad_events.pts IS NOT NULL
+                      AND (
+                        ad_events.marker_type != 'ID3'
+                        OR json_extract(ad_events.payload_json, '$.Tags.TIT2') IS NOT NULL
+                        OR json_extract(ad_events.payload_json, '$.Tags.TPE1') IS NOT NULL
+                        OR json_extract(ad_events.payload_json, '$.Tags.TALB') IS NOT NULL
+                        OR json_extract(ad_events.payload_json, '$.Fields.Title') IS NOT NULL
+                        OR json_extract(ad_events.payload_json, '$.Fields.Artist') IS NOT NULL
+                        OR lower(ad_events.payload_json) LIKE '%advertisement%'
+                      )
+                      \(windowClause)
+                      \(wallClockClause)
+                    ORDER BY ad_events.pts DESC, ad_events.observed_at DESC, ad_events.id DESC
+                    LIMIT ?
+                ) AS bounded_event_metadata
+                ORDER BY pts, id
                 """,
             arguments: arguments
         )
@@ -730,18 +760,165 @@ public struct StreamAppTimelineStore: Sendable {
             let markerTitle: String? = row["marker_title"]
             let markerArtist: String? = row["marker_artist"]
             let markerAlbum: String? = row["marker_album"]
-            let hasSongMetadata = markerTitle?.isEmpty == false
+            let markerBreakDuration: Double? = row["marker_break_duration"]
+            let source = timelineMetadataSource(
+                markerType: markerType,
+                rawSource: row["source"]
+            )
+            let markerPayload: String? = row["payload_json"]
+            let safeMarkerPayload = markerPayload.map(IngestRedaction.diagnostic)
+            let isAdvertisementMarker = markerPayload?
+                .range(of: "advertisement", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            let displayTitle = eventDisplayTitle(
+                classification: classification,
+                markerType: markerType,
+                markerTitle: markerTitle,
+                isAdvertisementMarker: isAdvertisementMarker
+            ) ?? classification
+            let isAdBoundary = classification == MarkerClassification.adStart.rawValue
+                || classification == MarkerClassification.adEnd.rawValue
+                || displayTitle.caseInsensitiveCompare("AD") == .orderedSame
+                || isAdvertisementMarker
+            let isMusicMetadata = !isAdBoundary
+                && ProgramMetadataClassifier.isMusic(
+                    title: displayTitle,
+                    artist: markerArtist,
+                    album: markerAlbum,
+                    source: ProgramMetadataSource(raw: source),
+                    isUnknown: false
+                )
+            let subtitle = metadataEventSubtitle(
+                markerTitle: markerTitle,
+                displayTitle: displayTitle,
+                markerAlbum: markerAlbum,
+                markerType: markerType,
+                source: source,
+                classification: classification,
+                duration: markerBreakDuration,
+                isAdvertisementMarker: isAdvertisementMarker,
+                isAdBoundary: isAdBoundary
+            )
             return StreamAppMetadataItem(
                 id: "event:\(id)",
-                kind: hasSongMetadata ? .song : .event,
+                kind: isMusicMetadata ? .song : .event,
                 startSeconds: pts,
                 startTimestamp: timestamp(runStartedAt: runStartedAt, offsetSeconds: pts),
-                title: markerTitle?.isEmpty == false ? markerTitle! : classification,
+                title: displayTitle,
                 artist: markerArtist,
-                subtitle: firstNonEmpty([markerAlbum, markerType]),
-                source: firstNonEmpty([row["source"], markerType])
+                subtitle: subtitle,
+                source: source,
+                rawMetadata: safeMarkerPayload
             )
         }
+    }
+
+    private func metadataEventSubtitle(
+        markerTitle: String?,
+        displayTitle: String,
+        markerAlbum: String?,
+        markerType: String,
+        source: String?,
+        classification: String,
+        duration: Double?,
+        isAdvertisementMarker: Bool,
+        isAdBoundary: Bool
+    ) -> String? {
+        guard isAdBoundary else {
+            return firstNonEmpty([
+                markerAlbum,
+                markerType
+            ])
+        }
+        let parts = [
+            adDurationSubtitle(for: classification, duration: duration),
+            rawMarkerSubtitle(markerTitle, displayTitle: displayTitle),
+            source,
+            isAdvertisementMarker ? "Advertisement" : nil,
+            markerAlbum
+        ]
+        .compactMap { value -> String? in
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else { return nil }
+            return trimmed
+        }
+        var seen: Set<String> = []
+        let uniqueParts = parts.filter { part in
+            let key = part.lowercased()
+            if seen.contains(key) { return false }
+            seen.insert(key)
+            return true
+        }
+        return uniqueParts.isEmpty ? markerType : uniqueParts.joined(separator: " | ")
+    }
+
+    private func rawMarkerSubtitle(_ markerTitle: String?, displayTitle: String) -> String? {
+        guard let markerTitle = markerTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !markerTitle.isEmpty,
+              markerTitle.caseInsensitiveCompare(displayTitle) != .orderedSame,
+              markerTitle.caseInsensitiveCompare("AD") != .orderedSame
+        else {
+            return nil
+        }
+        return markerTitle
+    }
+
+    private func adDurationSubtitle(for classification: String, duration: Double?) -> String? {
+        guard classification == MarkerClassification.adStart.rawValue,
+              let duration,
+              duration.isFinite,
+              duration > 0
+        else {
+            return nil
+        }
+        return String(format: "Duration %.3fs", duration)
+    }
+
+    private func eventDisplayTitle(
+        classification: String,
+        markerType: String,
+        markerTitle: String?,
+        isAdvertisementMarker: Bool
+    ) -> String? {
+        if genericAdvertisementTitle(markerTitle, isAdvertisementMarker: isAdvertisementMarker) {
+            return "AD"
+        }
+        if let boundaryTitle = eventTitle(for: classification) {
+            return boundaryTitle
+        }
+        return firstNonEmpty([markerTitle, markerType])
+    }
+
+    private func genericAdvertisementTitle(
+        _ markerTitle: String?,
+        isAdvertisementMarker: Bool
+    ) -> Bool {
+        guard isAdvertisementMarker else { return false }
+        let normalizedTitle = markerTitle?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return normalizedTitle == nil
+            || normalizedTitle?.isEmpty == true
+            || normalizedTitle == "ad"
+            || normalizedTitle == "advertisement"
+    }
+
+    private func eventTitle(for classification: String) -> String? {
+        switch classification {
+        case MarkerClassification.adStart.rawValue:
+            return "Ad break start"
+        case MarkerClassification.adEnd.rawValue:
+            return "Ad break end"
+        default:
+            return nil
+        }
+    }
+
+    private func timelineMetadataSource(markerType: String, rawSource: String?) -> String? {
+        let markerSource = ProgramMetadataSource(raw: markerType)
+        if markerSource != .other {
+            return markerSource.rawValue
+        }
+        return firstNonEmpty([rawSource, markerType])
     }
 
     private func firstNonEmpty(_ values: [String?]) -> String? {

@@ -283,7 +283,7 @@ struct TimelineRailView: View {
                                 playOrReport(seconds: span.startSeconds, isSeekable: span.isSeekable)
                             } label: {
                                 RoundedRectangle(cornerRadius: 5)
-                                    .fill(StreamAppSpeakerDisplay(rawLabel: span.id, displayLabel: span.title, colorToken: span.colorToken).color)
+                                    .fill(railColor(span.colorToken))
                                     .overlay(alignment: .leading) {
                                         Text(span.title)
                                             .font(.caption2.weight(.semibold))
@@ -305,12 +305,12 @@ struct TimelineRailView: View {
                                 playOrReport(seconds: marker.seconds, isSeekable: marker.isSeekable)
                             } label: {
                                 RoundedRectangle(cornerRadius: 2)
-                                    .fill(StreamAppSpeakerDisplay(rawLabel: marker.id, displayLabel: marker.title, colorToken: marker.colorToken).color)
+                                    .fill(railColor(marker.colorToken))
                                     .frame(width: 5, height: 34)
                             }
                             .buttonStyle(.plain)
                             .offset(x: xOffset(marker.normalizedPosition, totalWidth: proxy.size.width))
-                            .help("\(marker.source.rawValue): \(marker.title)")
+                            .help(markerHelp(marker))
                         }
                     } else {
                         Text("No metadata markers in this window")
@@ -505,6 +505,8 @@ struct TimelineRailView: View {
             id: span.id,
             title: span.title,
             subtitle: span.subtitle,
+            source: span.source,
+            isAd: span.isAd,
             startSeconds: span.startSeconds,
             endSeconds: span.endSeconds,
             normalizedStart: normalized(clampedStart, in: current),
@@ -549,10 +551,34 @@ struct TimelineRailView: View {
     }
 
     private func spanHelp(_ span: StreamAppTimelineRailSpan) -> String {
-        if let subtitle = span.subtitle, !subtitle.isEmpty {
-            return "\(span.title) - \(subtitle)"
+        let range = "\(timeLabel(span.startSeconds))-\(timeLabel(span.endSeconds))"
+        if span.isAd {
+            return [span.title, span.subtitle, range]
+                .compactMap { value in
+                    guard let value, !value.isEmpty else { return nil }
+                    return value
+                }
+                .joined(separator: " · ")
         }
-        return span.title
+        if let subtitle = span.subtitle, !subtitle.isEmpty {
+            return "\(span.title) - \(subtitle) · \(range)"
+        }
+        return "\(span.title) · \(range)"
+    }
+
+    private func markerHelp(_ marker: StreamAppTimelineRailMarker) -> String {
+        let label = marker.source == .scte35 ? "Ad marker" : marker.source.rawValue
+        return "\(label): \(marker.title) · \(timeLabel(marker.seconds))"
+    }
+
+    private func railColor(_ token: String) -> Color {
+        if token == "ad" {
+            return Color(red: 1.0, green: 0.14, blue: 0.34)
+        }
+        if token == "gray" {
+            return .secondary
+        }
+        return StreamAppSpeakerDisplay(rawLabel: token, displayLabel: token, colorToken: token).color
     }
 
     private func timeLabel(_ seconds: Double) -> String {
@@ -586,8 +612,36 @@ struct TimelineItemButton: View {
     }
 
     private var secondaryText: String? {
-        guard item.kind == .transcript, !isDiarizationEnabled else { return item.subtitle }
-        return nil
+        if item.kind == .transcript, !isDiarizationEnabled {
+            return nil
+        }
+        let parts = [item.subtitle, sourceLabel]
+            .compactMap { value -> String? in
+                guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !value.isEmpty
+                else {
+                    return nil
+                }
+                return value
+            }
+        var seen = Set<String>()
+        let uniqueParts = parts.filter { seen.insert($0.lowercased()).inserted }
+        guard !uniqueParts.isEmpty else { return nil }
+        return uniqueParts.joined(separator: " · ")
+    }
+
+    private var sourceLabel: String? {
+        guard item.kind != .transcript,
+              let source = item.source?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !source.isEmpty
+        else {
+            return nil
+        }
+        let normalized = source.lowercased().replacingOccurrences(of: "-", with: "_")
+        if normalized.contains("scte") { return "SCTE35" }
+        if normalized.contains("id3") { return "ID3" }
+        if normalized.contains("icy") || normalized.contains("icecast") { return "ICY" }
+        return source
     }
 
     var body: some View {
@@ -685,6 +739,18 @@ private extension View {
                         ? "Copied timeline text with timestamp."
                         : "Copy failed: pasteboard was unavailable."
                 )
+            }
+            if let rawMetadata = item.rawMetadata?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !rawMetadata.isEmpty
+            {
+                Button("Copy Raw Metadata", systemImage: "curlybraces") {
+                    let copied = copyTimelineText(rawMetadata)
+                    reportTimelineActionMessage(
+                        copied
+                            ? "Copied raw metadata."
+                            : "Copy failed: pasteboard was unavailable."
+                    )
+                }
             }
             Button("Save Text", systemImage: "square.and.arrow.down") {
                 saveTimelineText(

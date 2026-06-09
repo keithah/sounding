@@ -186,8 +186,11 @@ struct GatedStopRuntimePlaybackAdapter: AppPCMPlaybackAdapting {
 
 actor RecordingRuntimePlaybackAdapter: AppPCMPlaybackAdapting {
     private var recordedActions: [String] = []
+    private var preparedStreamIDs: [Int64] = []
 
-    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock) async throws {}
+    func prepare(streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock) async throws {
+        preparedStreamIDs.append(streamID)
+    }
 
     func play(_ frames: [SharedPCMFrame], timeline: AppPlayerTimelineClock) async throws {
         recordedActions.append(contentsOf: frames.map { "play:\($0.sequence)" })
@@ -211,6 +214,10 @@ actor RecordingRuntimePlaybackAdapter: AppPCMPlaybackAdapting {
 
     func actions() -> [String] {
         recordedActions
+    }
+
+    func preparedStreams() -> [Int64] {
+        preparedStreamIDs
     }
 }
 
@@ -425,6 +432,14 @@ struct FixtureDecoder: AudioDecoding {
     }
 }
 
+struct ThrowingAudioDecoder: AudioDecoding {
+    var message: String
+
+    func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+        throw RuntimeFailure(message: message)
+    }
+}
+
 actor PollingFixtureDecoder: AudioDecoding {
     private var calls = 0
     private var waiters: [(minimum: Int, continuation: CheckedContinuation<Void, Never>)] = []
@@ -453,6 +468,39 @@ actor PollingFixtureDecoder: AudioDecoding {
                 endedAt: "2026-05-01T00:00:01Z"
             )
         ]
+    }
+
+    func waitForCalls(_ minimum: Int) async {
+        if calls >= minimum { return }
+        await withCheckedContinuation { continuation in
+            waiters.append((minimum, continuation))
+        }
+    }
+
+    private func releaseSatisfiedWaiters() {
+        var remaining: [(minimum: Int, continuation: CheckedContinuation<Void, Never>)] = []
+        for waiter in waiters {
+            if calls >= waiter.minimum {
+                waiter.continuation.resume()
+            } else {
+                remaining.append(waiter)
+            }
+        }
+        waiters = remaining
+    }
+}
+
+actor HangingPollingFixtureDecoder: AudioDecoding {
+    private var calls = 0
+    private var waiters: [(minimum: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func decodedChunks(for request: AudioDecodeRequest) async throws -> [DecodedAudioChunk] {
+        XCTAssertNil(request.durationSeconds)
+        XCTAssertEqual(request.maxChunks, 1)
+        calls += 1
+        releaseSatisfiedWaiters()
+        try await Task.sleep(nanoseconds: 10_000_000_000)
+        return []
     }
 
     func waitForCalls(_ minimum: Int) async {

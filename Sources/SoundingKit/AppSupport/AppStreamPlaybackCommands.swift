@@ -36,7 +36,7 @@ struct AppStreamPlaybackCommands: Sendable {
         guard let playbackTimeline else { return false }
         guard rollingBuffer != nil || audioArchiveStore != nil else { return false }
         if let rollingBuffer, audioArchiveStore == nil {
-            let bufferSnapshot = await rollingBuffer.snapshot()
+            let bufferSnapshot = await rollingBuffer.snapshot(streamID: streamID)
             guard bufferSnapshot.streamID == streamID else { return false }
         }
         let result = await TimelineReplayResolver(
@@ -51,9 +51,7 @@ struct AppStreamPlaybackCommands: Sendable {
 
     func seekToLive(streamID: Int64) async -> Bool {
         guard let rollingBuffer, let playbackTimeline else { return false }
-        let bufferSnapshot = await rollingBuffer.snapshot()
-        guard bufferSnapshot.streamID == streamID else { return false }
-        let result = await rollingBuffer.seekToLive()
+        let result = await rollingBuffer.seekToLive(streamID: streamID)
         guard result.availableStreamID.map({ $0 == streamID }) ?? true else { return false }
         await playSeekResult(result, streamID: streamID, playbackTimeline: playbackTimeline)
         return true
@@ -61,11 +59,9 @@ struct AppStreamPlaybackCommands: Sendable {
 
     func scrubBackward(seconds: Double, streamID: Int64) async -> Bool {
         guard let rollingBuffer, let playbackTimeline else { return false }
-        let bufferSnapshot = await rollingBuffer.snapshot()
-        guard bufferSnapshot.streamID == streamID else { return false }
         let timeline = await playbackTimeline.snapshot()
         let requested = max(0, timeline.liveEdgeSeconds - max(0, seconds))
-        let result = await rollingBuffer.seek(to: requested)
+        let result = await rollingBuffer.seek(to: requested, streamID: streamID)
         guard result.availableStreamID.map({ $0 == streamID }) ?? true else { return false }
         await playSeekResult(result, streamID: streamID, playbackTimeline: playbackTimeline)
         return true

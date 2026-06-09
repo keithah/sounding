@@ -17,10 +17,12 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
         private let volumeStore: AppPlaybackVolumeStore
         private let diagnosticsLog: AppRuntimeDiagnosticsLog
         private let bufferFactory = AVFoundationPCMBufferFactory()
+        private let playerQueue = DispatchQueue(label: "Sounding.AVFoundationAppPCMPlayerAdapter")
         private let currentStreamLock = NSLock()
         private var currentStreamID: Int64?
         private let scheduledBuffersLock = NSLock()
         private var scheduledBuffers: [AVAudioPCMBuffer] = []
+        private var scheduledBufferDurations: [ObjectIdentifier: Double] = [:]
         private var volumeObserverTask: Task<Void, Never>?
     #endif
 
@@ -83,7 +85,6 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
         streamID: Int64, sourceDescription: String, timeline: AppPlayerTimelineClock
     ) async throws {
         #if canImport(AVFoundation)
-            setCurrentStreamID(streamID)
             diagnosticsLog.recordEvent(
                 "playback.prepare.requested",
                 streamID: streamID,
@@ -91,21 +92,34 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 phase: "playback.prepare",
                 fields: ["engineRunning": String(engine.isRunning)]
             )
-            // Do NOT call playerNode.stop() here. The runtime's replacePlaybackOwner
-            // already invokes player.stop() on the previous owner before this prepare.
-            // A second concurrent playerNode.stop() races with the first one inside
-            // AVFoundation and the calling task blocks indefinitely.
-            clearScheduledBuffers()
-            await applyVolume(streamID: streamID)
+            let volumeSnapshot = await volumeStore.snapshot(streamID: streamID)
             do {
-                try startAudioEngineIfNeeded()
-                diagnosticsLog.recordEvent(
-                    "playback.prepare.succeeded",
-                    streamID: streamID,
-                    sourceDescription: sourceDescription,
-                    phase: "playback.prepare",
-                    fields: ["engineRunning": String(engine.isRunning)]
-                )
+                try await runOnPlayerQueue {
+                    self.setCurrentStreamID(streamID)
+                    self.playerNode.stop()
+                    self.clearScheduledBuffers()
+                    self.applyEffectiveVolume(volumeSnapshot.effectiveVolume)
+                    self.recordVolumeApplied(
+                        streamID: streamID,
+                        snapshot: volumeSnapshot,
+                        source: "prepare"
+                    )
+                    self.diagnosticsLog.recordEvent(
+                        "playback.queue.flushed",
+                        streamID: streamID,
+                        sourceDescription: sourceDescription,
+                        phase: "playback.prepare",
+                        fields: ["reason": "prepare"]
+                    )
+                    try self.startAudioEngineIfNeeded()
+                    self.diagnosticsLog.recordEvent(
+                        "playback.prepare.succeeded",
+                        streamID: streamID,
+                        sourceDescription: sourceDescription,
+                        phase: "playback.prepare",
+                        fields: ["engineRunning": String(self.engine.isRunning)]
+                    )
+                }
             } catch {
                 await publishFailure(
                     "Audio device unavailable: \(error).",
@@ -150,51 +164,82 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                         "payloadKinds": Array(Set(frames.map { $0.format.payloadKind.rawValue })).sorted().joined(separator: ","),
                     ]
                 )
+                let volumeSnapshot: AppPlaybackVolumeSnapshot?
                 if let streamID {
-                    setCurrentStreamID(streamID)
-                    await applyVolume(streamID: streamID)
-                }
-                if replacingScheduledBuffers {
-                    playerNode.reset()
-                    clearScheduledBuffers()
-                    diagnosticsLog.recordEvent(
-                        "playback.queue.flushed",
-                        streamID: streamID,
-                        phase: "playback.seek",
-                        fields: ["reason": "seek"]
-                    )
-                }
-                let buffers = try frames.map(bufferFactory.makePCMBuffer)
-                try startAudioEngineIfNeeded()
-                if bufferScheduler != nil {
-                    try schedule(buffers, timeline: timeline, streamID: streamID)
+                    volumeSnapshot = await volumeStore.snapshot(streamID: streamID)
                 } else {
-                    let outputFormat = engine.outputNode.inputFormat(forBus: 0)
-                    let playbackBuffers = try buffers.map { try bufferFactory.convert($0, to: outputFormat) }
-                    diagnosticsLog.recordEvent(
-                        "playback.buffers.converted",
+                    volumeSnapshot = nil
+                }
+                try await runOnPlayerQueue {
+                    if let streamID {
+                        self.setCurrentStreamID(streamID)
+                    }
+                    if let streamID, let volumeSnapshot {
+                        self.applyEffectiveVolume(volumeSnapshot.effectiveVolume)
+                        self.recordVolumeApplied(
+                            streamID: streamID,
+                            snapshot: volumeSnapshot,
+                            source: "play"
+                        )
+                    }
+                    if replacingScheduledBuffers {
+                        self.playerNode.stop()
+                        self.clearScheduledBuffers()
+                        self.diagnosticsLog.recordEvent(
+                            "playback.queue.flushed",
+                            streamID: streamID,
+                            phase: "playback.seek",
+                            fields: ["reason": "seek"]
+                        )
+                    }
+                    let frameDurations = frames.map { max(0, $0.endSeconds - $0.startSeconds) }
+                    let buffers = try frames.map(self.bufferFactory.makePCMBuffer)
+                    try self.startAudioEngineIfNeeded()
+                    if self.bufferScheduler != nil {
+                        try self.schedule(
+                            buffers,
+                            durations: frameDurations,
+                            timeline: timeline,
+                            streamID: streamID
+                        )
+                    } else {
+                        let outputFormat = self.engine.outputNode.inputFormat(forBus: 0)
+                        let playbackBuffers = try buffers.map {
+                            try self.bufferFactory.convert($0, to: outputFormat)
+                        }
+                        self.diagnosticsLog.recordEvent(
+                            "playback.buffers.converted",
+                            streamID: streamID,
+                            phase: "playback.play",
+                            fields: [
+                                "sourceBufferCount": String(buffers.count),
+                                "playbackBufferCount": String(playbackBuffers.count),
+                                "outputSampleRate": String(outputFormat.sampleRate),
+                                "outputChannels": String(outputFormat.channelCount),
+                            ]
+                        )
+                        try self.schedule(
+                            playbackBuffers,
+                            durations: frameDurations,
+                            timeline: timeline,
+                            streamID: streamID
+                        )
+                    }
+                    self.startPlayerNodeIfNeeded()
+                    let scheduledSnapshot = self.scheduledBufferSnapshot()
+                    self.diagnosticsLog.recordEvent(
+                        "playback.play.scheduled",
                         streamID: streamID,
                         phase: "playback.play",
                         fields: [
-                            "sourceBufferCount": String(buffers.count),
-                            "playbackBufferCount": String(playbackBuffers.count),
-                            "outputSampleRate": String(outputFormat.sampleRate),
-                            "outputChannels": String(outputFormat.channelCount),
+                            "engineRunning": String(self.engine.isRunning),
+                            "playerIsPlaying": String(self.playerNode.isPlaying),
+                            "retainedBufferCount": String(scheduledSnapshot.count),
+                            "retainedBufferSeconds": String(
+                                format: "%.3f", scheduledSnapshot.seconds),
                         ]
                     )
-                    try schedule(playbackBuffers, timeline: timeline, streamID: streamID)
                 }
-                startPlayerNodeIfNeeded()
-                diagnosticsLog.recordEvent(
-                    "playback.play.scheduled",
-                    streamID: streamID,
-                    phase: "playback.play",
-                    fields: [
-                        "engineRunning": String(engine.isRunning),
-                        "playerIsPlaying": String(playerNode.isPlaying),
-                        "retainedBufferCount": String(scheduledBufferCount()),
-                    ]
-                )
             #else
                 throw AppPlayerAdapterError.unsupportedPCMFormat(
                     "AVFoundation playback is unavailable on this platform.")
@@ -224,63 +269,79 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
 
     public func pause(timeline: AppPlayerTimelineClock) async {
         #if canImport(AVFoundation)
-            playerNode.pause()
-            diagnosticsLog.recordEvent(
-                "playback.pause.applied",
-                streamID: currentStreamIDValue(),
-                phase: "playback.pause",
-                fields: ["playerIsPlaying": String(playerNode.isPlaying)]
-            )
+            await runOnPlayerQueue {
+                self.playerNode.pause()
+                self.diagnosticsLog.recordEvent(
+                    "playback.pause.applied",
+                    streamID: self.currentStreamIDValue(),
+                    phase: "playback.pause",
+                    fields: ["playerIsPlaying": String(self.playerNode.isPlaying)]
+                )
+            }
         #endif
         await timeline.updatePlayerState(.paused, message: "Playback paused.")
     }
 
     public func resume(timeline: AppPlayerTimelineClock) async {
         #if canImport(AVFoundation)
-            startPlayerNodeIfNeeded()
-            diagnosticsLog.recordEvent(
-                "playback.resume.applied",
-                streamID: currentStreamIDValue(),
-                phase: "playback.resume",
-                fields: ["playerIsPlaying": String(playerNode.isPlaying)]
-            )
+            await runOnPlayerQueue {
+                self.startPlayerNodeIfNeeded()
+                self.diagnosticsLog.recordEvent(
+                    "playback.resume.applied",
+                    streamID: self.currentStreamIDValue(),
+                    phase: "playback.resume",
+                    fields: ["playerIsPlaying": String(self.playerNode.isPlaying)]
+                )
+            }
         #endif
         await timeline.updatePlayerState(.playing, message: "Playback resumed.")
     }
 
     public func stop(timeline: AppPlayerTimelineClock) async {
         #if canImport(AVFoundation)
-            let streamID = currentStreamIDValue()
-            let retainedBeforeStop = scheduledBufferCount()
-            // Don't call playerNode.stop() — it blocks for seconds with a long
-            // queue and causes the runtime stop-coordinator to time out, with
-            // racing scheduleBuffer calls from the next stream. Use
-            // playerNode.reset() instead: documented as "clears any previously
-            // scheduled events" and runs without blocking. The player node stays
-            // attached to the running engine; the next play() call schedules new
-            // buffers from a clean queue and resumes playback via play().
-            playerNode.reset()
-            clearScheduledBuffers()
-            setCurrentStreamID(nil)
-            engineStopper?()
-            diagnosticsLog.recordEvent(
-                "playback.stop.applied",
-                streamID: streamID,
-                phase: "playback.stop",
-                fields: [
-                    "retainedBuffersBeforeStop": String(retainedBeforeStop),
-                    "engineRunning": String(engine.isRunning),
-                    "playerIsPlaying": String(playerNode.isPlaying),
-                ]
-            )
+            await runOnPlayerQueue {
+                let streamID = self.currentStreamIDValue()
+                let retainedBeforeStop = self.scheduledBufferSnapshot()
+                self.playerNode.stop()
+                self.clearScheduledBuffers()
+                self.setCurrentStreamID(nil)
+                self.engineStopper?()
+                self.diagnosticsLog.recordEvent(
+                    "playback.stop.applied",
+                    streamID: streamID,
+                    phase: "playback.stop",
+                    fields: [
+                        "retainedBuffersBeforeStop": String(retainedBeforeStop.count),
+                        "retainedBufferSecondsBeforeStop": String(
+                            format: "%.3f", retainedBeforeStop.seconds),
+                        "engineRunning": String(self.engine.isRunning),
+                        "playerIsPlaying": String(self.playerNode.isPlaying),
+                    ]
+                )
+            }
         #endif
         await timeline.updatePlayerState(.stopped, message: "Playback stopped.")
     }
 
     public func applyPlaybackVolume(streamID: Int64) async {
         #if canImport(AVFoundation)
-            setCurrentStreamID(streamID)
-            await applyVolume(streamID: streamID, source: "control")
+            let snapshot = await volumeStore.snapshot(streamID: streamID)
+            await runOnPlayerQueue {
+                guard self.currentStreamIDValue() == streamID else {
+                    self.diagnosticsLog.recordEvent(
+                        "playback.volume.skipped",
+                        streamID: streamID,
+                        phase: "playback.volume",
+                        fields: [
+                            "currentStreamID": self.currentStreamIDValue().map(String.init) ?? "nil",
+                            "source": "control",
+                        ]
+                    )
+                    return
+                }
+                self.applyEffectiveVolume(snapshot.effectiveVolume)
+                self.recordVolumeApplied(streamID: streamID, snapshot: snapshot, source: "control")
+            }
         #endif
     }
 
@@ -318,11 +379,12 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
 
         private func schedule(
             _ buffers: [AVAudioPCMBuffer],
+            durations: [Double],
             timeline: AppPlayerTimelineClock,
             streamID: Int64?
         ) throws {
             if let bufferScheduler {
-                retainScheduledBuffers(buffers)
+                retainScheduledBuffers(buffers, durations: durations)
                 do {
                     try bufferScheduler(buffers)
                 } catch {
@@ -331,8 +393,8 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 }
                 return
             }
-            for buffer in buffers {
-                retainScheduledBuffer(buffer)
+            for (index, buffer) in buffers.enumerated() {
+                retainScheduledBuffer(buffer, duration: scheduledDuration(at: index, in: durations))
                 playerNode.scheduleBuffer(
                     buffer,
                     completionCallbackType: .dataRendered
@@ -340,7 +402,7 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                     guard let buffer else { return }
                     guard let self else { return }
                     let remaining = self.releaseScheduledBuffer(buffer)
-                    guard remaining == 0 else { return }
+                    guard remaining.count == 0 else { return }
                     let currentStreamID = self.currentStreamIDValue()
                     guard currentStreamID == streamID else { return }
                     self.diagnosticsLog.recordEvent(
@@ -350,6 +412,7 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                         fields: [
                             "engineRunning": String(self.engine.isRunning),
                             "playerIsPlaying": String(self.playerNode.isPlaying),
+                            "retainedBufferSeconds": String(format: "%.3f", remaining.seconds),
                         ]
                     )
                     Task {
@@ -377,18 +440,13 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
                 let changes = await volumeStore.changes()
                 for await snapshot in changes {
                     guard let self else { return }
-                    if self.currentStreamIDValue() == snapshot.streamID {
+                    await self.runOnPlayerQueue {
+                        guard self.currentStreamIDValue() == snapshot.streamID else { return }
                         self.applyEffectiveVolume(snapshot.effectiveVolume)
-                        self.diagnosticsLog.recordEvent(
-                            "playback.volume.applied",
+                        self.recordVolumeApplied(
                             streamID: snapshot.streamID,
-                            phase: "playback.volume",
-                            fields: [
-                                "volume": String(format: "%.3f", snapshot.volume),
-                                "isMuted": String(snapshot.isMuted),
-                                "effectiveVolume": String(format: "%.3f", snapshot.effectiveVolume),
-                                "source": "observer",
-                            ]
+                            snapshot: snapshot,
+                            source: "observer"
                         )
                     }
                 }
@@ -407,43 +465,62 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
             return currentStreamID
         }
 
-        private func retainScheduledBuffers(_ buffers: [AVAudioPCMBuffer]) {
+        private func retainScheduledBuffers(_ buffers: [AVAudioPCMBuffer], durations: [Double]) {
             scheduledBuffersLock.lock()
             scheduledBuffers.append(contentsOf: buffers)
+            for (index, buffer) in buffers.enumerated() {
+                scheduledBufferDurations[ObjectIdentifier(buffer)] = max(
+                    0,
+                    scheduledDuration(at: index, in: durations)
+                )
+            }
             scheduledBuffersLock.unlock()
         }
 
-        private func retainScheduledBuffer(_ buffer: AVAudioPCMBuffer) {
+        private func retainScheduledBuffer(_ buffer: AVAudioPCMBuffer, duration: Double) {
             scheduledBuffersLock.lock()
             scheduledBuffers.append(buffer)
+            scheduledBufferDurations[ObjectIdentifier(buffer)] = max(0, duration)
             scheduledBuffersLock.unlock()
         }
 
-        private func releaseScheduledBuffer(_ buffer: AVAudioPCMBuffer) -> Int {
+        private func releaseScheduledBuffer(_ buffer: AVAudioPCMBuffer) -> (
+            count: Int, seconds: Double
+        ) {
             scheduledBuffersLock.lock()
             if let index = scheduledBuffers.firstIndex(where: { $0 === buffer }) {
                 scheduledBuffers.remove(at: index)
             }
+            scheduledBufferDurations.removeValue(forKey: ObjectIdentifier(buffer))
             let remaining = scheduledBuffers.count
+            let seconds = scheduledBufferDurations.values.reduce(0, +)
             scheduledBuffersLock.unlock()
-            return remaining
+            return (remaining, seconds)
         }
 
         private func clearScheduledBuffers() {
             scheduledBuffersLock.lock()
             scheduledBuffers.removeAll(keepingCapacity: false)
+            scheduledBufferDurations.removeAll(keepingCapacity: false)
             scheduledBuffersLock.unlock()
         }
 
-        private func scheduledBufferCount() -> Int {
+        private func scheduledBufferSnapshot() -> (count: Int, seconds: Double) {
             scheduledBuffersLock.lock()
             defer { scheduledBuffersLock.unlock() }
-            return scheduledBuffers.count
+            return (scheduledBuffers.count, scheduledBufferDurations.values.reduce(0, +))
         }
 
-        private func applyVolume(streamID: Int64, source: String = "direct") async {
-            let snapshot = await volumeStore.snapshot(streamID: streamID)
-            applyEffectiveVolume(snapshot.effectiveVolume)
+        private func scheduledDuration(at index: Int, in durations: [Double]) -> Double {
+            guard durations.indices.contains(index) else { return 0 }
+            return durations[index]
+        }
+
+        private func recordVolumeApplied(
+            streamID: Int64,
+            snapshot: AppPlaybackVolumeSnapshot,
+            source: String
+        ) {
             diagnosticsLog.recordEvent(
                 "playback.volume.applied",
                 streamID: streamID,
@@ -460,6 +537,27 @@ public final class AVFoundationAppPCMPlayerAdapter: AppPCMPlaybackAdapting, @unc
         private func applyEffectiveVolume(_ effectiveVolume: Float) {
             playerNode.volume = 1
             volumeMixerNode.outputVolume = effectiveVolume
+        }
+
+        private func runOnPlayerQueue(_ operation: @escaping () -> Void) async {
+            await withCheckedContinuation { continuation in
+                playerQueue.async {
+                    operation()
+                    continuation.resume()
+                }
+            }
+        }
+
+        private func runOnPlayerQueue<T>(_ operation: @escaping () throws -> T) async throws -> T {
+            try await withCheckedThrowingContinuation { continuation in
+                playerQueue.async {
+                    do {
+                        continuation.resume(returning: try operation())
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
         }
 
         var nodeVolumeSnapshotForTesting: (player: Float, mixer: Float) {

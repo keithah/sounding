@@ -77,6 +77,7 @@ final class SCTE35FixtureTests: XCTestCase {
             "SegmentationUPIDType": "0x0c",
             "SegmentationUPID": "asset-42",
             "SegmentationTypeID": "0x34",
+            "SegmentationTypeName": "Provider placement opportunity start",
             "SegmentNumber": 1,
             "SegmentsExpected": 2
         ]

@@ -169,13 +169,22 @@ public struct StreamIngestPipeline {
             return context
         }
 
-        let programMetadataResolver = ChunkProgramMetadataResolver { startSeconds, endSeconds in
-            try persistence.activeTimedMetadataSongPlay(
-                streamID: streamID,
-                startSeconds: startSeconds,
-                endSeconds: endSeconds
-            )
-        }
+        let programMetadataResolver = ChunkProgramMetadataResolver(
+            activeTimedMetadataLookup: { startSeconds, endSeconds in
+                try persistence.activeTimedMetadataSongPlay(
+                    streamID: streamID,
+                    startSeconds: startSeconds,
+                    endSeconds: endSeconds
+                )
+            },
+            activeAdBreakLookup: { startSeconds, endSeconds in
+                try persistence.activeAdBreakOverlaps(
+                    streamID: streamID,
+                    startSeconds: startSeconds,
+                    endSeconds: endSeconds
+                )
+            }
+        )
 
         do {
             try Task.checkCancellation()
@@ -613,16 +622,122 @@ public struct StreamIngestPipeline {
             }
 
             var normalized = segment
-            normalized.sequence = nextSequence + accepted.count
             normalized.words = validWords.enumerated().map { offset, word in
                 var normalizedWord = word
                 normalizedWord.sequence = offset
                 return normalizedWord
             }
-            accepted.append(normalized)
+            accepted.append(
+                contentsOf: splitOversizedTranscriptSegment(
+                    normalized,
+                    startingSequence: nextSequence + accepted.count
+                )
+            )
         }
 
         return (accepted, diagnostics)
+    }
+
+    private func splitOversizedTranscriptSegment(
+        _ segment: TranscriptSegmentDraft,
+        startingSequence: Int,
+        maxDurationSeconds: Double = 30
+    ) -> [TranscriptSegmentDraft] {
+        let duration = segment.endSeconds - segment.startSeconds
+        guard duration > maxDurationSeconds else {
+            var normalized = segment
+            normalized.sequence = startingSequence
+            return [normalized]
+        }
+
+        if !segment.words.isEmpty {
+            return splitSegmentByWords(
+                segment,
+                startingSequence: startingSequence,
+                maxDurationSeconds: maxDurationSeconds
+            )
+        }
+
+        return splitSegmentByText(
+            segment,
+            startingSequence: startingSequence,
+            maxDurationSeconds: maxDurationSeconds
+        )
+    }
+
+    private func splitSegmentByWords(
+        _ segment: TranscriptSegmentDraft,
+        startingSequence: Int,
+        maxDurationSeconds: Double
+    ) -> [TranscriptSegmentDraft] {
+        var groups: [[TranscriptWordDraft]] = []
+        for word in segment.words {
+            guard let first = groups.last?.first,
+                  let last = groups.last?.last,
+                  word.endSeconds - first.startSeconds <= maxDurationSeconds,
+                  !shouldSplitAfterSentence(last.text) else {
+                groups.append([word])
+                continue
+            }
+            groups[groups.count - 1].append(word)
+        }
+
+        return groups.enumerated().map { groupOffset, words in
+            let text = words.map(\.text).joined(separator: " ")
+            return TranscriptSegmentDraft(
+                sequence: startingSequence + groupOffset,
+                speakerLabel: segment.speakerLabel,
+                startSeconds: words.first?.startSeconds ?? segment.startSeconds,
+                endSeconds: words.last?.endSeconds ?? segment.endSeconds,
+                text: text.isEmpty ? segment.text : text,
+                confidence: words.map(\.confidence).compactMap { $0 }.min() ?? segment.confidence,
+                words: words.enumerated().map { wordOffset, word in
+                    var normalizedWord = word
+                    normalizedWord.sequence = wordOffset
+                    return normalizedWord
+                }
+            )
+        }
+    }
+
+    private func splitSegmentByText(
+        _ segment: TranscriptSegmentDraft,
+        startingSequence: Int,
+        maxDurationSeconds: Double
+    ) -> [TranscriptSegmentDraft] {
+        let words = segment.text.split(separator: " ").map(String.init)
+        guard !words.isEmpty else {
+            var normalized = segment
+            normalized.sequence = startingSequence
+            return [normalized]
+        }
+
+        let groupCount = max(1, Int(ceil((segment.endSeconds - segment.startSeconds) / maxDurationSeconds)))
+        let wordsPerGroup = max(1, Int(ceil(Double(words.count) / Double(groupCount))))
+        let durationPerGroup = (segment.endSeconds - segment.startSeconds) / Double(groupCount)
+        return stride(from: 0, to: words.count, by: wordsPerGroup).enumerated().map { groupOffset, wordStart in
+            let wordEnd = min(words.count, wordStart + wordsPerGroup)
+            let start = segment.startSeconds + Double(groupOffset) * durationPerGroup
+            let end = groupOffset == groupCount - 1
+                ? segment.endSeconds
+                : min(segment.endSeconds, start + durationPerGroup)
+            return TranscriptSegmentDraft(
+                sequence: startingSequence + groupOffset,
+                speakerLabel: segment.speakerLabel,
+                startSeconds: start,
+                endSeconds: end,
+                text: words[wordStart..<wordEnd].joined(separator: " "),
+                confidence: segment.confidence,
+                words: []
+            )
+        }
+    }
+
+    private func shouldSplitAfterSentence(_ text: String) -> Bool {
+        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else {
+            return false
+        }
+        return ".!?]".contains(last)
     }
 
     private func applySpeakerTurns(
@@ -941,7 +1056,7 @@ public struct StreamIngestPipeline {
 
     private func redactedSourceDescription(_ value: String?) -> String? {
         guard let value else { return nil }
-        return IngestRedaction.sourceDescription(value)
+        return IngestRedaction.diagnosticSourceDescription(value)
     }
 
     private func resolvedStreamType(for source: String, requested streamType: StreamType)

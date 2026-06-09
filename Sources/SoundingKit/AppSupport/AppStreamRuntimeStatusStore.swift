@@ -175,8 +175,14 @@ public struct AppStreamRuntimeStatusStore: Sendable {
                         max_attempts = excluded.max_attempts,
                         next_retry_seconds = excluded.next_retry_seconds,
                         next_retry_at = excluded.next_retry_at,
-                        recent_failure_message = excluded.recent_failure_message,
-                        recent_failure_at = excluded.recent_failure_at,
+                        recent_failure_message = CASE
+                            WHEN excluded.phase = 'stopped' THEN NULL
+                            ELSE COALESCE(excluded.recent_failure_message, recent_failure_message)
+                        END,
+                        recent_failure_at = CASE
+                            WHEN excluded.phase = 'stopped' THEN NULL
+                            ELSE COALESCE(excluded.recent_failure_at, recent_failure_at)
+                        END,
                         updated_at = excluded.updated_at,
                         lifecycle_reason = excluded.lifecycle_reason,
                         suspended_at = excluded.suspended_at,

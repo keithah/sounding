@@ -290,6 +290,59 @@ final class AppStreamRuntimeStatusStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.updatedAt, "2026-05-01T10:00:02Z")
     }
 
+    func testRunningUpdatePreservesRecentFailureUntilStopped() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Recovering",
+            streamType: "hls",
+            source: "https://example.test/live.m3u8",
+            createdAt: "2026-05-01T10:00:00Z"
+        )
+        let store = AppStreamRuntimeStatusStore(database: temporary.database)
+
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .reconnecting,
+                attempt: 1,
+                maxAttempts: 3,
+                updatedAt: "2026-05-01T10:00:01Z",
+                recentFailure: AppStreamRuntimeRecentFailure(
+                    message: "source open failed",
+                    occurredAt: "2026-05-01T10:00:01Z"
+                )
+            )
+        )
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .running,
+                attempt: 1,
+                maxAttempts: 3,
+                updatedAt: "2026-05-01T10:00:02Z"
+            )
+        )
+
+        var snapshot = try XCTUnwrap(try store.status(streamID: stream.id))
+        XCTAssertEqual(snapshot.phase, .running)
+        XCTAssertEqual(snapshot.recentFailure?.message, "source open failed")
+
+        try store.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .stopped,
+                attempt: 0,
+                maxAttempts: 3,
+                updatedAt: "2026-05-01T10:00:03Z"
+            )
+        )
+
+        snapshot = try XCTUnwrap(try store.status(streamID: stream.id))
+        XCTAssertEqual(snapshot.phase, .stopped)
+        XCTAssertNil(snapshot.recentFailure)
+    }
+
     func testWriteForMissingStreamThrowsRedactedError() throws {
         let temporary = try TemporarySoundingDatabase()
         let store = AppStreamRuntimeStatusStore(database: temporary.database)

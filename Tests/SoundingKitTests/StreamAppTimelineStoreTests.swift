@@ -70,8 +70,8 @@ final class StreamAppTimelineStoreTests: XCTestCase {
             [
                 "transcript:0.0:Fixture Artist:Fixture Artist:false",
                 "song:5.0:Fixture Song:Fixture Artist:false",
-                "event:9.0:AD_START:-:false",
-                "event:21.0:AD_END:-:true"
+                "event:9.0:Ad break start:-:false",
+                "event:21.0:Ad break end:-:true"
             ]
         )
         XCTAssertEqual(snapshot.currentMetadata?.title, "Fixture Song")
@@ -79,8 +79,8 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.recentMetadata.map(\.title), ["Fixture Song"])
         XCTAssertEqual(snapshot.timelineRail.visibleStartSeconds, 0)
         XCTAssertEqual(snapshot.timelineRail.visibleEndSeconds, 35)
-        XCTAssertEqual(snapshot.timelineRail.spans.map(\.title), ["Fixture Song"])
-        XCTAssertEqual(snapshot.timelineRail.markers.map(\.title), ["AD_START", "AD_END"])
+        XCTAssertEqual(snapshot.timelineRail.spans.map(\.title), ["Fixture Song", "AD"])
+        XCTAssertEqual(snapshot.timelineRail.markers.map(\.title), ["AD", "AD"])
         XCTAssertEqual(snapshot.diagnostics.bufferedSeekUnavailableMessage, "Requested 40s is unavailable (available range 10-30s).")
     }
 
@@ -174,6 +174,60 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         ])
     }
 
+    func testSnapshotWithoutPlayerStillUsesNewestMetadataWhenBounded() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Muted metadata",
+            streamType: .icy,
+            source: "https://example.test/live.mp3",
+            createdAt: "2026-05-01T15:00:00Z"
+        )
+        let writer = IngestPersistence(database: temporary.database)
+        let runID = try writer.createRun(
+            streamID: stream.id,
+            startedAt: "2026-05-01T15:00:01Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 0,
+            segmentURI: "icy-live",
+            startedAt: "2026-05-01T15:00:02Z",
+            endedAt: "2026-05-01T15:02:02Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [],
+                songPlays: (0..<5).map { index in
+                    SongPlayDraft(
+                        song: song(title: "Song \(index)", artist: "Artist \(index)"),
+                        startSeconds: Double(index * 30),
+                        endSeconds: Double(index * 30 + 30),
+                        confidence: 1,
+                        source: "ICY"
+                    )
+                },
+                createdAt: "2026-05-01T15:00:03Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: stream.id,
+                player: nil,
+                metadataLimit: 2,
+                timelineLimit: 2,
+                refreshedAt: "2026-05-01T15:03:00Z"
+            )
+        )
+
+        XCTAssertEqual(snapshot.currentMetadata?.title, "Song 4")
+        XCTAssertEqual(snapshot.recentMetadata.map(\.title), ["Song 4", "Song 3"])
+    }
+
     func testDefaultTimelineRequestKeepsOlderMarkersOutsidePlaybackLookback() throws {
         let fixture = try makeFixture()
         let store = StreamAppTimelineStore(database: fixture.temporary.database)
@@ -194,8 +248,8 @@ final class StreamAppTimelineStoreTests: XCTestCase {
 
         XCTAssertEqual(snapshot.timelineRail.visibleStartSeconds, 5)
         XCTAssertEqual(snapshot.timelineRail.visibleEndSeconds, 610)
-        XCTAssertEqual(snapshot.timelineRail.spans.map(\.title), ["Fixture Song"])
-        XCTAssertEqual(snapshot.timelineRail.markers.map(\.title), ["AD_START", "AD_END"])
+        XCTAssertEqual(snapshot.timelineRail.spans.map(\.title), ["Fixture Song", "AD"])
+        XCTAssertEqual(snapshot.timelineRail.markers.map(\.title), ["AD", "AD"])
         XCTAssertTrue(snapshot.timelineItems.contains { $0.subtitle?.contains("Opening alpha words") == true })
     }
 
@@ -354,7 +408,7 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(counts.mainEvents, 0)
         XCTAssertEqual(counts.mainSongPlays, 0)
         XCTAssertEqual(counts.mainSpeakerTurns, 0)
-        XCTAssertEqual(counts.mainHLSSegments, 0)
+        XCTAssertEqual(counts.mainHLSSegments, 2)
         XCTAssertEqual(counts.otherSegments, 2)
         XCTAssertEqual(counts.otherHLSSegments, 1)
         let snapshot = try store.snapshot(request: StreamAppTimelineRequest(streamID: fixture.mainStreamID))
@@ -553,6 +607,470 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertTrue(snapshot.timelineItems.contains { $0.kind == .song && $0.title == "Wire Song" })
     }
 
+    func testTimelineSuppressesID3MarkerRowsWhenSongPlayHasSameTrack() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:45:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 45,
+            segmentURI: "main-045.ts",
+            startedAt: "2026-05-01T15:45:01Z",
+            endedAt: "2026-05-01T15:45:31Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "ID3",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 100,
+                        tags: [
+                            "TIT2": .string("The Great Divide"),
+                            "TPE1": .string("Noah Kahan"),
+                            "TALB": .string("The Great Divide"),
+                        ]
+                    ),
+                    AdMarker(
+                        type: "ID3",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 112,
+                        tags: [
+                            "TIT2": .string("The Great Divide"),
+                            "TPE1": .string("Noah Kahan"),
+                            "TALB": .string("The Great Divide"),
+                        ]
+                    )
+                ],
+                songPlays: [
+                    SongPlayDraft(
+                        song: song(title: "The Great Divide", artist: "Noah Kahan"),
+                        startSeconds: 100,
+                        endSeconds: 130,
+                        source: "timed_id3"
+                    )
+                ],
+                createdAt: "2026-05-01T15:45:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        XCTAssertEqual(
+            snapshot.timelineItems.filter { $0.title == "The Great Divide" }.map { "\($0.kind.rawValue):\($0.title):\($0.speakerDisplay?.displayLabel ?? "-")" },
+            ["song:The Great Divide:Noah Kahan"]
+        )
+    }
+
+    func testTimelineSuppressesRepeatedSCTETitleOnlyRowsWhenArtistBackedSongPlayExists() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:46:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 46,
+            segmentURI: "main-046.ts",
+            startedAt: "2026-05-01T15:46:01Z",
+            endedAt: "2026-05-01T15:46:31Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 100,
+                        fields: ["Title": .string("The Great Divide")]
+                    ),
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 108,
+                        fields: ["Title": .string("The Great Divide")]
+                    ),
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 116,
+                        fields: ["Title": .string("The Great Divide")]
+                    ),
+                ],
+                songPlays: [
+                    SongPlayDraft(
+                        song: song(title: "The Great Divide", artist: "Noah Kahan"),
+                        startSeconds: 100,
+                        endSeconds: 140,
+                        source: "timed_id3"
+                    )
+                ],
+                createdAt: "2026-05-01T15:46:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        XCTAssertEqual(
+            snapshot.timelineItems.filter { $0.title == "The Great Divide" }.map { "\($0.kind.rawValue):\($0.title):\($0.speakerDisplay?.displayLabel ?? "-")" },
+            ["song:The Great Divide:Noah Kahan"]
+        )
+    }
+
+    func testTimelineCoalescesRepeatedID3MarkersWhenSongPlayIsOutsideLiveWindow() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:45:00Z",
+            status: .running
+        )
+        for (index, pts) in [0.0, 8.0, 16.0, 24.0].enumerated() {
+            let chunkID = try writer.createChunk(
+                runID: runID,
+                sequence: 60 + index,
+                segmentURI: "main-06\(index).ts",
+                startedAt: "2026-05-01T15:45:\(String(format: "%02d", index + 1))Z",
+                endedAt: "2026-05-01T15:45:\(String(format: "%02d", index + 2))Z"
+            )
+            try writer.persistTimeline(
+                IngestChunkTimeline(
+                    runID: runID,
+                    chunkID: chunkID,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: pts,
+                            tags: [
+                                "TIT2": .string("The Great Divide"),
+                                "TPE1": .string("Noah Kahan"),
+                                "TALB": .string("The Great Divide"),
+                            ],
+                            timestamp: "2026-05-01T15:45:\(String(format: "%02d", index + 1))Z"
+                        )
+                    ],
+                    createdAt: "2026-05-01T15:45:\(String(format: "%02d", index + 1))Z"
+                )
+            )
+        }
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 24,
+                    liveEdgeSeconds: 24,
+                    bufferedStartSeconds: 0,
+                    bufferedEndSeconds: 24
+                ),
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T15:45:30Z"
+            )
+        )
+
+        let matchingRows = snapshot.timelineItems.filter { $0.title == "The Great Divide" }
+        XCTAssertEqual(
+            matchingRows.map { "\($0.kind.rawValue):\($0.title):\($0.speakerDisplay?.displayLabel ?? "-")" },
+            ["song:The Great Divide:Noah Kahan"]
+        )
+        XCTAssertEqual(matchingRows.first?.endSeconds, 24)
+    }
+
+    func testTimelineDisplaysManifestCueRowsAsAdEvents() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:50:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 50,
+            segmentURI: "main-050.ts",
+            startedAt: "2026-05-01T15:50:01Z",
+            endedAt: "2026-05-01T15:50:07Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .unknown,
+                        source: "hls_manifest",
+                        tag: "#EXT-X-CUE-OUT",
+                        pts: 90,
+                        fields: ["cue": .string("out"), "DURATION": .string("60.0")]
+                    ),
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .unknown,
+                        source: "hls_manifest",
+                        tag: "#EXT-X-CUE-IN",
+                        pts: 150,
+                        fields: ["cue": .string("in")]
+                    )
+                ],
+                createdAt: "2026-05-01T15:50:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        let adEvents = snapshot.timelineItems.filter {
+            $0.id.hasPrefix("event:")
+                && $0.title.hasPrefix("Ad break")
+                && $0.startSeconds >= 90
+        }
+        XCTAssertEqual(adEvents.map(\.kind), [.event, .event])
+        XCTAssertEqual(adEvents.map(\.title), ["Ad break start", "Ad break end"])
+    }
+
+    func testTimelineDisplaysICYAdDurationRowsAsAdEvents() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:52:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 52,
+            segmentURI: "icy-0",
+            startedAt: "2026-05-01T15:52:01Z",
+            endedAt: "2026-05-01T15:52:31Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "ICY",
+                        classification: .adStart,
+                        source: "icy_stream",
+                        pts: 110,
+                        fields: [
+                            "StreamTitle": .string(""),
+                            "adw_ad": .string("true"),
+                            "durationMilliseconds": .string("30119"),
+                            "insertionType": .string("midroll"),
+                        ]
+                    )
+                ],
+                createdAt: "2026-05-01T15:52:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        let adEvent = try XCTUnwrap(snapshot.timelineItems.first {
+            $0.id.hasPrefix("event:")
+                && $0.startSeconds == 110
+        })
+        XCTAssertEqual(adEvent.kind, .event)
+        XCTAssertEqual(adEvent.title, "Ad break start")
+        XCTAssertEqual(adEvent.subtitle, "Duration 30.119s | icy")
+
+        let adSpan = try XCTUnwrap(snapshot.timelineRail.spans.first { $0.id == "ad:\(adEvent.id)" })
+        XCTAssertEqual(adSpan.title, "AD")
+        XCTAssertEqual(adSpan.colorToken, "ad")
+        XCTAssertEqual(adSpan.startSeconds, 110, accuracy: 0.001)
+        XCTAssertEqual(adSpan.endSeconds, 140.119, accuracy: 0.001)
+    }
+
+    func testTimelineDisplaysID3AdvertisementRowsAsAdEvents() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:55:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 55,
+            segmentURI: "main-055.ts",
+            startedAt: "2026-05-01T15:55:01Z",
+            endedAt: "2026-05-01T15:55:07Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "ID3",
+                        classification: .unknown,
+                        source: "hls_segment",
+                        pts: 120,
+                        tags: ["TXXX:ADVERTISEMENT": .string("ADVERTISEMENT")]
+                    )
+                ],
+                createdAt: "2026-05-01T15:55:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        let adEvents = snapshot.timelineItems.filter { $0.title == "AD" && $0.source == "timed_id3" }
+        XCTAssertEqual(adEvents.map(\.kind), [.event])
+        XCTAssertEqual(adEvents.first?.subtitle, "timed_id3 | Advertisement")
+        XCTAssertEqual(snapshot.timelineRail.markers.first { $0.id == adEvents.first?.id }?.colorToken, "ad")
+    }
+
+    func testTimelineCollapsesSegmentRepeatedID3AdsInsideSCTEBreak() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:58:00Z",
+            status: .running
+        )
+        for (index, pts) in [100.0, 106.0, 112.0, 118.0, 124.0, 130.0].enumerated() {
+            let chunkID = try writer.createChunk(
+                runID: runID,
+                sequence: 70 + index,
+                segmentURI: "main-ad-\(index).ts",
+                startedAt: "2026-05-01T15:58:\(String(format: "%02d", index + 1))Z",
+                endedAt: "2026-05-01T15:58:\(String(format: "%02d", index + 2))Z"
+            )
+            var adMarkers = [
+                AdMarker(
+                    type: "ID3",
+                    classification: .adStart,
+                    source: "hls_segment",
+                    pts: pts,
+                    tags: ["TXXX:type": .string("ADVERTISEMENT")]
+                )
+            ]
+            if index == 0 {
+                adMarkers.insert(
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .adStart,
+                        source: "hls_manifest",
+                        tag: "#EXT-X-CUE-OUT",
+                        pts: pts,
+                        fields: ["DURATION": .string("60.0")]
+                    ),
+                    at: 0
+                )
+            }
+            if index == 5 {
+                adMarkers.append(
+                    AdMarker(
+                        type: "SCTE35",
+                        classification: .adEnd,
+                        source: "hls_manifest",
+                        tag: "#EXT-X-CUE-IN",
+                        pts: 160,
+                        fields: ["cue": .string("in")]
+                    )
+                )
+            }
+            try writer.persistTimeline(
+                IngestChunkTimeline(
+                    runID: runID,
+                    chunkID: chunkID,
+                    adMarkers: adMarkers,
+                    createdAt: "2026-05-01T15:58:\(String(format: "%02d", index + 1))Z"
+                )
+            )
+        }
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                paragraphLimit: 5,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: nil,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        let adItems = snapshot.timelineItems.filter { $0.title == "AD" }
+        XCTAssertEqual(adItems.count, 1)
+        XCTAssertEqual(adItems.first?.startSeconds, 100)
+        let adSpans = snapshot.timelineRail.spans.filter { $0.isAd && $0.startSeconds >= 100 }
+        XCTAssertEqual(
+            adSpans.count,
+            1,
+            adSpans.map { "\($0.id):\($0.startSeconds)-\($0.endSeconds)" }.joined(separator: ", ")
+        )
+        XCTAssertEqual(adSpans.first?.colorToken, "ad")
+    }
+
     func testTimelineKeepsNewestTimedMetadataWhenRunsReusePTS() throws {
         let fixture = try makeFixture()
         let writer = IngestPersistence(database: fixture.temporary.database)
@@ -695,7 +1213,7 @@ final class StreamAppTimelineStoreTests: XCTestCase {
 
         XCTAssertEqual(
             snapshot.timelineItems.filter { $0.kind == .transcript }.map(\.subtitle),
-            ["first long thought second long thought", "third long thought"]
+            ["first long thought", "second long thought", "third long thought"]
         )
     }
 

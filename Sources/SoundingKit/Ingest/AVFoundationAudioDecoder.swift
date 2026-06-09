@@ -65,6 +65,12 @@ public final class AVFoundationAudioDecoder: AudioDecoding, @unchecked Sendable 
         return icySessions.removeValue(forKey: key)
     }
 
+    private func invalidateICYSession(for key: String) async {
+        if let droppedSession = dropICYSession(for: key) {
+            await droppedSession.close()
+        }
+    }
+
     private struct ResolvedHLSManifest: Sendable {
         var text: String
         var source: String
@@ -289,12 +295,14 @@ public final class AVFoundationAudioDecoder: AudioDecoding, @unchecked Sendable 
             )
         } catch {
             // Drop the session so the next call reopens a fresh connection.
-            _ = dropICYSession(for: request.source)
+            await invalidateICYSession(for: request.source)
             throw error
         }
 
         if readResult.audio.isEmpty {
-            return []
+            await invalidateICYSession(for: request.source)
+            throw AVFoundationAudioDecoderError.sourceOpenFailed(
+                "Audio source open failed: live ICY stream ended before audio bytes were available.")
         }
 
         let temporaryURL = FileManager.default.temporaryDirectory
@@ -303,15 +311,22 @@ public final class AVFoundationAudioDecoder: AudioDecoding, @unchecked Sendable 
         do {
             try readResult.audio.write(to: temporaryURL, options: .atomic)
         } catch {
+            await invalidateICYSession(for: request.source)
             throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: temporary audio staging failed.")
         }
         defer { try? FileManager.default.removeItem(at: temporaryURL) }
 
         let fallbackDuration = byteRate > 0 ? Double(readResult.audio.count) / byteRate : chunkDurationSeconds
+        let timelineStartSeconds = Self.icyTimelineStartSeconds(
+            totalAudioBytesAfterRead: readResult.totalAudioBytes,
+            readAudioByteCount: readResult.audio.count,
+            byteRate: byteRate
+        )
         let decoded: (audio: Data, format: DecodedAudioFormat)
         do {
             decoded = try decodeLinearPCM(from: temporaryURL, fallbackDuration: fallbackDuration)
         } catch {
+            await invalidateICYSession(for: request.source)
             throw AVFoundationAudioDecoderError.decodeFailed("Audio decode failed: \(sanitized(error)).")
         }
         let data = decoded.audio
@@ -322,9 +337,11 @@ public final class AVFoundationAudioDecoder: AudioDecoding, @unchecked Sendable 
         guard boundedCount > 0 else { return [] }
 
         return (0..<boundedCount).map { index in
-            let start = Double(index) * chunkDurationSeconds
-            let end = min(start + chunkDurationSeconds, effectiveDuration)
-            let chunkAudio = pcmSlice(data, format: decoded.format, startSeconds: start, endSeconds: end)
+            let localStart = Double(index) * chunkDurationSeconds
+            let localEnd = min(localStart + chunkDurationSeconds, effectiveDuration)
+            let start = timelineStartSeconds + localStart
+            let end = timelineStartSeconds + localEnd
+            let chunkAudio = pcmSlice(data, format: decoded.format, startSeconds: localStart, endSeconds: localEnd)
             let markers = markersOverlapping(readResult.markers, startSeconds: start, endSeconds: max(end, start))
             return DecodedAudioChunk(
                 sequence: index,
@@ -342,6 +359,16 @@ public final class AVFoundationAudioDecoder: AudioDecoding, @unchecked Sendable 
 #else
         throw AVFoundationAudioDecoderError.unsupportedMedia("AVFoundation is unavailable on this platform.")
 #endif
+    }
+
+    static func icyTimelineStartSeconds(
+        totalAudioBytesAfterRead: Int,
+        readAudioByteCount: Int,
+        byteRate: Double
+    ) -> Double {
+        guard byteRate > 0 else { return 0 }
+        let startByteOffset = max(0, totalAudioBytesAfterRead - readAudioByteCount)
+        return Double(startByteOffset) / byteRate
     }
 
     private func loadMediaManifest(from source: String) async throws -> ResolvedHLSManifest {

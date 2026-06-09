@@ -23,14 +23,14 @@ public struct TimelineReplayResolver: Sendable {
     }
 
     public func resolve(streamID: Int64, seconds: Double) async -> TimelineReplayResult {
-        let snapshot = await rollingBuffer?.snapshot()
-        let bufferedRange = snapshot?.streamID == streamID ? snapshot?.bufferedRange : nil
+        let snapshot = await rollingBuffer?.snapshot(streamID: streamID)
+        let bufferedRange = snapshot?.bufferedRange
         guard seconds.isFinite, seconds >= 0 else {
             return unavailable(seconds: seconds, bufferedRange: bufferedRange)
         }
 
         if snapshot?.streamID == streamID, let rollingBuffer {
-            let result = await rollingBuffer.seek(to: seconds)
+            let result = await rollingBuffer.seek(to: seconds, streamID: streamID)
             if case .available(let frame) = result, frame.streamID == streamID {
                 return .available(frame, source: .rollingBuffer)
             }

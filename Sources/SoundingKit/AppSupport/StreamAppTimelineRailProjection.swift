@@ -35,12 +35,12 @@ public enum StreamAppTimelineRailProjection {
                 )
             }
         let adSpans = adBreakSpans(
-            from: items.filter { $0.kind == .event },
+            from: items,
             visibleStartSeconds: orderedVisibleStartSeconds,
             visibleEndSeconds: orderedVisibleEndSeconds,
             duration: duration
         )
-        let spans = (songSpans + adSpans)
+        let spans = (songSpans + coalescedAdSpans(adSpans))
             .sorted {
                 if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
                 if $0.isAd != $1.isAd { return !$0.isAd && $1.isAd }
@@ -69,8 +69,31 @@ public enum StreamAppTimelineRailProjection {
         )
     }
 
+    private static func coalescedAdSpans(
+        _ spans: [StreamAppTimelineRailSpan]
+    ) -> [StreamAppTimelineRailSpan] {
+        let ordered = spans.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            return $0.id < $1.id
+        }
+        var result: [StreamAppTimelineRailSpan] = []
+        for span in ordered {
+            guard var last = result.last, last.isAd, span.isAd, span.startSeconds < last.endSeconds else {
+                result.append(span)
+                continue
+            }
+            last.endSeconds = max(last.endSeconds, span.endSeconds)
+            last.normalizedEnd = max(last.normalizedEnd, span.normalizedEnd)
+            if last.source == nil {
+                last.source = span.source
+            }
+            result[result.count - 1] = last
+        }
+        return result
+    }
+
     private static func broadcastItems(from metadata: [StreamAppMetadataItem]) -> [StreamAppTimelineItem] {
-        let sorted = metadata.sorted {
+        let sorted = StreamAppTimelineProjection.coalescedMetadataChanges(metadata).sorted {
             if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
             return $0.id < $1.id
         }
@@ -192,30 +215,54 @@ public enum StreamAppTimelineRailProjection {
             endSeconds: endSeconds,
             normalizedStart: normalized(clampedStart, visibleStartSeconds: visibleStartSeconds, duration: duration),
             normalizedEnd: normalized(clampedEnd, visibleStartSeconds: visibleStartSeconds, duration: duration),
-            colorToken: StreamAppSpeakerDisplayProjection.fallbackColorToken(for: item.title),
+            colorToken: railSongColorToken(for: item.title),
             isSeekable: item.isSeekable
         )
     }
 
     private static func adBreakSpans(
-        from events: [StreamAppTimelineItem],
+        from items: [StreamAppTimelineItem],
         visibleStartSeconds: Double,
         visibleEndSeconds: Double,
         duration: Double
     ) -> [StreamAppTimelineRailSpan] {
         guard duration > 0 else { return [] }
-        let orderedEvents = events.sorted {
+        let orderedItems = items.sorted {
             if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
             return $0.id < $1.id
         }
         var spans: [StreamAppTimelineRailSpan] = []
         var pendingStart: StreamAppTimelineItem?
-        for event in orderedEvents {
+        for event in orderedItems {
+            if event.kind == .song, let start = pendingStart, event.startSeconds > start.startSeconds {
+                if let completed = adSpan(
+                    start: start,
+                    end: event.startSeconds,
+                    visibleStartSeconds: visibleStartSeconds,
+                    visibleEndSeconds: visibleEndSeconds,
+                    duration: duration
+                ) {
+                    spans.append(completed)
+                }
+                pendingStart = nil
+                continue
+            }
+            guard event.kind == .event else { continue }
             let source = markerSource(for: event)
             let startsAdBreak = isAdBreakStart(event)
             let endsAdBreak = isAdBreakEnd(event)
             guard source == .scte35 || startsAdBreak || endsAdBreak else { continue }
             if startsAdBreak {
+                if let start = pendingStart,
+                   let completed = adSpan(
+                    start: start,
+                    end: max(event.startSeconds, start.startSeconds),
+                    visibleStartSeconds: visibleStartSeconds,
+                    visibleEndSeconds: visibleEndSeconds,
+                    duration: duration
+                   ) {
+                    spans.append(completed)
+                }
                 if let completed = adSpan(
                     start: event,
                     end: explicitAdEndSeconds(for: event),
@@ -242,6 +289,16 @@ public enum StreamAppTimelineRailProjection {
                 }
                 pendingStart = nil
             }
+        }
+        if let start = pendingStart,
+           let completed = adSpan(
+            start: start,
+            end: visibleEndSeconds,
+            visibleStartSeconds: visibleStartSeconds,
+            visibleEndSeconds: visibleEndSeconds,
+            duration: duration
+           ) {
+            spans.append(completed)
         }
         return spans
     }
@@ -435,6 +492,12 @@ public enum StreamAppTimelineRailProjection {
         case .unknown:
             return "gray"
         }
+    }
+
+    private static func railSongColorToken(for title: String) -> String {
+        let total = title.unicodeScalars.reduce(0) { $0 + Int($1.value) }
+        let tokens = ["blue", "green", "orange", "purple", "teal", "violet", "yellow"]
+        return tokens[abs(total) % tokens.count]
     }
 
     private static func normalized(_ text: String) -> String {

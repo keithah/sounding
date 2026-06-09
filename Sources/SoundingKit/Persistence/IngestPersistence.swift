@@ -425,7 +425,7 @@ public struct IngestPersistence {
                 try insertSpeakerTurn(speakerTurn, timeline: timeline, db: db)
             }
 
-            for marker in timeline.adMarkers {
+            for marker in timelineMarkersForPersistence(timeline, db: db) {
                 try insertAdMarker(marker, timeline: timeline, db: db)
             }
 
@@ -452,6 +452,157 @@ public struct IngestPersistence {
         }
     }
 
+    private func timelineMarkersForPersistence(_ timeline: IngestChunkTimeline, db: Database) -> [AdMarker] {
+        let streamID = try? streamID(forRunID: timeline.runID, db: db)
+        return timeline.adMarkers.filter { marker in
+            if marker.classification == .unknown,
+               let metadata = ProgramMetadataExtractor.metadata(from: marker),
+               metadata.classification == .music {
+                if timeline.songPlays.contains(where: { metadataMatchesSongPlay(metadata, $0) }) {
+                    return false
+                }
+                if let streamID,
+                   metadataMatchesActiveTimedSongPlay(metadata, streamID: streamID, marker: marker, db: db) {
+                    return false
+                }
+            }
+
+            if isRepeatedGenericAdMarker(marker, streamID: streamID, db: db) {
+                return false
+            }
+
+            return true
+        }
+    }
+
+    private func metadataMatchesActiveTimedSongPlay(
+        _ metadata: ProgramMetadata,
+        streamID: Int64,
+        marker: AdMarker,
+        db: Database,
+        toleranceSeconds: Double = 180
+    ) -> Bool {
+        guard let pts = marker.pts else { return false }
+        let normalizedTitle = normalizedMetadataText(metadata.title)
+        guard !normalizedTitle.isEmpty else { return false }
+        let normalizedArtist = normalizedMetadataText(metadata.artist)
+        let rows = (try? Row.fetchAll(
+            db,
+            sql: """
+                SELECT songs.title, songs.artist, songs.display_name
+                FROM song_plays
+                JOIN songs ON songs.id = song_plays.song_id
+                WHERE song_plays.stream_id = ?
+                  AND songs.is_unknown = 0
+                  AND LOWER(REPLACE(song_plays.source, '-', '_')) IN (
+                      'timed_id3', 'id3', 'scte35', 'scte', 'icy', 'icecast', 'icy_stream'
+                  )
+                  AND song_plays.end_seconds >= ?
+                  AND song_plays.start_seconds <= ?
+                ORDER BY song_plays.end_seconds DESC, song_plays.id DESC
+                LIMIT 8
+                """,
+            arguments: [streamID, pts - toleranceSeconds, pts + toleranceSeconds]
+        )) ?? []
+
+        return rows.contains { row in
+            let rowTitle = normalizedMetadataText((row["title"] as String?) ?? (row["display_name"] as String?))
+            guard rowTitle == normalizedTitle else { return false }
+            let rowArtist = normalizedMetadataText(row["artist"] as String?)
+            return normalizedArtist.isEmpty || rowArtist.isEmpty || normalizedArtist == rowArtist
+        }
+    }
+
+    private func isRepeatedGenericAdMarker(_ marker: AdMarker, streamID: Int64?, db: Database) -> Bool {
+        let duplicateClassifications: Set<MarkerClassification> = [.unknown, .adStart, .adEnd]
+        guard duplicateClassifications.contains(marker.classification),
+              let streamID,
+              isGenericAdMarker(marker)
+        else {
+            return false
+        }
+
+        guard let pts = marker.pts else { return false }
+        let markerTitle = ProgramMetadataExtractor.metadata(from: marker)?.title ?? "AD"
+        let existing = try? Int.fetchOne(
+            db,
+            sql: """
+                SELECT 1
+                FROM ad_events
+                JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
+                WHERE ingest_runs.stream_id = ?
+                  AND ad_events.pts IS NOT NULL
+                  AND ad_events.classification IN (?, ?, ?)
+                  AND ABS(ad_events.pts - ?) <= 90
+                  AND (
+                    lower(json_extract(ad_events.payload_json, '$.Tags.TIT2')) = lower(?)
+                    OR lower(json_extract(ad_events.payload_json, '$.Fields.Title')) = lower(?)
+                    OR lower(json_extract(ad_events.payload_json, '$.Fields.StreamTitle')) = lower(?)
+                    OR lower(ad_events.payload_json) LIKE '%advertisement%'
+                  )
+                LIMIT 1
+                """,
+            arguments: [
+                streamID,
+                MarkerClassification.unknown.rawValue,
+                MarkerClassification.adStart.rawValue,
+                MarkerClassification.adEnd.rawValue,
+                pts,
+                markerTitle,
+                markerTitle,
+                markerTitle
+            ]
+        )
+        return existing != nil
+    }
+
+    private func isGenericAdMarker(_ marker: AdMarker) -> Bool {
+        let metadata = ProgramMetadataExtractor.metadata(from: marker)
+        let metadataValues = [metadata?.title, metadata?.artist, metadata?.album].compactMap { $0 }
+        let joined = (metadataValues + markerTextCandidates(marker)).joined(separator: " ").lowercased()
+        return joined.contains("advertisement")
+            || joined.contains("commercial")
+            || joined.contains("promo")
+            || joined.split { !$0.isLetter && !$0.isNumber }.contains("ad")
+    }
+
+    private func markerTextCandidates(_ marker: AdMarker) -> [String] {
+        var candidates = marker.tags.values.compactMap(nonEmptyString)
+        candidates.append(contentsOf: marker.fields.values.compactMap(nonEmptyString))
+        if case let .array(frames)? = marker.fields["Frames"] {
+            for frame in frames {
+                guard case let .object(frameObject) = frame else { continue }
+                candidates.append(contentsOf: frameObject.values.compactMap(nonEmptyString))
+                if case let .array(texts)? = frameObject["Texts"] {
+                    candidates.append(contentsOf: texts.compactMap(nonEmptyString))
+                }
+            }
+        }
+        return candidates
+    }
+
+    private func nonEmptyString(_ value: JSONValue) -> String? {
+        guard case let .string(raw) = value else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func metadataMatchesSongPlay(_ metadata: ProgramMetadata, _ play: SongPlayDraft) -> Bool {
+        guard normalizedMetadataText(metadata.title) == normalizedMetadataText(play.song.title ?? play.song.displayName)
+        else {
+            return false
+        }
+        let metadataArtist = normalizedMetadataText(metadata.artist)
+        let playArtist = normalizedMetadataText(play.song.artist)
+        return metadataArtist.isEmpty || playArtist.isEmpty || metadataArtist == playArtist
+    }
+
+    private func normalizedMetadataText(_ value: String?) -> String {
+        (value ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
     public func activeTimedMetadataSongPlay(
         streamID: Int64,
         startSeconds: Double,
@@ -464,6 +615,65 @@ public struct IngestPersistence {
             endSeconds: endSeconds,
             toleranceSeconds: toleranceSeconds
         )
+    }
+
+    public func activeAdBreakOverlaps(
+        streamID: Int64,
+        startSeconds: Double,
+        endSeconds: Double
+    ) throws -> Bool {
+        try database.read { db in
+            let boundaryInWindow = try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT 1
+                    FROM ad_events
+                    JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
+                    WHERE ingest_runs.stream_id = ?
+                      AND ad_events.pts IS NOT NULL
+                      AND ad_events.classification IN (?, ?)
+                      AND ad_events.pts >= ?
+                      AND ad_events.pts <= ?
+                    LIMIT 1
+                    """,
+                arguments: [
+                    streamID,
+                    MarkerClassification.adStart.rawValue,
+                    MarkerClassification.adEnd.rawValue,
+                    startSeconds,
+                    endSeconds
+                ]
+            )
+            if boundaryInWindow != nil {
+                return true
+            }
+
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT ad_events.classification
+                    FROM ad_events
+                    JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
+                    WHERE ingest_runs.stream_id = ?
+                      AND ad_events.pts IS NOT NULL
+                      AND ad_events.classification IN (?, ?)
+                      AND ad_events.pts <= ?
+                    ORDER BY ad_events.pts DESC, ad_events.observed_at DESC, ad_events.id DESC
+                    LIMIT 1
+                    """,
+                arguments: [
+                    streamID,
+                    MarkerClassification.adStart.rawValue,
+                    MarkerClassification.adEnd.rawValue,
+                    startSeconds
+                ]
+            ) else {
+                return false
+            }
+
+            let classification: String? = row["classification"]
+            return classification == MarkerClassification.adStart.rawValue
+        }
     }
 
     private func insertSegment(

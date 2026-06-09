@@ -1,9 +1,15 @@
 import Foundation
 
 struct StreamAppTimelineMetadataIndex: Sendable {
+    struct AdWindow: Equatable, Sendable {
+        var id: String
+        var startSeconds: Double
+        var endSeconds: Double
+    }
+
     private let songMetadata: [StreamAppMetadataItem]
     private let confirmedSongMetadata: [StreamAppMetadataItem]
-    private let adBoundaryMetadata: [StreamAppMetadataItem]
+    private let adWindows: [AdWindow]
     private let songBoundaryStarts: [Double]
     private let artistSongMetadata: [StreamAppMetadataItem]
 
@@ -13,7 +19,7 @@ struct StreamAppTimelineMetadataIndex: Sendable {
             .sorted(by: StreamAppTimelineProjection.metadataSort)
         self.songMetadata = songMetadata
         self.confirmedSongMetadata = songMetadata.filter(Self.isConfirmedMusicMetadata)
-        self.adBoundaryMetadata = metadataChanges.filter(Self.isAdBoundaryMetadata)
+        self.adWindows = Self.adWindows(from: metadataChanges)
         self.songBoundaryStarts = songMetadata.map(\.startSeconds).sorted()
         self.artistSongMetadata = songMetadata
             .filter { Self.firstNonEmpty([$0.artist]) != nil }
@@ -44,6 +50,14 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         return index < songBoundaryStarts.count && songBoundaryStarts[index] <= upperBound
     }
 
+    func timelineBoundaries(after lowerBound: Double, before upperBound: Double) -> [Double] {
+        guard lowerBound < upperBound else { return [] }
+        let adBoundarySeconds = adWindows.flatMap { [$0.startSeconds, $0.endSeconds] }
+        return Array(Set(adBoundarySeconds))
+            .filter { $0 > lowerBound && $0 < upperBound }
+            .sorted()
+    }
+
     func artistMetadata(containingMidpoint midpoint: Double) -> StreamAppMetadataItem? {
         artistSongMetadata.first { item in
             let endSeconds = item.endSeconds ?? item.startSeconds + 8
@@ -59,9 +73,12 @@ struct StreamAppTimelineMetadataIndex: Sendable {
     }
 
     func overlapsAdBoundary(startSeconds: Double, endSeconds: Double) -> Bool {
-        adBoundaryMetadata.contains { item in
-            let itemEnd = item.endSeconds ?? item.startSeconds + 60
-            return max(startSeconds, item.startSeconds) < min(endSeconds, itemEnd)
+        adWindow(overlappingStart: startSeconds, endSeconds: endSeconds) != nil
+    }
+
+    func adWindow(overlappingStart startSeconds: Double, endSeconds: Double) -> AdWindow? {
+        adWindows.first { window in
+            max(startSeconds, window.startSeconds) < min(endSeconds, window.endSeconds)
         }
     }
 
@@ -97,6 +114,10 @@ struct StreamAppTimelineMetadataIndex: Sendable {
     }
 
     private static func isAdBoundaryMetadata(_ item: StreamAppMetadataItem) -> Bool {
+        isAdStartMetadata(item) || isAdEndMetadata(item)
+    }
+
+    private static func isAdStartMetadata(_ item: StreamAppMetadataItem) -> Bool {
         let text = [
             item.id,
             item.title,
@@ -106,12 +127,119 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         .joined(separator: " ")
         .lowercased()
         return text.contains("ad break start")
-            || text.contains("ad break end")
             || text.contains(" advertisement ")
             || text.contains("cue-out")
-            || text.contains("cue-in")
             || text.contains("scte35") && (text.contains("duration") || text.contains(" ad"))
             || text.split(separator: " ").contains("ad")
+    }
+
+    private static func isAdEndMetadata(_ item: StreamAppMetadataItem) -> Bool {
+        let text = [
+            item.id,
+            item.title,
+            item.subtitle ?? "",
+            item.source ?? "",
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        return text.contains("ad break end")
+            || text.contains("cue-in")
+    }
+
+    private static func adWindows(from items: [StreamAppMetadataItem]) -> [AdWindow] {
+        let ordered = items.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            return $0.id < $1.id
+        }
+        var windows: [AdWindow] = []
+        var pendingStart: StreamAppMetadataItem?
+        for item in ordered {
+            if isAdStartMetadata(item) {
+                if let start = pendingStart, item.startSeconds > start.startSeconds {
+                    windows.append(AdWindow(id: start.id, startSeconds: start.startSeconds, endSeconds: item.startSeconds))
+                }
+                if let explicitEnd = explicitAdEndSeconds(for: item), explicitEnd > item.startSeconds {
+                    windows.append(AdWindow(id: item.id, startSeconds: item.startSeconds, endSeconds: explicitEnd))
+                    pendingStart = nil
+                } else {
+                    pendingStart = item
+                }
+                continue
+            }
+            if isAdEndMetadata(item), let start = pendingStart {
+                let end = max(item.startSeconds, start.startSeconds)
+                if end > start.startSeconds {
+                    windows.append(AdWindow(id: start.id, startSeconds: start.startSeconds, endSeconds: end))
+                }
+                pendingStart = nil
+                continue
+            }
+            if item.kind == .song, let start = pendingStart, item.startSeconds > start.startSeconds {
+                windows.append(AdWindow(id: start.id, startSeconds: start.startSeconds, endSeconds: item.startSeconds))
+                pendingStart = nil
+            }
+        }
+        if let start = pendingStart {
+            windows.append(AdWindow(id: start.id, startSeconds: start.startSeconds, endSeconds: start.startSeconds + 300))
+        }
+        return coalescedAdWindows(windows)
+    }
+
+    private static func explicitAdEndSeconds(for item: StreamAppMetadataItem) -> Double? {
+        if let end = item.endSeconds, end > item.startSeconds {
+            return end
+        }
+        guard let duration = adDurationSeconds(for: item), duration > 0 else {
+            return nil
+        }
+        return item.startSeconds + duration
+    }
+
+    private static func adDurationSeconds(for item: StreamAppMetadataItem) -> Double? {
+        let text = [
+            item.id,
+            item.title,
+            item.subtitle ?? "",
+            item.source ?? "",
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        let patterns = [
+            #"duration\s+([0-9]+(?:\.[0-9]+)?)\s*s?"#,
+            #"breakduration["':\s]+([0-9]+(?:\.[0-9]+)?)"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                continue
+            }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard let match = regex.firstMatch(in: text, range: range),
+                  match.numberOfRanges > 1,
+                  let valueRange = Range(match.range(at: 1), in: text),
+                  let value = Double(text[valueRange])
+            else {
+                continue
+            }
+            return value
+        }
+        return nil
+    }
+
+    private static func coalescedAdWindows(_ windows: [AdWindow]) -> [AdWindow] {
+        let ordered = windows.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            return $0.id < $1.id
+        }
+        var result: [AdWindow] = []
+        for window in ordered {
+            guard var last = result.last, window.startSeconds < last.endSeconds else {
+                result.append(window)
+                continue
+            }
+            last.endSeconds = max(last.endSeconds, window.endSeconds)
+            result[result.count - 1] = last
+        }
+        return result
     }
 }
 
@@ -149,7 +277,13 @@ public struct StreamAppTimelineProjection: Sendable {
 
     public func timelineItems(limit: Int) -> [StreamAppTimelineItem] {
         let transcriptItems = coalescedTranscriptParagraphs(
-            transcriptParagraphsWithMetadataSpeakers(paragraphs, metadataIndex: metadataIndex),
+            transcriptParagraphsWithMetadataSpeakers(
+                Self.transcriptParagraphsSplitAtTimelineBoundaries(
+                    paragraphs,
+                    metadataIndex: metadataIndex
+                ),
+                metadataIndex: metadataIndex
+            ),
             metadataIndex: metadataIndex
         ).map { paragraph in
             StreamAppTimelineItem(
@@ -177,6 +311,7 @@ public struct StreamAppTimelineProjection: Sendable {
                 subtitle: item.subtitle,
                 source: item.source,
                 speakerDisplay: Self.metadataSpeakerDisplay(for: item),
+                rawMetadata: item.rawMetadata,
                 isSeekable: isSeekable(item.startSeconds)
             )
         }
@@ -260,7 +395,9 @@ public struct StreamAppTimelineProjection: Sendable {
             activeSongIndex = coalesced.count - 1
         }
         return coalescedTitleOnlyMetadataEchoes(
-            coalescedEventDuplicatesAgainstSongs(coalesced)
+            coalescedAdBoundaryDuplicates(
+                coalescedEventDuplicatesAgainstSongs(coalesced)
+            )
         )
     }
 
@@ -282,6 +419,7 @@ public struct StreamAppTimelineProjection: Sendable {
         var result: [StreamAppMetadataItem] = []
         var activeTitleOnlyIndexByKey: [String: Int] = [:]
         var activeArtistBackedTitleKey: String?
+        var activeArtistBackedIndex: Int?
         for item in items {
             guard !isAdBoundaryEvent(item),
                   !metadataTitleKey(item).isEmpty,
@@ -300,6 +438,7 @@ public struct StreamAppTimelineProjection: Sendable {
 
             if isArtistBacked && item.kind == .song {
                 activeArtistBackedTitleKey = titleKey
+                activeArtistBackedIndex = result.count
             }
 
             if !isArtistBacked,
@@ -309,6 +448,15 @@ public struct StreamAppTimelineProjection: Sendable {
                 // We've already shown the artist-backed row for the active
                 // track; suppress repeated title-only echoes until the track
                 // changes.
+                if let activeArtistBackedIndex,
+                   activeArtistBackedIndex < result.count
+                {
+                    result[activeArtistBackedIndex].endSeconds = max(
+                        result[activeArtistBackedIndex].endSeconds ?? result[activeArtistBackedIndex].startSeconds,
+                        (item.endSeconds ?? item.startSeconds) + 8
+                    )
+                    result[activeArtistBackedIndex].endTimestamp = item.endTimestamp ?? result[activeArtistBackedIndex].endTimestamp
+                }
                 continue
             }
 
@@ -374,7 +522,14 @@ public struct StreamAppTimelineProjection: Sendable {
         var result: [StreamAppMetadataItem] = []
         var latestEventIndexByKey: [String: Int] = [:]
         for item in items {
-            if item.kind == .event && shouldSuppressEventDuplicate(item, in: result) {
+            if item.kind == .event,
+               let songIndex = matchingSongDuplicateIndex(item, in: result)
+            {
+                result[songIndex].endSeconds = max(
+                    result[songIndex].endSeconds ?? result[songIndex].startSeconds,
+                    (item.endSeconds ?? item.startSeconds) + 8
+                )
+                result[songIndex].endTimestamp = item.endTimestamp ?? result[songIndex].endTimestamp
                 continue
             }
             if item.kind == .event && !isAdBoundaryEvent(item) {
@@ -396,14 +551,76 @@ public struct StreamAppTimelineProjection: Sendable {
         return result
     }
 
-    private static func shouldSuppressEventDuplicate(
+    private static func coalescedAdBoundaryDuplicates(
+        _ items: [StreamAppMetadataItem]
+    ) -> [StreamAppMetadataItem] {
+        var result: [StreamAppMetadataItem] = []
+        var latestGenericAdIndex: Int?
+        for item in items {
+            guard isGenericAdEvent(item) else {
+                result.append(item)
+                if item.kind == .song || isExplicitAdBoundaryEvent(item) {
+                    latestGenericAdIndex = nil
+                }
+                continue
+            }
+            if let index = latestGenericAdIndex,
+               index < result.count,
+               shouldMergeGenericAdEvent(result[index], item)
+            {
+                result[index].endSeconds = max(
+                    result[index].endSeconds ?? result[index].startSeconds,
+                    item.endSeconds ?? item.startSeconds
+                )
+                result[index].endTimestamp = item.endTimestamp ?? result[index].endTimestamp
+                continue
+            }
+            result.append(item)
+            latestGenericAdIndex = result.count - 1
+        }
+        return result
+    }
+
+    private static func shouldMergeGenericAdEvent(
+        _ existing: StreamAppMetadataItem,
+        _ candidate: StreamAppMetadataItem
+    ) -> Bool {
+        guard isGenericAdEvent(existing), isGenericAdEvent(candidate) else { return false }
+        let existingEnd = existing.endSeconds ?? existing.startSeconds
+        let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
+        return candidate.startSeconds <= existingEnd + 180
+            || candidateEnd <= existingEnd + 180
+    }
+
+    private static func isGenericAdEvent(_ item: StreamAppMetadataItem) -> Bool {
+        guard item.kind == .event else { return false }
+        return normalizedMetadataText(item.title) == "ad"
+            || normalizedMetadataText(item.title) == "advertisement"
+    }
+
+    private static func isExplicitAdBoundaryEvent(_ item: StreamAppMetadataItem) -> Bool {
+        let text = [
+            item.id,
+            item.title,
+            item.subtitle ?? "",
+            item.source ?? "",
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        return text.contains("ad break start")
+            || text.contains("ad break end")
+            || text.contains("cue-out")
+            || text.contains("cue-in")
+    }
+
+    private static func matchingSongDuplicateIndex(
         _ event: StreamAppMetadataItem,
         in items: [StreamAppMetadataItem]
-    ) -> Bool {
+    ) -> Int? {
         guard !isAdBoundaryEvent(event),
               !metadataTitleKey(event).isEmpty
-        else { return false }
-        return items.contains { existing in
+        else { return nil }
+        return items.lastIndex { existing in
             guard existing.kind == .song,
                   metadataTitleKey(existing) == metadataTitleKey(event),
                   metadataArtistsAreCompatible(existing, event)
@@ -495,21 +712,25 @@ public struct StreamAppTimelineProjection: Sendable {
         for artistBackedSong: StreamAppMetadataItem
     ) -> StreamAppMetadataItem {
         var promoted = artistBackedSong
-        coalesced.removeAll { candidate in
-            guard metadataTitleKey(candidate) == metadataTitleKey(artistBackedSong),
+        let titleKey = metadataTitleKey(artistBackedSong)
+        let lowerBoundIndex = coalesced.lastIndex { candidate in
+            candidate.kind == .song
+                && metadataTitleKey(candidate) != titleKey
+                && !isAdBoundaryEvent(candidate)
+        }.map { $0 + 1 } ?? coalesced.startIndex
+        guard lowerBoundIndex < coalesced.endIndex else { return promoted }
+
+        var indexesToRemove: [Int] = []
+        for index in lowerBoundIndex..<coalesced.endIndex {
+            let candidate = coalesced[index]
+            guard metadataTitleKey(candidate) == titleKey,
                   metadataArtistMatchesOrIsMissing(candidate, artistBackedSong),
                   !ProgramMetadataClassifier.looksLikeNonMusic(
                     title: candidate.title,
                     artist: candidate.artist,
                     album: candidate.subtitle
                   )
-            else {
-                return false
-            }
-            let candidateEnd = candidate.endSeconds ?? candidate.startSeconds
-            let nearPromotedSong = candidate.startSeconds <= artistBackedSong.startSeconds + 180
-                && candidateEnd >= artistBackedSong.startSeconds - 180
-            guard nearPromotedSong else { return false }
+            else { continue }
             if candidate.startSeconds < promoted.startSeconds {
                 promoted.startSeconds = candidate.startSeconds
                 promoted.startTimestamp = candidate.startTimestamp ?? promoted.startTimestamp
@@ -519,7 +740,11 @@ public struct StreamAppTimelineProjection: Sendable {
                 candidate.endSeconds ?? candidate.startSeconds
             )
             promoted.endTimestamp = candidate.endTimestamp ?? promoted.endTimestamp
-            return true
+            indexesToRemove.append(index)
+        }
+
+        for index in indexesToRemove.reversed() {
+            coalesced.remove(at: index)
         }
         return promoted
     }
@@ -604,6 +829,54 @@ public struct StreamAppTimelineProjection: Sendable {
                 )
             }
         }
+    }
+
+    private static func transcriptParagraphsSplitAtTimelineBoundaries(
+        _ paragraphs: [StreamAppTranscriptParagraph],
+        metadataIndex: StreamAppTimelineMetadataIndex
+    ) -> [StreamAppTranscriptParagraph] {
+        paragraphs.flatMap { paragraph in
+            splitTranscriptParagraphAtTimelineBoundaries(paragraph, metadataIndex: metadataIndex)
+        }
+    }
+
+    private static func splitTranscriptParagraphAtTimelineBoundaries(
+        _ paragraph: StreamAppTranscriptParagraph,
+        metadataIndex: StreamAppTimelineMetadataIndex
+    ) -> [StreamAppTranscriptParagraph] {
+        let boundaries = metadataIndex.timelineBoundaries(
+            after: paragraph.startSeconds,
+            before: paragraph.endSeconds
+        )
+        guard !boundaries.isEmpty, !paragraph.words.isEmpty else {
+            return [paragraph]
+        }
+
+        let intervals = zip(
+            [paragraph.startSeconds] + boundaries,
+            boundaries + [paragraph.endSeconds]
+        )
+        var result: [StreamAppTranscriptParagraph] = []
+        for (offset, interval) in intervals.enumerated() {
+            let isLastInterval = offset == boundaries.count
+            let words = paragraph.words.filter { word in
+                let midpoint = (word.startSeconds + word.endSeconds) / 2
+                if isLastInterval {
+                    return midpoint >= interval.0 && midpoint <= interval.1
+                }
+                return midpoint >= interval.0 && midpoint < interval.1
+            }
+            guard !words.isEmpty else { continue }
+            var split = paragraph
+            split.id = paragraph.id * 10_000 + Int64(offset)
+            split.sequence = paragraph.sequence * 10_000 + offset
+            split.startSeconds = words.first?.startSeconds ?? interval.0
+            split.endSeconds = words.last?.endSeconds ?? interval.1
+            split.text = words.map(\.text).joined(separator: " ")
+            split.words = words
+            result.append(split)
+        }
+        return result.isEmpty ? [paragraph] : result
     }
 
     private static func preferredMetadataSample(_ items: [StreamAppMetadataItem]) -> StreamAppMetadataItem? {
@@ -709,26 +982,75 @@ public struct StreamAppTimelineProjection: Sendable {
         var result: [StreamAppTimelineItem] = []
         for item in sorted {
             if item.kind == .song,
-                let last = result.last,
-                last.kind == .song,
-                Self.isSameTimelineMetadata(last, item)
+               let index = result.lastIndex(where: { Self.shouldMergeTimelineMetadata($0, item) })
             {
-                result[result.count - 1] = item
-            } else {
-                result.append(item)
+                result[index] = Self.mergedTimelineMetadata(result[index], item)
+                continue
             }
+            result.append(item)
         }
         return result
     }
 
-    private static func isSameTimelineMetadata(
+    private static func shouldMergeTimelineMetadata(
         _ lhs: StreamAppTimelineItem,
         _ rhs: StreamAppTimelineItem
     ) -> Bool {
-        lhs.kind == rhs.kind
-            && lhs.title == rhs.title
-            && lhs.subtitle == rhs.subtitle
-            && lhs.speakerDisplay?.displayLabel == rhs.speakerDisplay?.displayLabel
+        guard lhs.kind == .song,
+              rhs.kind == .song,
+              normalizedMetadataText(lhs.title) == normalizedMetadataText(rhs.title)
+        else {
+            return false
+        }
+        let lhsArtist = normalizedMetadataText(lhs.speakerDisplay?.displayLabel)
+        let rhsArtist = normalizedMetadataText(rhs.speakerDisplay?.displayLabel)
+        if !lhsArtist.isEmpty && !rhsArtist.isEmpty && lhsArtist != rhsArtist {
+            return false
+        }
+        let lhsEnd = lhs.endSeconds ?? lhs.startSeconds
+        let rhsEnd = rhs.endSeconds ?? rhs.startSeconds
+        return rhs.startSeconds <= lhsEnd + 300
+            || rhsEnd <= lhsEnd + 300
+    }
+
+    private static func mergedTimelineMetadata(
+        _ lhs: StreamAppTimelineItem,
+        _ rhs: StreamAppTimelineItem
+    ) -> StreamAppTimelineItem {
+        let preferred = preferredTimelineMetadata(lhs, rhs)
+        let earlier = lhs.startSeconds <= rhs.startSeconds ? lhs : rhs
+        let later = (lhs.endSeconds ?? lhs.startSeconds) >= (rhs.endSeconds ?? rhs.startSeconds) ? lhs : rhs
+        return StreamAppTimelineItem(
+            id: preferred.id,
+            kind: preferred.kind,
+            startSeconds: min(lhs.startSeconds, rhs.startSeconds),
+            endSeconds: max(lhs.endSeconds ?? lhs.startSeconds, rhs.endSeconds ?? rhs.startSeconds),
+            startTimestamp: earlier.startTimestamp ?? preferred.startTimestamp,
+            endTimestamp: later.endTimestamp ?? preferred.endTimestamp,
+            title: preferred.title,
+            subtitle: preferred.subtitle,
+            source: preferred.source,
+            speakerDisplay: preferred.speakerDisplay,
+            rawMetadata: preferred.rawMetadata ?? lhs.rawMetadata ?? rhs.rawMetadata,
+            isSeekable: lhs.isSeekable || rhs.isSeekable
+        )
+    }
+
+    private static func preferredTimelineMetadata(
+        _ lhs: StreamAppTimelineItem,
+        _ rhs: StreamAppTimelineItem
+    ) -> StreamAppTimelineItem {
+        let lhsHasArtist = !(lhs.speakerDisplay?.displayLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let rhsHasArtist = !(rhs.speakerDisplay?.displayLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if lhsHasArtist != rhsHasArtist {
+            return rhsHasArtist ? rhs : lhs
+        }
+        let lhsHasSubtitle = !(lhs.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let rhsHasSubtitle = !(rhs.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if lhsHasSubtitle != rhsHasSubtitle {
+            return rhsHasSubtitle ? rhs : lhs
+        }
+        return rhs
     }
 
     private func coalescedTranscriptParagraphs(
@@ -746,19 +1068,39 @@ public struct StreamAppTimelineProjection: Sendable {
                 continue
             }
             let sameSpeaker = last.speakerDisplay == paragraph.speakerDisplay
+            let sameAdWindow = Self.sameAdWindow(last, paragraph, metadataIndex: metadataIndex)
             let smallGap = paragraph.startSeconds - last.endSeconds <= 12
-            let boundedDuration = paragraph.endSeconds - last.startSeconds <= 60
+            let boundedDuration = paragraph.endSeconds - last.startSeconds <= 30
             let noMetadataBoundary = !metadataIndex.hasSongBoundary(
                 after: last.endSeconds,
                 before: paragraph.startSeconds
             )
-            if sameSpeaker && smallGap && boundedDuration && noMetadataBoundary {
+            if sameAdWindow || (sameSpeaker && smallGap && boundedDuration && noMetadataBoundary) {
                 result[result.count - 1] = Self.mergedTranscriptParagraph(last, paragraph)
             } else {
                 result.append(paragraph)
             }
         }
         return result
+    }
+
+    private static func sameAdWindow(
+        _ lhs: StreamAppTranscriptParagraph,
+        _ rhs: StreamAppTranscriptParagraph,
+        metadataIndex: StreamAppTimelineMetadataIndex
+    ) -> Bool {
+        guard let lhsWindow = metadataIndex.adWindow(
+            overlappingStart: lhs.startSeconds,
+            endSeconds: lhs.endSeconds
+        ),
+            let rhsWindow = metadataIndex.adWindow(
+                overlappingStart: rhs.startSeconds,
+                endSeconds: rhs.endSeconds
+            )
+        else {
+            return false
+        }
+        return lhsWindow == rhsWindow
     }
 
     private func transcriptParagraphsWithMetadataSpeakers(

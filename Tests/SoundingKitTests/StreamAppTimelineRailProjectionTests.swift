@@ -18,11 +18,18 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
 
         XCTAssertEqual(rail.visibleStartSeconds, 0)
         XCTAssertEqual(rail.visibleEndSeconds, 100)
-        XCTAssertEqual(rail.spans.map(\.id), ["song:1"])
+        XCTAssertEqual(rail.spans.map(\.id), ["song:1", "ad:event:scte35:1"])
         XCTAssertEqual(rail.markers.map(\.source), [.timedID3, .scte35])
-        let span = try XCTUnwrap(rail.spans.first)
-        XCTAssertEqual(span.normalizedStart, 0.10, accuracy: 0.001)
-        XCTAssertEqual(span.normalizedEnd, 0.70, accuracy: 0.001)
+        let songSpan = try XCTUnwrap(rail.spans.first)
+        XCTAssertEqual(songSpan.normalizedStart, 0.10, accuracy: 0.001)
+        XCTAssertEqual(songSpan.normalizedEnd, 0.70, accuracy: 0.001)
+        let adSpan = try XCTUnwrap(rail.spans.last)
+        XCTAssertEqual(adSpan.title, "AD")
+        XCTAssertEqual(adSpan.source, .scte35)
+        XCTAssertTrue(adSpan.isAd)
+        XCTAssertEqual(adSpan.colorToken, "ad")
+        XCTAssertEqual(adSpan.normalizedStart, 0.52, accuracy: 0.001)
+        XCTAssertEqual(adSpan.normalizedEnd, 0.55, accuracy: 0.001)
     }
 
     func testClampsRailItemsToVisibleWindow() throws {
@@ -44,6 +51,8 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
             id: "song:1",
             title: "Song",
             subtitle: "Artist",
+            source: nil,
+            isAd: false,
             startSeconds: 10,
             endSeconds: 20,
             normalizedStart: 0.1,
@@ -92,6 +101,122 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         )
 
         XCTAssertEqual(rail.markers.map(\.source), [.scte35, .scte35])
+    }
+
+    func testClassifiesICYMarkersWithDedicatedSource() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline("event:icy:1", kind: .event, start: 10, end: 10, title: "Morgan Wallen - Love Somebody", subtitle: "ICY", source: "icy_stream")
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 30
+        )
+
+        let marker = try XCTUnwrap(rail.markers.first)
+        XCTAssertEqual(marker.source, .icy)
+        XCTAssertEqual(marker.colorToken, "blue")
+    }
+
+    func testID3AdvertisementMarkersUseReservedAdColor() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline("event:id3:ad", kind: .event, start: 10, end: 10, title: "AD", subtitle: "timed_id3", source: "timed_id3")
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 30
+        )
+
+        let marker = try XCTUnwrap(rail.markers.first)
+        XCTAssertEqual(marker.title, "AD")
+        XCTAssertEqual(marker.source, .timedID3)
+        XCTAssertEqual(marker.colorToken, "ad")
+    }
+
+    func testSongRailColorsAvoidReservedAdColorFamily() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline(
+                    "song:red-looking",
+                    kind: .song,
+                    start: 10,
+                    end: 90,
+                    title: "Shake Your Money Maker",
+                    subtitle: "Ludacris",
+                    source: "icy"
+                ),
+                timeline("event:id3:ad", kind: .event, start: 95, end: 95, title: "AD", subtitle: "timed_id3", source: "timed_id3")
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 120
+        )
+
+        let songSpan = try XCTUnwrap(rail.spans.first { !$0.isAd })
+        XCTAssertNotEqual(songSpan.colorToken, "ad")
+        XCTAssertNotEqual(songSpan.colorToken, "pink")
+
+        let adMarker = try XCTUnwrap(rail.markers.first { $0.title == "AD" })
+        XCTAssertEqual(adMarker.colorToken, "ad")
+    }
+
+    func testBuildsAdSpanFromSCTE35DurationEvent() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline(
+                    "event:ad:start",
+                    kind: .event,
+                    start: 100,
+                    end: 100,
+                    title: "Ad break start",
+                    subtitle: "Duration 60.464s",
+                    source: "scte35"
+                ),
+                timeline("song:1", kind: .song, start: 90, end: 190, title: "Hey Ya!", subtitle: "OutKast")
+            ],
+            visibleStartSeconds: 90,
+            visibleEndSeconds: 190
+        )
+
+        let adSpan = try XCTUnwrap(rail.spans.first(where: \.isAd))
+        XCTAssertEqual(adSpan.title, "AD")
+        XCTAssertEqual(adSpan.colorToken, "ad")
+        XCTAssertEqual(adSpan.startSeconds, 100, accuracy: 0.001)
+        XCTAssertEqual(adSpan.endSeconds, 160.464, accuracy: 0.001)
+        XCTAssertEqual(adSpan.source, .scte35)
+    }
+
+    func testRepeatedICYAdStartsBuildSeparateAdSpansUntilNextSong() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            items: [
+                timeline(
+                    "event:icy:ad:start",
+                    kind: .event,
+                    start: 100,
+                    end: 100,
+                    title: "Ad break start",
+                    subtitle: "icy",
+                    source: "icy"
+                ),
+                timeline(
+                    "event:icy:ad:repeat",
+                    kind: .event,
+                    start: 130,
+                    end: 130,
+                    title: "Ad break start",
+                    subtitle: "icy",
+                    source: "icy"
+                ),
+                timeline("song:next", kind: .song, start: 190, end: 260, title: "Next Song", subtitle: "Next Artist")
+            ],
+            visibleStartSeconds: 90,
+            visibleEndSeconds: 260
+        )
+
+        let adSpans = rail.spans.filter(\.isAd)
+        XCTAssertEqual(adSpans.map(\.title), ["AD", "AD"])
+        XCTAssertEqual(adSpans.map(\.colorToken), ["ad", "ad"])
+        XCTAssertEqual(adSpans.map(\.source), [.icy, .icy])
+        XCTAssertEqual(adSpans.map(\.startSeconds), [100, 130])
+        XCTAssertEqual(adSpans.map(\.endSeconds), [130, 190])
     }
 
     func testDoesNotClassifyEmbeddedCueWordsAsSCTE() {
@@ -161,13 +286,33 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertEqual(rail.spans[1].endSeconds, 210, accuracy: 0.001)
     }
 
+    func testBroadcastProjectionSuppressesRepeatedTitleOnlyRowsWhenArtistBackedTrackExists() {
+        let rail = StreamAppTimelineRailProjection.project(
+            metadata: [
+                metadata("event:title:1", kind: .event, title: "The Great Divide", artist: nil, start: 0, end: 0, source: "scte35"),
+                metadata("event:title:2", kind: .event, title: "The Great Divide", artist: nil, start: 8, end: 8, source: "scte35"),
+                metadata("song:artist", kind: .song, title: "The Great Divide", artist: "Noah Kahan", start: 8, end: 32, source: "timed_id3"),
+                metadata("event:title:3", kind: .event, title: "The Great Divide", artist: nil, start: 21, end: 21, source: "scte35"),
+                metadata("event:title:4", kind: .event, title: "The Great Divide", artist: nil, start: 40, end: 40, source: "timed_id3"),
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 60
+        )
+
+        XCTAssertEqual(rail.spans.map(\.title), ["The Great Divide"])
+        XCTAssertEqual(rail.spans.first?.startSeconds, 0)
+        XCTAssertEqual(rail.spans.first?.endSeconds, 40)
+        XCTAssertEqual(rail.markers, [])
+    }
+
     private func timeline(
         _ id: String,
         kind: StreamAppTimelineItemKind,
         start: Double,
         end: Double,
         title: String,
-        subtitle: String?
+        subtitle: String?,
+        source: String? = nil
     ) -> StreamAppTimelineItem {
         StreamAppTimelineItem(
             id: id,
@@ -176,21 +321,23 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
             endSeconds: end,
             title: title,
             subtitle: subtitle,
+            source: source,
             isSeekable: true
         )
     }
 
     private func metadata(
         _ id: String,
+        kind: StreamAppMetadataKind = .song,
         title: String,
-        artist: String,
+        artist: String?,
         start: Double,
         end: Double,
         source: String
     ) -> StreamAppMetadataItem {
         StreamAppMetadataItem(
             id: id,
-            kind: .song,
+            kind: kind,
             startSeconds: start,
             endSeconds: end,
             title: title,

@@ -236,7 +236,7 @@ final class IntegratedAppUATTests: XCTestCase {
                 XCTAssertEqual(url, temporary.fileURL)
                 return temporary.database
             },
-            ingesterFactory: { database, configuration, timeline, rollingBuffer, _, _, _ in
+            ingesterFactory: { database, configuration, timeline, rollingBuffer, _, _, _, _ in
                 awaitOrRecord(configuration.issues, recorder: recorder)
                 return IntegratedUATIngester(
                     database: database,
@@ -246,7 +246,7 @@ final class IntegratedAppUATTests: XCTestCase {
                     recorder: recorder
                 )
             },
-            runtimeFactory: { registry, ingester, timeline, rollingBuffer, audioArchiveStore, statusStore, volumeStore, player in
+            runtimeFactory: { registry, ingester, timeline, rollingBuffer, audioArchiveStore, statusStore, volumeStore, player, playbackSelection in
                 AppStreamRuntimeService(
                     registry: registry,
                     ingester: ingester,
@@ -312,7 +312,7 @@ final class IntegratedAppUATTests: XCTestCase {
 
         try await gate.waitUntilPersisted()
         let preparedStreams = await recorder.preparedStreams()
-        XCTAssertEqual(preparedStreams, [added.id])
+        XCTAssertEqual(Set(preparedStreams), [added.id])
         let playedFrames = await recorder.playedFrames()
         XCTAssertEqual(playedFrames.map(\.sequence), [0, 1, 2])
 

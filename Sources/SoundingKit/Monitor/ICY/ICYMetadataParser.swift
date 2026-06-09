@@ -4,34 +4,36 @@ import Foundation
 ///
 /// The parser has no network dependency. It accepts already-framed metadata bytes,
 /// strips ICY null padding, parses semicolon-delimited key/value fields, and emits
-/// one marker per changed non-empty StreamTitle.
+/// one marker per changed non-empty metadata payload.
 public struct ICYMetadataParser: Sendable {
     public static let requestHeaders = ["Icy-MetaData": "1"]
     public static let defaultMetaInt = 16_000
 
-    private var lastStreamTitle: String?
+    private var lastMetadataSignature: String?
 
     public init() {
-        self.lastStreamTitle = nil
+        self.lastMetadataSignature = nil
     }
 
     public mutating func marker(fromMetadataBlock metadata: Data) -> AdMarker? {
         let fields = Self.parseFields(from: metadata)
-        guard let streamTitle = Self.normalizedStreamTitle(from: fields) else { return nil }
-        guard streamTitle != lastStreamTitle else { return nil }
+        guard let signature = Self.metadataSignature(from: fields) else { return nil }
+        guard signature != lastMetadataSignature else { return nil }
 
-        lastStreamTitle = streamTitle
+        lastMetadataSignature = signature
         return Self.marker(from: fields)
     }
 
     public static func marker(from fields: [String: String]) -> AdMarker? {
-        guard normalizedStreamTitle(from: fields) != nil else { return nil }
+        guard metadataSignature(from: fields) != nil else { return nil }
 
+        var enrichedFields = fields
+        enrichProgramFields(&enrichedFields)
         return AdMarker(
             type: "ICY",
             classification: .unknown,
             source: "icy_stream",
-            fields: fields.reduce(into: [String: JSONValue]()) { result, field in
+            fields: enrichedFields.reduce(into: [String: JSONValue]()) { result, field in
                 result[field.key] = .string(field.value)
             }
         )
@@ -67,6 +69,34 @@ public struct ICYMetadataParser: Sendable {
         guard let rawTitle = fields["StreamTitle"] else { return nil }
         let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         return title.isEmpty ? nil : title
+    }
+
+    private static func metadataSignature(from fields: [String: String]) -> String? {
+        let normalizedPairs = fields.compactMap { key, value -> String? in
+            let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedKey.isEmpty, !normalizedValue.isEmpty else { return nil }
+            return "\(normalizedKey)=\(normalizedValue)"
+        }
+        .sorted()
+
+        guard !normalizedPairs.isEmpty else { return nil }
+        return normalizedPairs.joined(separator: "\u{1f}")
+    }
+
+    private static func enrichProgramFields(_ fields: inout [String: String]) {
+        guard let streamTitle = normalizedStreamTitle(from: fields) else { return }
+        for separator in [" - ", " – ", " — "] {
+            let parts = streamTitle.components(separatedBy: separator)
+            guard parts.count >= 2 else { continue }
+            let artist = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = parts.dropFirst().joined(separator: separator).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !artist.isEmpty, !title.isEmpty else { continue }
+            fields["Artist"] = fields["Artist"] ?? artist
+            fields["Title"] = fields["Title"] ?? title
+            return
+        }
+        fields["Title"] = fields["Title"] ?? streamTitle
     }
 
     private static func splitSemicolonAware(_ value: String) -> [String] {

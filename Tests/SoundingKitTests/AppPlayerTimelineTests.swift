@@ -95,6 +95,68 @@ final class AppPlayerTimelineTests: XCTestCase {
         XCTAssertEqual(rows?["chunk_count"] as Int?, 2)
     }
 
+    func testRuntimeIngestsButDoesNotSchedulePlaybackForNonOwnerStream() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Background HLS",
+            streamType: "hls",
+            source: "https://example.test/background.m3u8"
+        )
+        let decoder = CountingSharedDecoder(chunks: [
+            DecodedAudioChunk(
+                sequence: 0,
+                audio: Data([0x01, 0x02]),
+                audioFormat: .linearPCM(sampleRate: 44_100, channelCount: 1, bitDepth: 16),
+                startSeconds: 0,
+                endSeconds: 1,
+                startedAt: "2026-05-01T00:00:00Z",
+                endedAt: "2026-05-01T00:00:01Z"
+            )
+        ])
+        let player = DeterministicAppPCMPlayerAdapter()
+        let playbackSelection = AppPlaybackStreamSelection(selectedStreamID: stream.id + 100)
+        let runner = StreamIngestAppRuntimeRunner(
+            database: temporary.database,
+            decoder: decoder,
+            transcriber: FixtureTimelineTranscriber(),
+            diarizer: FixtureTimelineDiarizer(),
+            player: player,
+            timeline: AppPlayerTimelineClock(),
+            playbackSelection: playbackSelection,
+            now: { "2026-05-01T00:00:00Z" }
+        )
+
+        let result = try await runner.run(
+            AppStreamRuntimeRequest(
+                streamID: stream.id,
+                name: stream.name,
+                source: "https://example.test/background.m3u8",
+                sourceDescription: stream.sourceDescription,
+                streamType: .hls
+            ))
+
+        let decoderCallCount = await decoder.callCount()
+        let playedFrames = await player.frames()
+
+        XCTAssertEqual(result.processedChunks, 1)
+        XCTAssertEqual(decoderCallCount, 1)
+        XCTAssertTrue(playedFrames.isEmpty)
+        let persistedChunkCount = try temporary.database.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*)
+                    FROM ingest_runs
+                    JOIN ingest_chunks ON ingest_chunks.run_id = ingest_runs.id
+                    WHERE ingest_runs.stream_id = ?
+                    """,
+                arguments: [stream.id]
+            ) ?? 0
+        }
+        XCTAssertEqual(persistedChunkCount, 1)
+    }
+
     func testSinglePathDecoderSurfacesPlaybackFailuresWithoutSecondDecodePath() async throws {
         let decoder = CountingSharedDecoder(chunks: [
             DecodedAudioChunk(
@@ -459,6 +521,12 @@ final class AppPlayerTimelineTests: XCTestCase {
         #if canImport(AVFoundation)
             let volumeStore = AppPlaybackVolumeStore()
             let adapter = AVFoundationAppPCMPlayerAdapter.verificationAdapter(volumeStore: volumeStore)
+            let timeline = AppPlayerTimelineClock()
+            try await adapter.prepare(
+                streamID: 91,
+                sourceDescription: "https://example.test/live.mp3",
+                timeline: timeline
+            )
             await volumeStore.setVolume(streamID: 91, volume: 0.5)
 
             await adapter.applyPlaybackVolume(streamID: 91)
@@ -466,6 +534,26 @@ final class AppPlayerTimelineTests: XCTestCase {
             let nodeVolumes = adapter.nodeVolumeSnapshotForTesting
             XCTAssertEqual(nodeVolumes.player, 1.0, accuracy: 0.001)
             XCTAssertEqual(nodeVolumes.mixer, 0.5, accuracy: 0.001)
+        #endif
+    }
+
+    func testAVFoundationAdapterIgnoresVolumeForNonOwnerStream() async throws {
+        #if canImport(AVFoundation)
+            let volumeStore = AppPlaybackVolumeStore()
+            let adapter = AVFoundationAppPCMPlayerAdapter.verificationAdapter(volumeStore: volumeStore)
+            let timeline = AppPlayerTimelineClock()
+            try await adapter.prepare(
+                streamID: 91,
+                sourceDescription: "https://example.test/live.mp3",
+                timeline: timeline
+            )
+            await volumeStore.setMuted(streamID: 92, isMuted: true)
+
+            await adapter.applyPlaybackVolume(streamID: 92)
+
+            let nodeVolumes = adapter.nodeVolumeSnapshotForTesting
+            XCTAssertEqual(nodeVolumes.player, 1.0, accuracy: 0.001)
+            XCTAssertEqual(nodeVolumes.mixer, 1.0, accuracy: 0.001)
         #endif
     }
 

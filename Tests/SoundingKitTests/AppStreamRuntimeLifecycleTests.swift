@@ -120,7 +120,7 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         await gate.release()
     }
 
-    func testStopPublishesStoppedWhenPlaybackStopDoesNotReturn() async throws {
+    func testStopPublishesStoppedAfterPlaybackStopCompletes() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
         let stream = try registry.add(
@@ -143,7 +143,12 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
 
         try await runtime.start(streamID: stream.id)
         _ = try await nextEvent(matching: { $0.phase == .running }, from: &iterator)
-        await runtime.stop(streamID: stream.id)
+        let stopTask = Task {
+            await runtime.stop(streamID: stream.id)
+        }
+        await stopGate.waitForStopCallCount(1)
+        await stopGate.release()
+        await stopTask.value
 
         let stopped = try await nextEvent(matching: { $0.phase == .stopped }, from: &iterator)
         XCTAssertEqual(stopped.streamID, stream.id)
@@ -154,7 +159,7 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         await ingesterGate.release()
     }
 
-    func testRestartingRunningStreamStartsReplacementWithoutWaitingForPlaybackStop() async throws {
+    func testRestartingRunningStreamClearsPlaybackBeforeReplacement() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
         let stream = try registry.add(
@@ -162,15 +167,15 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
             streamType: "hls",
             source: "https://example.test/live.m3u8"
         )
-        let stopGate = RuntimeStopGate()
         let ingesterGate = RuntimeGate()
         let ingester = RecordingBlockingAppRuntimeIngester(gate: ingesterGate)
+        let player = RecordingRuntimePlaybackAdapter()
         let runtime = AppStreamRuntimeService(
             registry: registry,
             ingester: ingester,
             retryPolicy: .noRetry,
             playbackTimeline: AppPlayerTimelineClock(),
-            playbackController: GatedStopRuntimePlaybackAdapter(gate: stopGate)
+            playbackController: player
         )
 
         try await runtime.start(streamID: stream.id)
@@ -187,11 +192,10 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         let ingesterCallCount = await ingester.callCount()
-        let stopCallCount = await stopGate.callCount()
+        let playbackActions = await player.actions()
         XCTAssertEqual(ingesterCallCount, 2)
-        XCTAssertEqual(stopCallCount, 0)
+        XCTAssertEqual(playbackActions, ["stop"])
 
-        await stopGate.release()
         await runtime.stop(streamID: stream.id)
         await ingesterGate.release()
     }
@@ -221,6 +225,187 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         XCTAssertEqual(actions, [])
         await runtime.stop(streamID: stream.id)
         await gate.release()
+    }
+
+    func testStartingSecondStreamReplacesSharedPlaybackOwner() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let first = try registry.add(
+            name: "First HLS",
+            streamType: "hls",
+            source: "https://example.test/first.m3u8"
+        )
+        let second = try registry.add(
+            name: "Second ICY",
+            streamType: "icy",
+            source: "https://example.test/second.mp3"
+        )
+        let gate = RuntimeGate()
+        let ingester = RecordingBlockingAppRuntimeIngester(gate: gate)
+        let player = RecordingRuntimePlaybackAdapter()
+        let playbackSelection = AppPlaybackStreamSelection()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            playbackTimeline: AppPlayerTimelineClock(),
+            playbackController: player,
+            playbackSelection: playbackSelection
+        )
+
+        try await runtime.start(streamID: first.id)
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let firstInitiallySelected = await playbackSelection.isSelected(streamID: first.id)
+        XCTAssertTrue(firstInitiallySelected)
+
+        try await runtime.start(streamID: second.id)
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 2 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let ingesterCallCount = await ingester.callCount()
+        let playbackActions = await player.actions()
+        let preparedStreams = await player.preparedStreams()
+        let firstStillSelected = await playbackSelection.isSelected(streamID: first.id)
+        let secondSelected = await playbackSelection.isSelected(streamID: second.id)
+        XCTAssertEqual(ingesterCallCount, 2)
+        XCTAssertEqual(preparedStreams, [first.id, second.id])
+        XCTAssertEqual(playbackActions, [])
+        XCTAssertFalse(firstStillSelected)
+        XCTAssertTrue(secondSelected)
+
+        await runtime.stop(streamID: first.id)
+        let actionsAfterStoppingBackgroundStream = await player.actions()
+        XCTAssertEqual(actionsAfterStoppingBackgroundStream, [])
+        await runtime.stop(streamID: second.id)
+        let actionsAfterStoppingPlaybackOwner = await player.actions()
+        XCTAssertEqual(actionsAfterStoppingPlaybackOwner, ["stop"])
+        await gate.release()
+    }
+
+    func testMuteUnmuteSwitchingDoesNotStopSharedPlayback() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let first = try registry.add(
+            name: "First ICY",
+            streamType: "icy",
+            source: "https://example.test/first.mp3"
+        )
+        let second = try registry.add(
+            name: "Second ICY",
+            streamType: "icy",
+            source: "https://example.test/second.mp3"
+        )
+        let gate = RuntimeGate()
+        let ingester = RecordingBlockingAppRuntimeIngester(gate: gate)
+        let player = RecordingRuntimePlaybackAdapter()
+        let playbackSelection = AppPlaybackStreamSelection()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 120,
+                hotMemoryDurationSeconds: 120,
+                maximumSpillBytes: 0
+            )
+        )
+        await rollingBuffer.start(streamID: first.id)
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            playbackTimeline: AppPlayerTimelineClock(),
+            rollingBuffer: rollingBuffer,
+            playbackController: player,
+            playbackSelection: playbackSelection
+        )
+
+        try await runtime.start(streamID: first.id)
+        try await runtime.start(streamID: second.id)
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 2 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let secondInitiallySelected = await playbackSelection.isSelected(streamID: second.id)
+        XCTAssertTrue(secondInitiallySelected)
+
+        await runtime.setMuted(streamID: second.id, isMuted: true)
+        let secondSelectedAfterMute = await playbackSelection.isSelected(streamID: second.id)
+        XCTAssertFalse(secondSelectedAfterMute)
+
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: first.id,
+                sequence: 9,
+                audio: Data([0x09]),
+                startSeconds: 90,
+                endSeconds: 96
+            )
+        ])
+        await runtime.setMuted(streamID: first.id, isMuted: false)
+        let firstSelectedAfterUnmute = await playbackSelection.isSelected(streamID: first.id)
+        XCTAssertTrue(firstSelectedAfterUnmute)
+
+        let playbackActions = await player.actions()
+        XCTAssertEqual(playbackActions, ["replace:9"])
+        await gate.release()
+    }
+
+    func testStartingSecondStreamSelectsNewPlaybackOwnerBeforePreviousStopCompletes() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let first = try registry.add(
+            name: "First HLS",
+            streamType: "hls",
+            source: "https://example.test/first.m3u8"
+        )
+        let second = try registry.add(
+            name: "Second ICY",
+            streamType: "icy",
+            source: "https://example.test/second.mp3"
+        )
+        let ingesterGate = RuntimeGate()
+        let ingester = RecordingBlockingAppRuntimeIngester(gate: ingesterGate)
+        let stopGate = RuntimeStopGate()
+        let playbackSelection = AppPlaybackStreamSelection()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            playbackTimeline: AppPlayerTimelineClock(),
+            playbackController: GatedStopRuntimePlaybackAdapter(gate: stopGate),
+            playbackSelection: playbackSelection
+        )
+
+        try await runtime.start(streamID: first.id)
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let firstInitiallySelected = await playbackSelection.isSelected(streamID: first.id)
+        XCTAssertTrue(firstInitiallySelected)
+
+        try await runtime.start(streamID: second.id)
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 2 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let firstSelectedAfterReplacement = await playbackSelection.isSelected(streamID: first.id)
+        let secondSelectedAfterReplacement = await playbackSelection.isSelected(streamID: second.id)
+        let previousOwnerStopCount = await stopGate.callCount()
+        XCTAssertFalse(firstSelectedAfterReplacement)
+        XCTAssertTrue(secondSelectedAfterReplacement)
+        XCTAssertEqual(previousOwnerStopCount, 0)
+        let ingesterCallCount = await ingester.callCount()
+        XCTAssertEqual(ingesterCallCount, 2)
+
+        await stopGate.release()
+        await runtime.stop(streamID: first.id)
+        await runtime.stop(streamID: second.id)
+        await ingesterGate.release()
     }
 
     func testReconnectsAfterRedactedRuntimeFailure() async throws {
@@ -614,6 +799,47 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         _ = try await nextEvent(matching: { $0.streamID == sibling.id && $0.phase == .running }, from: &iterator)
         let siblingSnapshot = await runtime.snapshot(streamID: sibling.id)
         XCTAssertEqual(siblingSnapshot?.phase, AppStreamRuntimePhase.running)
+
+        await gate.release()
+    }
+
+    func testWakeRecoveryUsesPersistedRunningStatusWhenSleepCaptureIsMissing() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Persisted HLS",
+            streamType: "hls",
+            source: "https://example.test/persisted.m3u8"
+        )
+        let statusStore = AppStreamRuntimeStatusStore(database: temporary.database)
+        try statusStore.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .running,
+                updatedAt: "2026-05-01T10:00:00Z"
+            )
+        )
+        let gate = RuntimeGate()
+        let ingester = LifecycleRecordingIngester(gate: gate)
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            statusStore: statusStore,
+            now: { Date(timeIntervalSince1970: 1_767_225_600) }
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        await runtime.recoverFromSystemWake(reason: "wake after missed sleep notification")
+
+        let recovering = try await nextEvent(matching: { $0.streamID == stream.id && $0.phase == .recovering }, from: &iterator)
+        XCTAssertEqual(recovering.lifecycleEvidence?.recoveryLatencySeconds, 0)
+        _ = try await nextEvent(matching: { $0.streamID == stream.id && $0.phase == .connecting }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.streamID == stream.id && $0.phase == .running }, from: &iterator)
+        let requestStreamIDs = await ingester.requestStreamIDs()
+        XCTAssertEqual(try statusStore.status(streamID: stream.id)?.phase, .running)
+        XCTAssertEqual(requestStreamIDs, [stream.id])
 
         await gate.release()
     }

@@ -7,6 +7,8 @@ final class ProgramMetadataTests: XCTestCase {
         XCTAssertEqual(ProgramMetadataSource(raw: "hls_timed_id3"), .timedID3)
         XCTAssertEqual(ProgramMetadataSource(raw: "SCTE-35"), .scte35)
         XCTAssertEqual(ProgramMetadataSource(raw: "SCTE35"), .scte35)
+        XCTAssertEqual(ProgramMetadataSource(raw: "ICY"), .icy)
+        XCTAssertEqual(ProgramMetadataSource(raw: "icy_stream"), .icy)
     }
 
     func testDoesNotTreatGenericTimedStringsAsID3() {
@@ -58,6 +60,27 @@ final class ProgramMetadataTests: XCTestCase {
         )
     }
 
+    func testClassifiesBreakBumpersAsNonMusic() {
+        let titles = [
+            "Will be right back",
+            "Station break",
+            "Commercial break",
+            "Back soon",
+        ]
+
+        let classifications = titles.map { title in
+            ProgramMetadataClassifier.classify(
+                title: title,
+                artist: nil,
+                album: nil,
+                source: .icy,
+                isUnknown: false
+            )
+        }
+
+        XCTAssertEqual(classifications, Array(repeating: .nonMusic, count: titles.count))
+    }
+
     func testExtractsCanonicalTimedID3Metadata() throws {
         let marker = AdMarker(
             type: "ID3",
@@ -82,11 +105,26 @@ final class ProgramMetadataTests: XCTestCase {
         )
     }
 
-    func testExtractorIgnoresNonTimedMarkers() {
+    func testExtractorExtractsIcyStreamTitleMetadata() throws {
         let marker = AdMarker(
             type: "ICY",
             classification: .unknown,
             source: "icy",
+            fields: ["StreamTitle": .string("Teddy Swims - Bad Dreams")]
+        )
+
+        let metadata = try XCTUnwrap(ProgramMetadataExtractor.metadata(from: marker))
+        XCTAssertEqual(metadata.title, "Bad Dreams")
+        XCTAssertEqual(metadata.artist, "Teddy Swims")
+        XCTAssertEqual(metadata.source, .icy)
+        XCTAssertEqual(metadata.classification, .music)
+    }
+
+    func testExtractorIgnoresNonTimedMarkers() {
+        let marker = AdMarker(
+            type: "OTHER",
+            classification: .unknown,
+            source: "runtime_status",
             fields: ["Title": "Bad Dreams", "Artist": "Teddy Swims"]
         )
 

@@ -33,7 +33,7 @@ struct SongPlayStore {
                     WHERE song_plays.stream_id = ?
                       AND songs.is_unknown = 0
                       AND LOWER(REPLACE(song_plays.source, '-', '_')) IN (
-                          'timed_id3', 'id3', 'scte35', 'scte'
+                          'timed_id3', 'id3', 'scte35', 'scte', 'icy', 'icecast', 'icy_stream'
                       )
                       AND song_plays.end_seconds >= ?
                       AND song_plays.start_seconds <= ?
@@ -215,6 +215,16 @@ struct SongPlayStore {
     ) throws {
         let normalizedSource = ProgramMetadataSource(raw: play.source).rawValue
         let adjacencyToleranceSeconds = 15.0
+        if play.song.artist?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            try promoteTitleOnlyTimedMetadataPlays(
+                toSongID: songID,
+                play: play,
+                streamID: streamID,
+                timeline: timeline,
+                toleranceSeconds: adjacencyToleranceSeconds,
+                db: db
+            )
+        }
         if let adjacentPlayID = try Int64.fetchOne(
             db,
             sql: """
@@ -223,7 +233,7 @@ struct SongPlayStore {
                 WHERE song_plays.stream_id = ?
                   AND song_plays.song_id = ?
                   AND LOWER(REPLACE(song_plays.source, '-', '_')) IN (
-                      'timed_id3', 'id3', 'scte35', 'scte'
+                      'timed_id3', 'id3', 'scte35', 'scte', 'icy', 'icecast', 'icy_stream'
                   )
                   AND song_plays.end_seconds >= ?
                   AND song_plays.start_seconds <= ?
@@ -267,6 +277,56 @@ struct SongPlayStore {
             streamID: streamID,
             timeline: timeline,
             db: db
+        )
+    }
+
+    private func promoteTitleOnlyTimedMetadataPlays(
+        toSongID songID: Int64,
+        play: SongPlayDraft,
+        streamID: Int64,
+        timeline: IngestChunkTimeline,
+        toleranceSeconds: Double,
+        db: Database
+    ) throws {
+        guard let title = play.song.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty
+        else {
+            return
+        }
+        try db.execute(
+            sql: """
+                UPDATE song_plays
+                SET song_id = ?,
+                    last_chunk_id = ?,
+                    end_seconds = MAX(end_seconds, ?),
+                    confidence = COALESCE(?, confidence),
+                    source = ?,
+                    updated_at = ?
+                WHERE stream_id = ?
+                  AND LOWER(REPLACE(source, '-', '_')) IN (
+                      'timed_id3', 'id3', 'scte35', 'scte', 'icy', 'icecast', 'icy_stream'
+                  )
+                  AND end_seconds >= ?
+                  AND start_seconds <= ?
+                  AND song_id IN (
+                      SELECT id
+                      FROM songs
+                      WHERE LOWER(TRIM(COALESCE(title, display_name))) = LOWER(TRIM(?))
+                        AND TRIM(COALESCE(artist, '')) = ''
+                  )
+                """,
+            arguments: [
+                songID,
+                timeline.chunkID,
+                play.endSeconds,
+                play.confidence,
+                ProgramMetadataSource(raw: play.source).rawValue,
+                timeline.createdAt,
+                streamID,
+                play.startSeconds - toleranceSeconds,
+                play.endSeconds + toleranceSeconds,
+                title,
+            ]
         )
     }
 

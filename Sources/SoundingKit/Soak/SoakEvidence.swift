@@ -584,11 +584,11 @@ enum SoakEvidenceSanitizer {
     ]
 
     static func redact(_ value: String) -> String {
-        scrubSecretKeyNames(scrubStorageArtifacts(IngestRedaction.redact(value)))
+        scrubStorageArtifacts(IngestRedaction.diagnostic(value))
     }
 
     static func sourceDescription(_ value: String) -> String {
-        scrubSecretKeyNames(scrubStorageArtifacts(IngestRedaction.sourceDescription(value)))
+        scrubStorageArtifacts(IngestRedaction.diagnosticSourceDescription(value))
     }
 
     static func nonNegative(_ value: Double) -> Double {
@@ -604,13 +604,6 @@ enum SoakEvidenceSanitizer {
         )
     }
 
-    private static func scrubSecretKeyNames(_ value: String) -> String {
-        value.replacingOccurrences(
-            of: #"(?i)\b(?:token|access_token|api[_-]?key|secret|password|passwd|pwd|key)=\[redacted\]"#,
-            with: "[redacted-secret]",
-            options: .regularExpression
-        )
-    }
 }
 
 private extension SoakEvidenceRedactionAudit {

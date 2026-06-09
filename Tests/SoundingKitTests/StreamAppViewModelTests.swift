@@ -312,6 +312,70 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedStream?.playerStateTitle, "Buffering")
     }
 
+    func testActivePlayerTimelineKeepsControlsActiveWhenRuntimeStatusIsStaleStopped() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        var viewModel = StreamAppViewModel()
+        viewModel.addDraft = StreamAppAddDraft(
+            name: "Fixture HLS",
+            source: "https://example.test/live.m3u8",
+            transport: .hls
+        )
+        let item = try viewModel.addStream(using: registry)
+
+        viewModel.applyRuntimeEvent(
+            AppStreamRuntimeEvent(
+                streamID: item.id,
+                kind: .playerTelemetry,
+                phase: .stopped,
+                message: "Playback is active.",
+                result: AppStreamRuntimeResult(
+                    streamID: item.id,
+                    playerTimeline: AppPlayerTimelineSnapshot(
+                        streamID: item.id,
+                        state: .playing,
+                        positionSeconds: 12,
+                        liveEdgeSeconds: 30,
+                        bufferedStartSeconds: 0,
+                        bufferedEndSeconds: 30,
+                        rollingBuffer: RollingBufferSnapshot(
+                            streamID: item.id,
+                            bufferedRange: RollingBufferRange(startSeconds: 0, endSeconds: 30),
+                            liveEdgeSeconds: 30,
+                            frameCount: 3,
+                            lastMessage: "Buffered playback."
+                        ),
+                        lastMessage: "Playback is active."
+                    )
+                )
+            )
+        )
+        viewModel.applyRuntimeStatus(
+            AppStreamRuntimeStatusSnapshot(
+                streamID: item.id,
+                name: item.name,
+                streamType: "hls",
+                sourceDescription: item.sourceDescription,
+                phase: .stopped,
+                attempt: 0,
+                maxAttempts: 0,
+                nextRetrySeconds: nil,
+                nextRetryAt: nil,
+                updatedAt: "2026-05-01T20:00:00Z",
+                recentFailure: nil
+            )
+        )
+
+        let selected = try XCTUnwrap(viewModel.selectedStream)
+        XCTAssertEqual(selected.item.status, .stopped)
+        XCTAssertEqual(selected.playerStateTitle, "Playing")
+        XCTAssertEqual(selected.canStartRuntime, false)
+        XCTAssertEqual(selected.canPauseRuntime, true)
+        XCTAssertEqual(selected.canStopRuntime, true)
+        XCTAssertEqual(selected.canSeekToLive, true)
+        XCTAssertEqual(selected.bufferedRangeTitle, "Buffered 0–30s (live 30s, drift 0s)")
+    }
+
     func testPlayerControlDraftsClampAndPruneOnReload() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

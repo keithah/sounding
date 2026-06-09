@@ -499,6 +499,28 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
         if let timeline {
             playerStateTitle = timeline.state.title
             playerStateDetail = timeline.unavailableRangeMessage ?? timeline.lastMessage
+            switch timeline.state {
+            case .buffering, .playing:
+                controlsEnabled = true
+                canStartRuntime = false
+                canPauseRuntime = true
+                canResumeRuntime = false
+                canStopRuntime = true
+            case .paused:
+                controlsEnabled = true
+                canStartRuntime = false
+                canPauseRuntime = false
+                canResumeRuntime = true
+                canStopRuntime = true
+            case .failed:
+                controlsEnabled = true
+                canStartRuntime = true
+                canPauseRuntime = false
+                canResumeRuntime = false
+                canStopRuntime = true
+            case .idle, .stopped:
+                break
+            }
             if let range = timeline.rollingBuffer?.bufferedRange {
                 bufferedRangeTitle = String(
                     format: "Buffered %.0f–%.0fs (live %.0fs, drift %.0fs)",
@@ -512,7 +534,7 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
                     1,
                     max(0, (timeline.positionSeconds - range.startSeconds) / span)
                 )
-                canSeekToLive = projectedItem.status == .running || projectedItem.status == .paused
+                canSeekToLive = Self.canSeekToLive(timeline.state)
                 canScrubBufferedRange = range.durationSeconds > 0 && controlsEnabled
             } else {
                 bufferedRangeTitle = "Rolling buffer warming up"
@@ -563,6 +585,15 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
         self.transcriptScrollTargetID = transcriptScrollTargetSegmentID.map { "transcript:\($0)" }
         self.searchErrorMessage = searchErrorMessage.map(IngestRedaction.redact)
         self.searchJumpMessage = searchJumpMessage.map(IngestRedaction.redact)
+    }
+
+    private static func canSeekToLive(_ state: AppPlayerState) -> Bool {
+        switch state {
+        case .buffering, .playing, .paused:
+            return true
+        case .idle, .stopped, .failed:
+            return false
+        }
     }
 
     static func status(from runtimeStatus: AppStreamRuntimeStatusSnapshot)

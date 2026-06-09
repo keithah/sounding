@@ -92,7 +92,7 @@ final class HLSManifestMarkerTests: XCTestCase {
         XCTAssertEqual(HLSManifestParser.parseMediaSegments(negative).map(\.mediaSequence), ["0"])
     }
 
-    func testDirectCueTagsEmitUnknownManifestMarkersWithDirectFields() throws {
+    func testDirectCueTagsEmitClassifiedManifestMarkersWithDisplayFields() throws {
         let manifest = """
         #EXTM3U
         #EXT-X-MEDIA-SEQUENCE:7
@@ -108,13 +108,16 @@ final class HLSManifestMarkerTests: XCTestCase {
 
         XCTAssertEqual(markers.count, 2)
         XCTAssertTrue(markers.allSatisfy { $0.type == "SCTE35" })
-        XCTAssertTrue(markers.allSatisfy { $0.classification == .unknown })
+        XCTAssertEqual(markers.map(\.classification), [.adStart, .adEnd])
         XCTAssertTrue(markers.allSatisfy { $0.source == "hls_manifest" })
         XCTAssertTrue(markers.allSatisfy { $0.rawBase64 == nil })
         XCTAssertEqual(markers[0].fields["cue"], .string("out"))
+        XCTAssertEqual(markers[0].fields["Title"], .string("Ad break start"))
+        XCTAssertEqual(markers[0].fields["Series"], .string("Duration 30.0s"))
         XCTAssertEqual(markers[0].fields["DURATION"], .string("30.0"))
         XCTAssertEqual(markers[0].fields["ID"], .string("break-7"))
         XCTAssertEqual(markers[1].fields["cue"], .string("in"))
+        XCTAssertEqual(markers[1].fields["Title"], .string("Ad break end"))
         XCTAssertEqual(markers[0].tags["SegmentURI"], .string("segment7.ts"))
         XCTAssertEqual(markers[0].segment, "7")
     }

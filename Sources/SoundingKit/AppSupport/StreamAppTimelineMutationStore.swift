@@ -87,13 +87,6 @@ struct StreamAppTimelineMutationStore: Sendable {
                     arguments: [streamID],
                     db: db
                 )
-                deletedCount += try deleteCounted(
-                    table: "hls_ingest_segments",
-                    whereClause: "stream_id = ?",
-                    arguments: [streamID],
-                    db: db
-                )
-
                 return deletedCount
             }
         } catch let error as StreamAppTimelineStoreError {

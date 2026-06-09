@@ -69,6 +69,8 @@ final class SCTE35MarkerMappingTests: XCTestCase {
         XCTAssertEqual(marker.fields["CommandName"], "TIME_SIGNAL")
         XCTAssertEqual(marker.fields["SegmentationEventID"], "0x01020304")
         XCTAssertEqual(marker.fields["SegmentationTypeID"], "0x34")
+        XCTAssertEqual(marker.fields["SegmentationTypeName"], "Provider placement opportunity start")
+        XCTAssertEqual(marker.fields["Title"], "Provider placement opportunity start")
         XCTAssertEqual(marker.fields["SegmentationUPIDType"], "0x0c")
         XCTAssertEqual(marker.fields["SegmentationUPID"], "asset-42")
         XCTAssertEqual(marker.fields["SegmentationDuration"], "30.000")
@@ -87,6 +89,7 @@ final class SCTE35MarkerMappingTests: XCTestCase {
             "SegmentationUPIDType": "0x0c",
             "SegmentationUPID": "asset-42",
             "SegmentationTypeID": "0x34",
+            "SegmentationTypeName": "Provider placement opportunity start",
             "SegmentNumber": 1,
             "SegmentsExpected": 2
         ])

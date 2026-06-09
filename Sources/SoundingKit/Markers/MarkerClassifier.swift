@@ -17,6 +17,20 @@ public struct MarkerClassifier: Sendable {
         }
 
         if marker.type.caseInsensitiveCompare("ICY") == .orderedSame {
+            let fields = marker.fields
+            let adTextCandidates = Self.icyAdTextCandidates(from: marker)
+            if adTextCandidates.contains(where: Self.containsEndKeyword) {
+                icyAdIsActive = false
+                return markerWithClassification(marker, .adEnd)
+            }
+            if Self.icyFieldsContainAdSignal(fields) || adTextCandidates.contains(where: Self.containsStartWord) {
+                if icyAdIsActive {
+                    return markerWithClassification(marker, .unknown)
+                }
+                icyAdIsActive = true
+                return markerWithClassification(marker, .adStart)
+            }
+
             guard let streamTitle = streamTitle(from: marker) else {
                 return markerWithClassification(marker, .unknown)
             }
@@ -37,7 +51,7 @@ public struct MarkerClassifier: Sendable {
 
     private mutating func classifyICYTitle(_ title: String) -> MarkerClassification {
         let normalizedTitle = title.lowercased()
-        let isAdTitle = Self.startsWithAdWord(normalizedTitle)
+        let isAdTitle = Self.looksLikeICYAdTitle(normalizedTitle)
         let isExplicitEnd = Self.containsEndKeyword(normalizedTitle)
 
         if icyAdIsActive {
@@ -226,6 +240,30 @@ public struct MarkerClassifier: Sendable {
         return candidates
     }
 
+    private static func icyAdTextCandidates(from marker: AdMarker) -> [String] {
+        marker.fields.flatMap { key, value -> [String] in
+            var candidates = [key]
+            if let text = nonEmptyString(from: value) {
+                candidates.append(text)
+            }
+            return candidates
+        }
+    }
+
+    private static func icyFieldsContainAdSignal(_ fields: [String: JSONValue]) -> Bool {
+        fields.contains { key, value in
+            let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if normalizedKey == "TIAD" {
+                return nonEmptyString(from: value) != nil
+            }
+            if normalizedKey.contains("AD") {
+                return true
+            }
+            guard let text = nonEmptyString(from: value)?.lowercased() else { return false }
+            return text.contains("advertisement") || text.contains("ad break")
+        }
+    }
+
     private static func classifyTextCandidates(_ candidates: [String]) -> MarkerClassification {
         if candidates.contains(where: containsEndKeyword) {
             return .adEnd
@@ -238,11 +276,21 @@ public struct MarkerClassifier: Sendable {
 
     private static func containsEndKeyword(_ text: String) -> Bool {
         let normalized = text.lowercased()
-        return normalized.contains("ad_end") || normalized.contains("content_start")
+        let compacted = normalized.filter(\.isLetter)
+        return normalized.contains("ad_end")
+            || normalized.contains("ad end")
+            || normalized.contains("content_start")
+            || normalized.contains("content start")
+            || compacted.contains("adend")
+            || compacted.contains("tiadend")
     }
 
     private static func containsStartWord(_ text: String) -> Bool {
         let normalized = text.lowercased()
+        let compacted = normalized.filter(\.isLetter)
+        if compacted.contains("adstart") || compacted.contains("tiadstart") {
+            return true
+        }
         return ["ad", "advertisement", "spot", "promo", "commercial"].contains { word in
             containsWord(word, in: normalized)
         }
@@ -271,6 +319,24 @@ public struct MarkerClassifier: Sendable {
             searchRange = range.upperBound..<text.endIndex
         }
         return false
+    }
+
+    private static func looksLikeICYAdTitle(_ title: String) -> Bool {
+        if startsWithAdWord(title) {
+            return true
+        }
+        let normalized = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let phraseHints = [
+            "ad break",
+            "commercial break",
+            "sponsor break",
+            "will be right back",
+            "we'll be right back",
+            "we will be right back",
+            "be right back",
+            "back soon"
+        ]
+        return phraseHints.contains { normalized.contains($0) }
     }
 
     private static func isBoundary(before index: String.Index, in text: String) -> Bool {

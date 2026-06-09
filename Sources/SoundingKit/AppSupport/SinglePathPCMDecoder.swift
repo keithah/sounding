@@ -33,6 +33,7 @@ public struct SinglePathPCMDecoder: AudioDecoding {
     private let timeline: AppPlayerTimelineClock
     private let rollingBuffer: RollingPCMBuffer?
     private let hlsPlaybackDeduplicator: HLSPlaybackDeduplicator?
+    private let playbackSelection: AppPlaybackStreamSelection?
 
     public init(
         streamID: Int64,
@@ -40,6 +41,7 @@ public struct SinglePathPCMDecoder: AudioDecoding {
         player: any AppPCMPlaybackAdapting,
         timeline: AppPlayerTimelineClock,
         rollingBuffer: RollingPCMBuffer? = nil,
+        playbackSelection: AppPlaybackStreamSelection? = nil,
         database: SoundingDatabase? = nil
     ) {
         self.streamID = streamID
@@ -47,6 +49,7 @@ public struct SinglePathPCMDecoder: AudioDecoding {
         self.player = player
         self.timeline = timeline
         self.rollingBuffer = rollingBuffer
+        self.playbackSelection = playbackSelection
         self.hlsPlaybackDeduplicator = database.map {
             HLSPlaybackDeduplicator(streamID: streamID, database: $0)
         }
@@ -56,9 +59,15 @@ public struct SinglePathPCMDecoder: AudioDecoding {
         let chunks = try await upstream.decodedChunks(for: request)
         let frames = chunks.map { SharedPCMFrame(streamID: streamID, chunk: $0) }
         let framePartition = SinglePathPCMFramePartition(frames: frames)
+        let streamOwnsPlayback = await shouldDrivePlayback()
         if let rollingBuffer {
-            let snapshot = await rollingBuffer.append(framePartition.linearPCMFrames)
-            await timeline.updateRollingBuffer(snapshot)
+            _ = await rollingBuffer.append(framePartition.linearPCMFrames)
+            if streamOwnsPlayback {
+                await timeline.updateRollingBuffer(await rollingBuffer.snapshot(streamID: streamID))
+            }
+        }
+        guard streamOwnsPlayback else {
+            return chunks
         }
         let playableFrames = await playableFrames(fromLinearPCMFrames: framePartition.linearPCMFrames)
 
@@ -73,6 +82,15 @@ public struct SinglePathPCMDecoder: AudioDecoding {
             return chunks
         }
 
+        // Re-check playback ownership immediately before scheduling. A chunk
+        // decode can take several seconds (live HTTP read), during which the
+        // user may have switched to a different stream. Without this guard,
+        // the now-deselected stream's play() call races with the runtime's
+        // playerNode.stop() for the new owner and hangs the audio engine.
+        guard await shouldDrivePlayback() else {
+            return chunks
+        }
+
         do {
             try await player.play(playableFrames, timeline: timeline)
         } catch {
@@ -83,6 +101,11 @@ public struct SinglePathPCMDecoder: AudioDecoding {
             throw AppPlayerAdapterError.decodeFailed(failureMessage)
         }
         return chunks
+    }
+
+    private func shouldDrivePlayback() async -> Bool {
+        guard let playbackSelection else { return true }
+        return await playbackSelection.isSelected(streamID: streamID)
     }
 
     private func playableFrames(fromLinearPCMFrames linearPCMFrames: [SharedPCMFrame]) async -> [SharedPCMFrame] {

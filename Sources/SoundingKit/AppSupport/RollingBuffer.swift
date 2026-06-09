@@ -209,6 +209,9 @@ public actor RollingPCMBuffer {
         } else {
             lastMessage = "Rolling buffer stored \(retainedFrameCount) frame(s); \(entries.count) retained."
         }
+        if let streamID = frames.first?.streamID {
+            return snapshot(streamID: streamID)
+        }
         return snapshot()
     }
 
@@ -237,6 +240,32 @@ public actor RollingPCMBuffer {
         }
     }
 
+    public func seek(to seconds: Double, streamID: Int64) -> RollingBufferSeekResult {
+        guard let range = bufferedRange(streamID: streamID), range.contains(seconds) else {
+            lastMessage = "Requested rewind position is outside the rolling buffer for stream \(streamID)."
+            return .unavailable(requestedSeconds: seconds, bufferedRange: bufferedRange(streamID: streamID))
+        }
+        let matchingIndices = entries.indices.filter { entries[$0].frame.streamID == streamID }
+        let frameIndex = matchingIndices.first { index in
+            let frame = entries[index].frame
+            let isLastFrame = index == matchingIndices.last
+            return seconds >= frame.startSeconds && (seconds < frame.endSeconds || (isLastFrame && seconds <= frame.endSeconds))
+        } ?? matchingIndices.first(where: { entries[$0].frame.startSeconds >= seconds })
+        guard let index = frameIndex else {
+            lastMessage = "Requested rewind position is not retained for stream \(streamID)."
+            return .unavailable(requestedSeconds: seconds, bufferedRange: range)
+        }
+
+        do {
+            let frame = try materialize(entries[index])
+            lastMessage = "Seeked stream \(streamID) rolling buffer to \(seconds) second(s)."
+            return .available(frame)
+        } catch {
+            lastMessage = "Rolling buffer spill segment unavailable during seek: \(error)."
+            return .unavailable(requestedSeconds: seconds, bufferedRange: range)
+        }
+    }
+
     public func seekToLive() -> RollingBufferSeekResult {
         guard let latest = entries.last else {
             return .unavailable(requestedSeconds: 0, bufferedRange: nil)
@@ -248,6 +277,20 @@ public actor RollingPCMBuffer {
         } catch {
             lastMessage = "Rolling buffer live edge unavailable: \(error)."
             return .unavailable(requestedSeconds: latest.frame.endSeconds, bufferedRange: bufferedRange())
+        }
+    }
+
+    public func seekToLive(streamID: Int64) -> RollingBufferSeekResult {
+        guard let latest = entries.last(where: { $0.frame.streamID == streamID }) else {
+            return .unavailable(requestedSeconds: 0, bufferedRange: bufferedRange(streamID: streamID))
+        }
+        do {
+            let frame = try materialize(latest)
+            lastMessage = "Returned stream \(streamID) playback to live edge."
+            return .available(frame)
+        } catch {
+            lastMessage = "Rolling buffer live edge unavailable: \(error)."
+            return .unavailable(requestedSeconds: latest.frame.endSeconds, bufferedRange: bufferedRange(streamID: streamID))
         }
     }
 
@@ -289,6 +332,31 @@ public actor RollingPCMBuffer {
             memoryFrameCount: memoryCount,
             spillFrameCount: spillCount,
             spillBytes: spillBytes,
+            spillAvailable: spillAvailable,
+            memoryOnlyFallback: memoryOnlyFallback,
+            evictionCount: evictionCount,
+            cleanupCount: cleanupCount,
+            lastMessage: lastMessage
+        )
+    }
+
+    public func snapshot(streamID: Int64) -> RollingBufferSnapshot {
+        let streamEntries = entries.filter { $0.frame.streamID == streamID }
+        let memoryCount = streamEntries.filter { !$0.isSpilled }.count
+        let spillCount = streamEntries.count - memoryCount
+        let streamSpillBytes = streamEntries.reduce(into: 0) { total, entry in
+            if case .spill(_, let bytes) = entry.storage {
+                total += bytes
+            }
+        }
+        return RollingBufferSnapshot(
+            streamID: streamEntries.last?.frame.streamID,
+            bufferedRange: bufferedRange(streamID: streamID),
+            liveEdgeSeconds: streamEntries.last?.frame.endSeconds ?? 0,
+            frameCount: streamEntries.count,
+            memoryFrameCount: memoryCount,
+            spillFrameCount: spillCount,
+            spillBytes: streamSpillBytes,
             spillAvailable: spillAvailable,
             memoryOnlyFallback: memoryOnlyFallback,
             evictionCount: evictionCount,
@@ -364,6 +432,19 @@ public actor RollingPCMBuffer {
     private func bufferedRange() -> RollingBufferRange? {
         guard let first = entries.first, let last = entries.last else { return nil }
         return RollingBufferRange(startSeconds: first.frame.startSeconds, endSeconds: last.frame.endSeconds)
+    }
+
+    private func bufferedRange(streamID: Int64) -> RollingBufferRange? {
+        var firstFrame: SharedPCMFrame?
+        var lastFrame: SharedPCMFrame?
+        for entry in entries where entry.frame.streamID == streamID {
+            if firstFrame == nil {
+                firstFrame = entry.frame
+            }
+            lastFrame = entry.frame
+        }
+        guard let firstFrame, let lastFrame else { return nil }
+        return RollingBufferRange(startSeconds: firstFrame.startSeconds, endSeconds: lastFrame.endSeconds)
     }
 
     private func materialize(_ entry: RollingBufferEntry) throws -> SharedPCMFrame {

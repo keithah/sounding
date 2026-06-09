@@ -61,6 +61,48 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(counts, ["segments": 1, "song_plays": 1])
     }
 
+    func testOversizedTranscriptSegmentIsSplitBeforePersistence() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let longText = (0..<80).map { "word\($0)" }.joined(separator: " ")
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeSongTranscriber(segmentsBySequence: [
+                0: [
+                    TranscriptSegmentDraft(
+                        sequence: 0,
+                        speakerLabel: "host",
+                        startSeconds: 0,
+                        endSeconds: 95,
+                        text: longText,
+                        confidence: 0.9,
+                        words: []
+                    )
+                ]
+            ]),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live.mp3", streamType: .icecast, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let rows = try temporary.database.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT sequence, start_seconds, end_seconds, text FROM transcript_segments ORDER BY sequence"
+            )
+        }
+
+        XCTAssertEqual(rows.count, 4)
+        for row in rows {
+            let start = row["start_seconds"] as Double
+            let end = row["end_seconds"] as Double
+            XCTAssertLessThanOrEqual(end - start, 30)
+            XCTAssertFalse((row["text"] as String).isEmpty)
+        }
+    }
+
     func testTimedID3SongMarkerSkipsTranscription() async throws {
         let temporary = try TemporarySoundingDatabase()
         let invocations = TranscriberInvocations()
@@ -101,7 +143,185 @@ final class StreamIngestPipelineSongTests: XCTestCase {
                 "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
             ]
         }
-        XCTAssertEqual(counts, ["segments": 0, "events": 1])
+        XCTAssertEqual(counts, ["segments": 0, "events": 0])
+    }
+
+    func testICYArtistTitleMarkerSkipsTranscription() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ICY",
+                            classification: .unknown,
+                            source: "icy_stream",
+                            pts: 0,
+                            fields: [
+                                "StreamTitle": .string("Teddy Swims - Bad Dreams"),
+                                "Artist": .string("Teddy Swims"),
+                                "Title": .string("Bad Dreams"),
+                            ]
+                        )
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live.mp3", streamType: .icecast, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 0)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 0, "events": 0, "song_plays": 1])
+    }
+
+    func testICYAdMarkerCapturesTranscription() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ICY",
+                            classification: .unknown,
+                            source: "icy_stream",
+                            pts: 0,
+                            fields: [
+                                "StreamTitle": .string("AD: Local dealership weekend event"),
+                                "Title": .string("AD: Local dealership weekend event"),
+                            ]
+                        )
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live.mp3", streamType: .icecast, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 1, "events": 1, "song_plays": 0])
+    }
+
+    func testAdCueOverridesKnownSongSuppressionForTranscription() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: 0,
+                            tags: [
+                                "TIT2": .string("Bad Dreams"),
+                                "TPE1": .string("Teddy Swims"),
+                                "TALB": .string("ID3"),
+                            ]
+                        ),
+                        AdMarker(
+                            type: "SCTE35",
+                            classification: .adStart,
+                            source: "hls_segment",
+                            pts: 1,
+                            breakDuration: 60
+                        ),
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 1, "events": 1, "song_plays": 1])
+    }
+
+    func testActiveAdBreakContinuesTranscribingAcrossSongIdentifiedChunks() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "SCTE35",
+                            classification: .adStart,
+                            source: "hls_segment",
+                            pts: 0,
+                            breakDuration: 60
+                        )
+                    ]
+                ),
+                Self.chunk(sequence: 1),
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: StubFingerprinter(outputs: [
+                1: Self.knownSongFingerprintOutput(start: 2, end: 4)
+            ])
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 2)
+
+        XCTAssertEqual(result.processedChunks, 2)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 2)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 2, "events": 1, "song_plays": 1])
     }
 
     func testAlwaysTranscriptionPolicyCapturesIdentifiedSongAudio() async throws {
@@ -219,6 +439,45 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(counts, ["segments": 1, "events": 1, "song_plays": 0])
     }
 
+    func testTimedID3AdvertisementFrameTranscribesInNonSongPolicy() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [
+                Self.chunk(
+                    sequence: 0,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: 0,
+                            tags: ["TXXX:ADVERTISEMENT": .string("ADVERTISEMENT")]
+                        )
+                    ]
+                )
+            ]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+            ]
+        }
+        XCTAssertEqual(counts, ["segments": 1, "events": 1, "song_plays": 0])
+    }
+
     func testTimedID3SongMarkerPersistsOnChunkTimelineAndCreatesSongPlay() async throws {
         let temporary = try TemporarySoundingDatabase()
         let invocations = TranscriberInvocations()
@@ -263,7 +522,7 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(invocationCount, 0)
         let rows = try temporary.database.read { db in
             try (
-                eventPTS: Double.fetchOne(db, sql: "SELECT pts FROM ad_events"),
+                eventCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
                 segmentCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
                 songPlayCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
                 songPlay: Row.fetchOne(
@@ -276,7 +535,7 @@ final class StreamIngestPipelineSongTests: XCTestCase {
                         """)
             )
         }
-        XCTAssertEqual(rows.eventPTS, 9_000)
+        XCTAssertEqual(rows.eventCount, 0)
         XCTAssertEqual(rows.segmentCount, 0)
         XCTAssertEqual(rows.songPlayCount, 1)
         XCTAssertEqual(rows.songPlay?["title"] as String?, "Bad Dreams")

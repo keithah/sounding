@@ -297,7 +297,7 @@ final class DistributionScriptSmokeTests: XCTestCase {
         XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "dmg" && $0.status == "failed" } })
         XCTAssertTrue(example.examples.contains { $0.output.checks.contains { $0.phase == "redaction" && $0.status == "redactionFailure" } })
 
-        XCTAssertTrue(readmeText.contains("[`Docs/shipping.md`](Docs/shipping.md)"))
+        XCTAssertTrue(readmeText.contains("[Docs/shipping.md](Docs/shipping.md)"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: runbookURL.path), "README shipping link must match tracked Docs path capitalization.")
         XCTAssertTrue(FileManager.default.fileExists(atPath: exampleURL.path), "README/example references must resolve to tracked Docs path capitalization.")
         XCTAssertTrue(runbookText.contains("swift run sounding app-verify fixture"))
@@ -313,17 +313,16 @@ final class DistributionScriptSmokeTests: XCTestCase {
         XCTAssertTrue(runbookText.contains("redactionFailure"))
 
         let readmeShippingSection = readmeText
-            .components(separatedBy: "## Distribution and shipping")
+            .components(separatedBy: "## Release Process")
             .dropFirst()
-            .joined(separator: "## Distribution and shipping")
-            .components(separatedBy: "## Database health and recovery")
+            .joined(separator: "## Release Process")
+            .components(separatedBy: "\n## ")
             .first ?? ""
 
-        XCTAssertTrue(readmeShippingSection.contains("swift run sounding app-verify fixture"))
-        XCTAssertTrue(readmeShippingSection.contains("swift run sounding app-verify live"))
-        XCTAssertTrue(readmeShippingSection.contains("--app-verify-fixture-evidence"))
-        XCTAssertTrue(readmeShippingSection.contains("--app-verify-live-evidence"))
-        XCTAssertTrue(readmeShippingSection.contains("appVerify"))
+        XCTAssertTrue(readmeShippingSection.contains("GitHub Releases"))
+        XCTAssertTrue(readmeShippingSection.contains("signed and notarized DMGs"))
+        XCTAssertTrue(readmeShippingSection.contains("appcast.xml"))
+        XCTAssertTrue(readmeShippingSection.contains("Docs/shipping.md"))
 
         assertTrackedDistributionDocsAreSanitized(runbookText + "\n" + readmeShippingSection + "\n" + exampleText)
     }

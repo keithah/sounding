@@ -315,7 +315,12 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         }
         guard state != nil || clearsPendingStart else { return }
         state?.task?.cancel()
+        let stoppedToken = state?.token
         let streamOwnsPlayback = currentStreamID == streamID
+        if streamOwnsPlayback {
+            currentStreamID = nil
+            await playbackSelection?.clear(ifStreamID: streamID)
+        }
         if stopsPlayback, streamOwnsPlayback, let playbackController, let playbackTimeline {
             await stopPlaybackForRuntimeStop(
                 playbackController,
@@ -323,19 +328,29 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                 streamID: streamID
             )
         }
-        if currentStreamID == streamID {
-            currentStreamID = nil
-            await playbackSelection?.clear(ifStreamID: streamID)
-        }
-        publish(
-            AppStreamRuntimeEvent(
+        // After the await above, a concurrent start() may have taken over and
+        // installed a new run for this streamID (actor reentrancy). Don't
+        // overwrite that state: only clear ownership and publish "Stopped" if
+        // no replacement run has been created.
+        let supersededByNewRun = streamRuns[streamID] != nil && streamRuns[streamID]?.token != stoppedToken
+        if !supersededByNewRun {
+            publish(
+                AppStreamRuntimeEvent(
+                    streamID: streamID,
+                    phase: .stopped,
+                    message: "Stopped stream \(streamID)."
+                ),
+                attempt: latestAttempt(streamID: streamID)
+            )
+            persistStoppedStatus(streamID: streamID)
+        } else {
+            diagnosticsLog.recordEvent(
+                "runtime.stop.superseded",
                 streamID: streamID,
-                phase: .stopped,
-                message: "Stopped stream \(streamID)."
-            ),
-            attempt: latestAttempt(streamID: streamID)
-        )
-        persistStoppedStatus(streamID: streamID)
+                phase: "runtime.stop",
+                fields: ["reason": "new run took over during stop"]
+            )
+        }
     }
 
     public func stopAll() async {
@@ -468,26 +483,51 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     private func replacePlaybackOwner(with streamID: Int64, phase: String) async {
         if currentStreamID == streamID {
             await playbackSelection?.select(streamID: streamID)
+            await preparePlaybackOwner(streamID: streamID, phase: phase)
             return
         }
-        if let previousStreamID = currentStreamID,
-            let playbackController,
-            let playbackTimeline
-        {
+        let previousStreamID = currentStreamID
+        currentStreamID = streamID
+        await playbackSelection?.select(streamID: streamID)
+        if let previousStreamID {
             diagnosticsLog.recordEvent(
                 "runtime.playback.owner.replaced",
                 streamID: streamID,
                 phase: phase,
                 fields: ["previousStreamID": String(previousStreamID)]
             )
-            await stopPlaybackForRuntimeStop(
-                playbackController,
-                timeline: playbackTimeline,
-                streamID: previousStreamID
+        }
+        await preparePlaybackOwner(streamID: streamID, phase: phase)
+    }
+
+    private func preparePlaybackOwner(streamID: Int64, phase: String) async {
+        guard let playbackController, let playbackTimeline else { return }
+        guard let reconnect = try? registry.reconnectSource(id: streamID) else { return }
+        do {
+            try await playbackController.prepare(
+                streamID: streamID,
+                sourceDescription: reconnect.sourceDescription,
+                timeline: playbackTimeline
+            )
+            diagnosticsLog.recordEvent(
+                "runtime.playback.owner.prepared",
+                streamID: streamID,
+                streamName: reconnect.name,
+                source: reconnect.source,
+                sourceDescription: reconnect.sourceDescription,
+                phase: phase
+            )
+        } catch {
+            diagnosticsLog.recordFailure(
+                streamID: streamID,
+                name: reconnect.name,
+                source: reconnect.source,
+                sourceDescription: reconnect.sourceDescription,
+                phase: phase,
+                error: error,
+                event: "runtime.playback.owner.prepare_failed"
             )
         }
-        currentStreamID = streamID
-        await playbackSelection?.select(streamID: streamID)
     }
 
     private func recoverStreamAfterWake(
@@ -548,9 +588,18 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     public func setMuted(streamID: Int64, isMuted: Bool) async {
         // Mute-as-switch UX: only one stream is audible at a time. Unmuting a stream
         // that isn't the current playback owner makes it the owner and mutes the
-        // siblings. Muting just lowers the volume snapshot for the affected stream.
+        // siblings. Muting the current owner releases playback ownership so the
+        // selected decoders stop scheduling new buffers. A real Stop command owns
+        // queue flushing; mute must not block on AVAudioPlayerNode.stop().
         if !isMuted {
+            await playbackCommands.setMuted(streamID: streamID, isMuted: false)
             await replacePlaybackOwner(with: streamID, phase: "runtime.setMuted.unmute")
+            let replayedLiveBuffer = await playbackCommands.seekToLive(streamID: streamID)
+            diagnosticsLog.recordEvent(
+                replayedLiveBuffer ? "runtime.setMuted.unmute.live_buffer_replayed" : "runtime.setMuted.unmute.live_buffer_unavailable",
+                streamID: streamID,
+                phase: "runtime.setMuted.unmute"
+            )
             let siblings = streamRuns.keys.filter { $0 != streamID }.sorted()
             for siblingID in siblings {
                 await playbackCommands.setMuted(streamID: siblingID, isMuted: true)
@@ -568,8 +617,19 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
                     )
                 }
             }
+        } else {
+            await playbackCommands.setMuted(streamID: streamID, isMuted: true)
+            if currentStreamID == streamID {
+                diagnosticsLog.recordEvent(
+                    "runtime.playback.owner.released",
+                    streamID: streamID,
+                    phase: "runtime.setMuted.mute",
+                    fields: ["stopsPlayback": "false"]
+                )
+                currentStreamID = nil
+                await playbackSelection?.clear(ifStreamID: streamID)
+            }
         }
-        await playbackCommands.setMuted(streamID: streamID, isMuted: isMuted)
         if let existing = latestEvents[streamID] {
             publish(
                 AppStreamRuntimeEvent(
@@ -696,10 +756,11 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         attempt: Int,
         nextRetrySeconds: Int? = nil,
         failureMessage: String? = nil
-    ) {
+    ) async {
         guard streamRuns[streamID]?.token == token else { return }
+        let eventToPublish = await eventWithCurrentPlayerTimelineForLifecycleIfNeeded(event)
         publish(
-            event,
+            eventToPublish,
             attempt: attempt,
             nextRetrySeconds: nextRetrySeconds,
             failureMessage: failureMessage
@@ -719,7 +780,8 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             currentStreamID = nil
             await playbackSelection?.clear(ifStreamID: streamID)
         }
-        publish(event, attempt: attempt, failureMessage: failureMessage)
+        let eventToPublish = await eventWithCurrentPlayerTimelineForLifecycleIfNeeded(event)
+        publish(eventToPublish, attempt: attempt, failureMessage: failureMessage)
     }
 
     private func publishPlayerTimelineEvent(
@@ -740,6 +802,14 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             ),
             attempt: latestAttempt(streamID: streamID)
         )
+    }
+
+    private func eventWithCurrentPlayerTimelineForLifecycleIfNeeded(
+        _ event: AppStreamRuntimeEvent
+    ) async -> AppStreamRuntimeEvent {
+        guard event.result?.playerTimeline == nil else { return event }
+        guard event.phase.statusPhase != .running else { return event }
+        return await eventWithCurrentPlayerTimeline(event)
     }
 
     private func persistStatus(
