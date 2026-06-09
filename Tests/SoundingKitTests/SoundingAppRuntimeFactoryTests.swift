@@ -40,11 +40,11 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
         )
         let recorder = RuntimeFactoryRecorder()
         let factory = SoundingAppRuntimeFactory(
-            ingesterFactory: { _, configuration, _, _, _, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             },
-            runtimeFactory: { registry, ingester, timeline, rollingBuffer, audioArchiveStore, _, volumeStore, player in
+            runtimeFactory: { registry, ingester, timeline, rollingBuffer, audioArchiveStore, _, volumeStore, player, playbackSelection in
                 recorder.recordRuntimeConstructed()
                 return AppStreamRuntimeService(
                     registry: registry,
@@ -101,9 +101,10 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
             )
         )
         let factory = SoundingAppRuntimeFactory(
-            ingesterFactory: { _, _, _, _, _, _, _ in
+            ingesterFactory: { _, _, _, _, _, _, _, _ in
                 RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: stream.id))
-            }
+            },
+            runtimeStatusResetPolicy: { true }
         )
 
         let state = factory.makeStartupState(
@@ -121,6 +122,79 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
         XCTAssertNil(snapshot.nextRetryAt)
     }
 
+    func testRuntimeFactorySkipsTransientStatusResetWhenAnotherAppProcessOwnsRuntime() throws {
+        let directory = try makeRuntimeFactoryTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent("Sounding.sqlite")
+        let database = try SoundingDatabase(fileURL: databaseURL)
+        let registry = StreamRegistry(database: database)
+        let stream = try registry.add(
+            name: "Existing runtime",
+            streamType: "hls",
+            source: "https://example.test/existing.m3u8"
+        )
+        let statusStore = AppStreamRuntimeStatusStore(database: database)
+        try statusStore.upsert(
+            AppStreamRuntimeStatusUpdate(
+                streamID: stream.id,
+                phase: .running,
+                attempt: 2,
+                maxAttempts: 3,
+                nextRetrySeconds: 5,
+                nextRetryAt: "2026-05-01T10:00:06Z",
+                updatedAt: "2026-05-01T10:00:01Z"
+            )
+        )
+        let factory = SoundingAppRuntimeFactory(
+            ingesterFactory: { _, _, _, _, _, _, _, _ in
+                RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: stream.id))
+            },
+            runtimeStatusResetPolicy: { false }
+        )
+
+        let state = factory.makeStartupState(
+            preferences: SoundingAppPreferences(
+                databaseURL: databaseURL,
+                acoustIDKeyStatus: .present
+            )
+        )
+
+        XCTAssertNotNil(state.runtime)
+        let snapshot = try XCTUnwrap(try statusStore.status(streamID: stream.id))
+        XCTAssertEqual(snapshot.phase, .running)
+        XCTAssertEqual(snapshot.attempt, 2)
+        XCTAssertEqual(snapshot.nextRetrySeconds, 5)
+        XCTAssertEqual(snapshot.nextRetryAt, "2026-05-01T10:00:06Z")
+    }
+
+    func testTransientStatusResetPolicyDetectsSiblingSoundingAppProcess() {
+        let listing = """
+          100 /Users/keith/src/sounding/.build/xcode-debug/Build/Products/Debug/Sounding.app/Contents/MacOS/Sounding
+          200 /Users/keith/Library/Developer/Xcode/DerivedData/Sounding/Build/Products/Debug/Sounding.app/Contents/MacOS/Sounding
+          300 /Users/keith/src/sounding/.build/debug/sounding streams status
+        """
+
+        XCTAssertFalse(
+            SoundingAppRuntimeFactory.shouldResetTransientStatusesOnStartup(
+                processList: listing,
+                currentProcessID: 100
+            )
+        )
+        XCTAssertFalse(
+            SoundingAppRuntimeFactory.shouldResetTransientStatusesOnStartup(
+                processList: listing,
+                currentProcessID: 200
+            )
+        )
+        XCTAssertTrue(
+            SoundingAppRuntimeFactory.shouldResetTransientStatusesOnStartup(
+                processList:
+                    "100 /Users/keith/src/sounding/.build/xcode-debug/Build/Products/Debug/Sounding.app/Contents/MacOS/Sounding",
+                currentProcessID: 100
+            )
+        )
+    }
+
     func testRuntimeFactoryDatabaseOpenFailureShortCircuitsBeforeIngesterAndRedactsIssue() throws {
         let directory = try makeRuntimeFactoryTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -134,7 +208,7 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
                     message: "open failed at \(rawPath) for https://user:pass@example.test/db?token=secret#frag"
                 )
             },
-            ingesterFactory: { _, configuration, _, _, _, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             }
@@ -167,7 +241,7 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
                 recorder.recordDatabaseOpen()
                 return try SoundingDatabase(fileURL: url)
             },
-            ingesterFactory: { _, configuration, _, _, _, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             }
@@ -198,7 +272,7 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let rawPath = directory.appendingPathComponent("cache/private-model").path
         let factory = SoundingAppRuntimeFactory(
-            ingesterFactory: { _, _, _, _, _, _, _ in
+            ingesterFactory: { _, _, _, _, _, _, _, _ in
                 throw ModelCacheError.setupFailed(
                     provider: "whisperkit",
                     model: "tiny",
@@ -231,7 +305,7 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let recorder = RuntimeFactoryRecorder()
         let factory = SoundingAppRuntimeFactory(
-            ingesterFactory: { _, configuration, _, _, _, _, _ in
+            ingesterFactory: { _, configuration, _, _, _, _, _, _ in
                 recorder.recordIngesterConfiguration(configuration)
                 return RecordingAppRuntimeIngester(result: AppStreamRuntimeResult(streamID: 1))
             }

@@ -290,6 +290,49 @@ final class AppVerifyEvidenceTests: XCTestCase {
         XCTAssertEqual(evidence.summary.failedRequiredCheckCount, 1)
     }
 
+    func testLiveEvidenceSourceDescriptionsDoNotExposeAuthorizedStreamURLs() throws {
+        let source = "https://user:pass/private.example.test/live/channel/master.m3u8?token=synthetic-secret#frag"
+        let facts = AppVerifyLiveStreamFacts(
+            streamID: "live-main",
+            streamType: .hls,
+            resolvedStreamType: .hls,
+            source: source,
+            timeoutSeconds: 20,
+            maxChunks: 2,
+            required: true,
+            transcriptExpectation: .warn,
+            metadataExpectation: .warn,
+            processedChunks: 1,
+            decodedChunks: 1,
+            scheduledBuffers: 1,
+            fields: ["registeredSourceDescription": source]
+        )
+        let check = AppVerifyCheckEvaluator.liveTranscriptExpectation(
+            observedCount: 0,
+            expectation: .warn,
+            required: true,
+            streamID: "live-main",
+            source: source,
+            facts: facts
+        )
+        let evidence = AppVerifyEvidence(
+            generatedAt: "2026-05-02T18:00:00Z",
+            runID: "live-run-1",
+            checks: [check]
+        )
+
+        let json = try XCTUnwrap(String(data: try evidence.jsonData(), encoding: .utf8))
+        XCTAssertTrue(json.contains("[redacted-https-source]"), json)
+        XCTAssertFalse(json.contains("private.example.test"), json)
+        XCTAssertFalse(json.contains("master.m3u8"), json)
+        XCTAssertFalse(json.contains("user:pass"), json)
+        XCTAssertFalse(json.contains("synthetic-secret"), json)
+        XCTAssertFalse(json.contains("?token"), json)
+        XCTAssertEqual(check.liveFacts?.redactedSource, "[redacted-https-source]")
+        XCTAssertEqual(check.liveFacts?.fields["registeredSourceDescription"], "[redacted-https-source]")
+        XCTAssertTrue(check.reason?.contains("[redacted-https-source]") == true, check.reason ?? "")
+    }
+
     func testFixtureWAVCreationProducesRuntimeGeneratedPCMFixture() async throws {
         let runDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("AppVerifyEvidenceTests-\(UUID().uuidString)", isDirectory: true)

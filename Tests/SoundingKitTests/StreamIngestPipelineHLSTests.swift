@@ -347,4 +347,17 @@ final class StreamIngestPipelineHLSTests: StreamIngestPipelineTestCase {
             ]
         )
     }
+
+    func testIngestDiagnosticRedactionRemovesSecretAssignmentKeyNames() {
+        let text = IngestRedaction.diagnostic(
+            #"segment=segment-0.ts?token=uat-secret secret=hidden api_key=hidden password=hidden"#
+        )
+
+        XCTAssertTrue(text.contains("[redacted-secret]"), text)
+        Self.assertNoForbiddenLiterals(
+            in: text,
+            forbidden: [
+                "token=", "secret=", "api_key=", "password=", "uat-secret", "hidden",
+            ])
+    }
 }

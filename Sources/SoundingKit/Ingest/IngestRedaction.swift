@@ -17,6 +17,11 @@ public enum IngestRedaction {
         return safe
     }
 
+    /// Redacts diagnostic text that may be copied, exported, or printed as raw evidence.
+    public static func diagnostic(_ value: String) -> String {
+        scrubSecretKeyNames(in: redact(value))
+    }
+
     /// Redacts a structured source/URI value while preserving safe network host/path identity.
     public static func sourceDescription(_ source: String) -> String {
         guard var components = URLComponents(string: source), let scheme = components.scheme else {
@@ -43,6 +48,11 @@ public enum IngestRedaction {
         }
 
         return components.string ?? "[redacted-source]"
+    }
+
+    /// Redacts a source value for diagnostic surfaces that must not expose secret key names.
+    public static func diagnosticSourceDescription(_ source: String) -> String {
+        scrubSecretKeyNames(in: sourceDescription(source))
     }
 
     /// Redacts only string leaves in diagnostic context while preserving structure and numbers.
@@ -94,6 +104,25 @@ public enum IngestRedaction {
             with: "$1=[redacted]",
             options: .regularExpression
         )
+    }
+
+    private static func scrubSecretKeyNames(in value: String) -> String {
+        var safe = value.replacingOccurrences(
+            of: #"(?i)\b(?:token|access_token|api[_-]?key|secret|password|passwd|pwd|key)=\[redacted\]"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
+        safe = safe.replacingOccurrences(
+            of: #"(?i)\[redacted-secret\]=\[redacted\]"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
+        safe = safe.replacingOccurrences(
+            of: #"\[redacted-\[redacted-secret\]\]"#,
+            with: "[redacted-secret]",
+            options: .regularExpression
+        )
+        return safe
     }
 
     private static func redactKnownSecretTokens(in value: String) -> String {

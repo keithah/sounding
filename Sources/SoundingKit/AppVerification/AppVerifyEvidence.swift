@@ -287,7 +287,7 @@ public struct AppVerifyLiveStreamFacts: Codable, Equatable, Sendable {
         self.streamID = AppVerifyEvidenceSanitizer.redact(streamID)
         self.streamType = streamType
         self.resolvedStreamType = resolvedStreamType
-        self.redactedSource = AppVerifyEvidenceSanitizer.sourceDescription(source)
+        self.redactedSource = AppVerifyEvidenceSanitizer.liveEvidenceSourceDescription(source)
         self.timeoutSeconds = timeoutSeconds.isFinite ? max(0, timeoutSeconds) : 0
         self.maxChunks = max(0, maxChunks)
         self.required = required
@@ -315,6 +315,9 @@ public struct AppVerifyLiveStreamFacts: Codable, Equatable, Sendable {
     }
 
     private static func redactedFieldValue(_ value: String, key: String) -> String {
+        if isSourceLikeKey(key) {
+            return AppVerifyEvidenceSanitizer.liveEvidenceSourceDescription(value)
+        }
         if isPathLikeKey(key) {
             return AppVerifyEvidenceSanitizer.artifactPath(value)
         }
@@ -324,6 +327,10 @@ public struct AppVerifyLiveStreamFacts: Codable, Equatable, Sendable {
     private static func isPathLikeKey(_ key: String) -> Bool {
         key.range(of: "path", options: [.caseInsensitive]) != nil
             || key.range(of: "directory", options: [.caseInsensitive]) != nil
+    }
+
+    private static func isSourceLikeKey(_ key: String) -> Bool {
+        key.range(of: "source", options: [.caseInsensitive]) != nil
     }
 }
 
@@ -755,7 +762,7 @@ public enum AppVerifyCheckEvaluator {
         facts: AppVerifyLiveStreamFacts?
     ) -> AppVerifyCheckRecord {
         let redactedID = AppVerifyEvidenceSanitizer.redact(streamID)
-        let redactedSource = AppVerifyEvidenceSanitizer.sourceDescription(source)
+        let redactedSource = AppVerifyEvidenceSanitizer.liveEvidenceSourceDescription(source)
         let observed = max(0, observedCount)
         guard expectation != .disabled else {
             return .pass(
@@ -813,11 +820,46 @@ public enum AppVerifyCheckEvaluator {
 
 enum AppVerifyEvidenceSanitizer {
     static func redact(_ value: String) -> String {
-        scrubSecretKeyNames(IngestRedaction.redact(value))
+        IngestRedaction.diagnostic(value)
+            .replacingOccurrences(
+                of: #"https://[^\s",}\]]+"#,
+                with: "[redacted-https-source]",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"http://[^\s",}\]]+"#,
+                with: "[redacted-http-source]",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"udp://[^\s",}\]]+"#,
+                with: "[redacted-udp-source]",
+                options: .regularExpression
+            )
     }
 
     static func sourceDescription(_ value: String) -> String {
-        scrubSecretKeyNames(IngestRedaction.sourceDescription(value))
+        IngestRedaction.diagnosticSourceDescription(value)
+    }
+
+    static func liveEvidenceSourceDescription(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "[redacted-source]" }
+        if let schemeRange = trimmed.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*(?=://)"#, options: .regularExpression) {
+            let scheme = String(trimmed[schemeRange]).lowercased()
+            switch scheme {
+            case "http", "https":
+                return "[redacted-\(scheme)-source]"
+            case "udp":
+                return "[redacted-udp-source]"
+            default:
+                return "[redacted-url-source]"
+            }
+        }
+        if trimmed.hasPrefix("/") || trimmed.hasPrefix("~") || trimmed.contains("/") {
+            return "[redacted-path]"
+        }
+        return redact(trimmed)
     }
 
     static func artifactPath(_ value: String) -> String {
@@ -857,16 +899,4 @@ enum AppVerifyEvidenceSanitizer {
             || key.range(of: "directory", options: [.caseInsensitive]) != nil
     }
 
-    private static func scrubSecretKeyNames(_ value: String) -> String {
-        value.replacingOccurrences(
-            of: #"(?i)\b(?:token|access_token|api[_-]?key|secret|password|passwd|pwd|key)=\[redacted\]"#,
-            with: "[redacted-secret]",
-            options: .regularExpression
-        )
-        .replacingOccurrences(
-            of: #"\[redacted-\[redacted-secret\]\]"#,
-            with: "[redacted-secret]",
-            options: .regularExpression
-        )
-    }
 }

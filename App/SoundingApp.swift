@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SoundingKit
 import Darwin
@@ -9,6 +10,7 @@ struct SoundingApp: App {
     }
 
     private let packageIdentity = SoundingKitVersion.current
+    @NSApplicationDelegateAdaptor(SoundingAppDelegate.self) private var appDelegate
     @StateObject private var preferencesController = AppPreferencesController()
     @StateObject private var softwareUpdateController = SoftwareUpdateController()
 
@@ -30,6 +32,39 @@ struct SoundingApp: App {
                 controller: preferencesController,
                 softwareUpdateController: softwareUpdateController
             )
+        }
+    }
+}
+
+private final class SoundingAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        presentApplicationWindow()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        presentApplicationWindow()
+        return true
+    }
+
+    private func presentApplicationWindow() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+
+        let visibleWindows = NSApp.windows.filter { !$0.isMiniaturized && $0.isVisible }
+        if let mainWindow = visibleWindows.first {
+            mainWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        if let miniaturizedWindow = NSApp.windows.first(where: { $0.isMiniaturized }) {
+            miniaturizedWindow.deminiaturize(nil)
+            miniaturizedWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        DispatchQueue.main.async {
+            NSApp.sendAction(#selector(NSApplication.newWindowForTab(_:)), to: nil, from: nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 }

@@ -151,7 +151,7 @@ final class AppVerifyLiveConfigTests: XCTestCase {
         let json = try XCTUnwrap(String(data: try evidence.jsonData(), encoding: .utf8))
         XCTAssertTrue(json.contains(#""liveFacts""#), json)
         XCTAssertTrue(json.contains(#""live_transcript_observed""#), json)
-        XCTAssertTrue(json.contains(#""redactedSource":"https://example.test/live/manifest.m3u8""#), json)
+        XCTAssertTrue(json.contains(#""redactedSource":"[redacted-https-source]""#), json)
         assertSanitized(json)
         XCTAssertFalse(json.contains("/Users/alice"), json)
         XCTAssertFalse(json.contains("/tmp/app-verify"), json)

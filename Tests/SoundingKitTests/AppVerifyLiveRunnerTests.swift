@@ -39,7 +39,7 @@ final class AppVerifyLiveRunnerTests: XCTestCase {
         let decode = try XCTUnwrap(evidence.checks.first { $0.name == .liveDecodeOpened })
         XCTAssertEqual(decode.liveFacts?.streamID, "main")
         XCTAssertEqual(decode.liveFacts?.resolvedStreamType, .hls)
-        XCTAssertEqual(decode.liveFacts?.redactedSource, "https://example.test/live/main.m3u8")
+        XCTAssertEqual(decode.liveFacts?.redactedSource, "[redacted-https-source]")
         XCTAssertEqual(decode.liveFacts?.processedChunks, 2)
         XCTAssertEqual(decode.liveFacts?.decodedChunks, 2)
         XCTAssertEqual(decode.liveFacts?.scheduledBuffers, 2)
@@ -282,7 +282,7 @@ final class AppVerifyLiveRunnerTests: XCTestCase {
 
         let json = try evidenceJSON(await runner.run())
 
-        XCTAssertTrue(json.contains(#""redactedSource":"https://example.test/live/main.m3u8""#), json)
+        XCTAssertTrue(json.contains(#""redactedSource":"[redacted-https-source]""#), json)
         assertSanitized(json)
         XCTAssertFalse(json.contains("/Users/alice"), json)
         XCTAssertFalse(json.contains("AppVerifyLiveRunnerTests-token"), json)

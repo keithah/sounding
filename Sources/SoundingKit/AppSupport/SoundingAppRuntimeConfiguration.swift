@@ -1,4 +1,8 @@
+import Darwin
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 
 public struct SoundingAppRuntimeStartupState: Sendable {
     public var registry: StreamRegistry?
@@ -32,6 +36,9 @@ public struct SoundingAppRuntimeStartupState: Sendable {
 }
 
 public struct SoundingAppRuntimeFactory {
+    public static let defaultHLSLivePlaybackLookaheadChunks = 6
+    public static let defaultHLSLiveEmptyPollIntervalNanoseconds: UInt64 = 500_000_000
+
     public typealias DatabaseFactory = @Sendable (URL) throws -> SoundingDatabase
     public typealias IngesterFactory =
         @Sendable (
@@ -41,7 +48,8 @@ public struct SoundingAppRuntimeFactory {
             RollingPCMBuffer,
             AudioArchiveStore,
             AppPlaybackVolumeStore,
-            any AppPCMPlaybackAdapting
+            any AppPCMPlaybackAdapting,
+            AppPlaybackStreamSelection
         ) throws -> any AppStreamRuntimeIngesting
     public typealias RuntimeFactory =
         @Sendable (
@@ -52,19 +60,22 @@ public struct SoundingAppRuntimeFactory {
             AudioArchiveStore,
             AppStreamRuntimeStatusStore,
             AppPlaybackVolumeStore,
-            any AppPCMPlaybackAdapting
+            any AppPCMPlaybackAdapting,
+            AppPlaybackStreamSelection
         ) -> any AppStreamRuntimeControlling
+    public typealias RuntimeStatusResetPolicy = @Sendable () -> Bool
 
     private let fileManager: FileManager
     private let databaseFactory: DatabaseFactory
     private let ingesterFactory: IngesterFactory
     private let runtimeFactory: RuntimeFactory
+    private let runtimeStatusResetPolicy: RuntimeStatusResetPolicy
 
     public init(
         fileManager: FileManager = .default,
         databaseFactory: @escaping DatabaseFactory = { try SoundingDatabase(fileURL: $0) },
         ingesterFactory: @escaping IngesterFactory = {
-            database, configuration, timeline, rollingBuffer, audioArchiveStore, volumeStore, player in
+            database, configuration, timeline, rollingBuffer, audioArchiveStore, volumeStore, player, playbackSelection in
             try SoundingAppRuntimeFactory.defaultIngesterFactory(
                 database: database,
                 configuration: configuration,
@@ -72,11 +83,12 @@ public struct SoundingAppRuntimeFactory {
                 rollingBuffer: rollingBuffer,
                 audioArchiveStore: audioArchiveStore,
                 volumeStore: volumeStore,
-                player: player
+                player: player,
+                playbackSelection: playbackSelection
             )
         },
         runtimeFactory: @escaping RuntimeFactory = {
-            registry, ingester, timeline, rollingBuffer, audioArchiveStore, statusStore, volumeStore, player in
+            registry, ingester, timeline, rollingBuffer, audioArchiveStore, statusStore, volumeStore, player, playbackSelection in
             AppStreamRuntimeService(
                 registry: registry,
                 ingester: ingester,
@@ -85,14 +97,19 @@ public struct SoundingAppRuntimeFactory {
                 playbackTimeline: timeline,
                 rollingBuffer: rollingBuffer,
                 audioArchiveStore: audioArchiveStore,
-                playbackController: player
+                playbackController: player,
+                playbackSelection: playbackSelection
             )
+        },
+        runtimeStatusResetPolicy: @escaping RuntimeStatusResetPolicy = {
+            SoundingAppRuntimeFactory.shouldResetTransientStatusesOnStartup()
         }
     ) {
         self.fileManager = fileManager
         self.databaseFactory = databaseFactory
         self.ingesterFactory = ingesterFactory
         self.runtimeFactory = runtimeFactory
+        self.runtimeStatusResetPolicy = runtimeStatusResetPolicy
     }
 
     public static func defaultAppStoragePreferences(
@@ -164,11 +181,13 @@ public struct SoundingAppRuntimeFactory {
         let timelineStore = StreamAppTimelineStore(database: database)
         let searchStore = StreamAppSearchStore(database: database)
         let statusStore = AppStreamRuntimeStatusStore(database: database)
-        do {
-            try statusStore.resetTransientStatuses(
-                updatedAt: SoundingTimestampClock.timestamp())
-        } catch {
-            configuration.issues.append(Self.databaseOpenIssue(error: error))
+        if runtimeStatusResetPolicy() {
+            do {
+                try statusStore.resetTransientStatuses(
+                    updatedAt: SoundingTimestampClock.timestamp())
+            } catch {
+                configuration.issues.append(Self.databaseOpenIssue(error: error))
+            }
         }
         let timeline = AppPlayerTimelineClock()
         let rollingBuffer = RollingPCMBuffer(configuration: configuration.rollingBuffer)
@@ -180,6 +199,7 @@ public struct SoundingAppRuntimeFactory {
         )
         let volumeStore = AppPlaybackVolumeStore()
         let diagnosticsLog = AppRuntimeDiagnosticsLog()
+        let playbackSelection = AppPlaybackStreamSelection()
         let player = AVFoundationAppPCMPlayerAdapter(
             volumeStore: volumeStore,
             diagnosticsLog: diagnosticsLog
@@ -188,7 +208,8 @@ public struct SoundingAppRuntimeFactory {
         let ingester: any AppStreamRuntimeIngesting
         do {
             ingester = try ingesterFactory(
-                database, configuration, timeline, rollingBuffer, audioArchiveStore, volumeStore, player)
+                database, configuration, timeline, rollingBuffer, audioArchiveStore, volumeStore, player,
+                playbackSelection)
         } catch {
             configuration.issues.append(Self.modelSetupIssue(error: error))
             var viewModel = StreamAppViewModel()
@@ -206,7 +227,8 @@ public struct SoundingAppRuntimeFactory {
         }
 
         let runtime = runtimeFactory(
-            registry, ingester, timeline, rollingBuffer, audioArchiveStore, statusStore, volumeStore, player)
+            registry, ingester, timeline, rollingBuffer, audioArchiveStore, statusStore, volumeStore, player,
+            playbackSelection)
         var viewModel = StreamAppViewModel(configurationIssues: configuration.issues)
         do {
             try viewModel.reload(from: registry)
@@ -247,7 +269,8 @@ public struct SoundingAppRuntimeFactory {
         rollingBuffer: RollingPCMBuffer,
         audioArchiveStore: AudioArchiveStore,
         volumeStore: AppPlaybackVolumeStore,
-        player: any AppPCMPlaybackAdapting
+        player: any AppPCMPlaybackAdapting,
+        playbackSelection: AppPlaybackStreamSelection? = nil
     ) throws -> any AppStreamRuntimeIngesting {
         let queue = InferenceQueue()
         let cache = ModelCache()
@@ -264,8 +287,10 @@ public struct SoundingAppRuntimeFactory {
             player: player,
             timeline: timeline,
             rollingBuffer: rollingBuffer,
+            playbackSelection: playbackSelection,
             audioArchiveStore: audioArchiveStore,
-            ingestMode: .livePolling(maxChunksPerPass: 1),
+            ingestMode: .livePolling(maxChunksPerPass: defaultHLSLivePlaybackLookaheadChunks),
+            hlsEmptyPollIntervalNanoseconds: defaultHLSLiveEmptyPollIntervalNanoseconds,
             diarizerFactory: { isEnabled in
                 QueuedDiarizer(
                     isEnabled || ProcessInfo.processInfo.environment["SOUNDING_ENABLE_FLUIDAUDIO"] == "1"
@@ -298,6 +323,41 @@ public struct SoundingAppRuntimeFactory {
             cache: AcoustIDLookupCache(database: database),
             lookup: AcoustIDHTTPClientLookup(clientKey: key)
         )
+    }
+
+    public static func shouldResetTransientStatusesOnStartup(
+        processList: String? = nil,
+        currentProcessID: Int32 = getpid()
+    ) -> Bool {
+        guard let processList else {
+            return shouldResetTransientStatusesForRunningApplications(
+                currentProcessID: currentProcessID)
+        }
+        let listing = processList
+        let appExecutableSuffix = "/Sounding.app/Contents/MacOS/Sounding"
+        let otherAppProcessExists = listing.split(separator: "\n").contains { line in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.contains(appExecutableSuffix) else { return false }
+            let pidText = trimmed.split(separator: " ", maxSplits: 1).first ?? ""
+            return Int32(pidText) != currentProcessID
+        }
+        return !otherAppProcessExists
+    }
+
+    private static func shouldResetTransientStatusesForRunningApplications(
+        currentProcessID: Int32
+    ) -> Bool {
+        #if canImport(AppKit)
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "dev.sounding.Sounding"
+        let matchingApps = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleIdentifier)
+        let siblingAppExists = matchingApps.contains { application in
+            application.processIdentifier != currentProcessID
+        }
+        return !siblingAppExists
+        #else
+        return true
+        #endif
     }
 
     private static func databaseOpenIssue(error: any Error) -> SoundingAppConfigurationIssue {
