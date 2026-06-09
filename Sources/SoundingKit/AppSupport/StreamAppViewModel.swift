@@ -407,37 +407,73 @@ public struct StreamAppViewModel: Equatable, Sendable {
         refreshedAt: String? = nil
     ) throws -> StreamAppTimelineSnapshot {
         let streamID = try requireSelectedStreamID()
-        guard streams.contains(where: { $0.id == streamID }) else {
-            let error = StreamAppViewModelTimelineError.selectedStreamUnavailable
-            timelineRefreshErrors[streamID] = error.description
+        do {
+            let snapshot = try store.snapshot(request: selectedTimelineRequest(refreshedAt: refreshedAt))
+            return try applySelectedTimelineSnapshot(snapshot, expectedStreamID: streamID)
+        } catch {
+            recordTimelineRefreshFailure(error, streamID: streamID)
+            throw error
+        }
+    }
+
+    @discardableResult
+    public mutating func refreshSelectedTimelineRefreshingAdClassifications(
+        using store: StreamAppTimelineStore,
+        refreshedAt: String? = nil
+    ) async throws -> StreamAppTimelineSnapshot {
+        let streamID = try requireSelectedStreamID()
+        let request: StreamAppTimelineRequest
+        do {
+            request = try selectedTimelineRequest(refreshedAt: refreshedAt)
+        } catch {
+            recordTimelineRefreshFailure(error, streamID: streamID)
             throw error
         }
 
         do {
-            let policy = streams.first(where: { $0.id == streamID })?.transcriptionPolicy ?? .defaultValue
-            let snapshot = try store.snapshot(
-                request: StreamAppTimelineRequest(
-                    streamID: streamID,
-                    player: playerTimelines[streamID],
-                    hideDeterministicUnknownSongs: true,
-                    transcriptionPolicy: policy,
-                    refreshedAt: refreshedAt
-                )
-            )
-            guard streams.contains(where: { $0.id == streamID }) else {
-                let error = StreamAppViewModelTimelineError.selectedStreamUnavailable
-                timelineRefreshErrors[streamID] = error.description
-                throw error
-            }
-            timelineSnapshots[streamID] = snapshot
-            timelineRefreshErrors[streamID] = nil
-            lastLifecycleMessage = "Timeline refreshed for selected stream."
-            return snapshot
+            let snapshot = try await store.snapshotRefreshingAdClassifications(request: request)
+            return try applySelectedTimelineSnapshot(snapshot, expectedStreamID: streamID)
         } catch {
-            timelineRefreshErrors[streamID] = Self.redactedTimelineMessage(error)
-            lastLifecycleMessage = timelineRefreshErrors[streamID] ?? "Timeline refresh failed."
+            recordTimelineRefreshFailure(error, streamID: streamID)
             throw error
         }
+    }
+
+    public func selectedTimelineRequest(refreshedAt: String? = nil) throws -> StreamAppTimelineRequest {
+        let streamID = try requireSelectedStreamID()
+        guard streams.contains(where: { $0.id == streamID }) else {
+            throw StreamAppViewModelTimelineError.selectedStreamUnavailable
+        }
+        let policy = streams.first(where: { $0.id == streamID })?.transcriptionPolicy ?? .defaultValue
+        return StreamAppTimelineRequest(
+            streamID: streamID,
+            player: playerTimelines[streamID],
+            hideDeterministicUnknownSongs: true,
+            transcriptionPolicy: policy,
+            refreshedAt: refreshedAt
+        )
+    }
+
+    @discardableResult
+    public mutating func applySelectedTimelineSnapshot(
+        _ snapshot: StreamAppTimelineSnapshot,
+        expectedStreamID: Int64
+    ) throws -> StreamAppTimelineSnapshot {
+        guard selectedStreamID == expectedStreamID,
+              streams.contains(where: { $0.id == expectedStreamID }) else {
+            let error = StreamAppViewModelTimelineError.selectedStreamUnavailable
+            timelineRefreshErrors[expectedStreamID] = error.description
+            throw error
+        }
+        timelineSnapshots[expectedStreamID] = snapshot
+        timelineRefreshErrors[expectedStreamID] = nil
+        lastLifecycleMessage = "Timeline refreshed for selected stream."
+        return snapshot
+    }
+
+    public mutating func recordTimelineRefreshFailure(_ error: Error, streamID: Int64) {
+        timelineRefreshErrors[streamID] = Self.redactedTimelineMessage(error)
+        lastLifecycleMessage = timelineRefreshErrors[streamID] ?? "Timeline refresh failed."
     }
 
     public mutating func updateSearchDraft(_ draft: StreamAppSearchDraft) {

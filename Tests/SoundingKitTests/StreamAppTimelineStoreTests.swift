@@ -216,6 +216,207 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(cachedItem.signals, ["verifier:cached"])
     }
 
+    func testAsyncSnapshotRefreshesMissingClassificationsWithVerifier() async throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:55:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 57,
+            segmentURI: "main-057.ts",
+            startedAt: "2026-05-01T15:55:01Z",
+            endedAt: "2026-05-01T15:55:11Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(57, "announcer", 57, 69, "This segment is brought to you by Acme."),
+                ],
+                createdAt: "2026-05-01T15:55:02Z"
+            )
+        )
+        let segmentID = try fixture.temporary.database.read { db in
+            try XCTUnwrap(
+                Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM transcript_segments WHERE run_id = ? AND sequence = ?",
+                    arguments: [runID, 57]
+                )
+            )
+        }
+        let verifier = StoreRecordingAdVerifier(
+            response: TranscriptAdVerification(
+                verdict: .ad,
+                adType: .sponsorBillboard,
+                brand: "Acme",
+                product: nil,
+                confidence: .high,
+                reason: "Sponsor language.",
+                modelIdentifier: "mock",
+                classifiedAt: "2026-05-01T15:55:04Z"
+            )
+        )
+        let store = StreamAppTimelineStore(
+            database: fixture.temporary.database,
+            adClassificationRefresher: TranscriptAdClassificationRefresher(
+                database: fixture.temporary.database,
+                pipeline: TranscriptAdScoringPipeline(
+                    verifier: verifier,
+                    isVerifierEnabled: true,
+                    now: { "2026-05-01T15:55:04Z" }
+                ),
+                now: { "2026-05-01T15:55:04Z" }
+            )
+        )
+
+        let snapshot = try await store.snapshotRefreshingAdClassifications(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 69,
+                    liveEdgeSeconds: 80
+                ),
+                paragraphLimit: 10,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: 80,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+        let calls = await verifier.recordedCalls()
+        let row = try XCTUnwrap(
+            try TranscriptAdClassificationCache(database: fixture.temporary.database).fetch(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentID,
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                )
+            )
+        )
+
+        XCTAssertEqual(calls.map(\.paragraph.id), [segmentID])
+        XCTAssertTrue(row.isAd)
+        XCTAssertTrue(row.signals.contains("verified:ad"))
+        let span = try XCTUnwrap(snapshot.timelineRail.spans.first { $0.source == .transcript })
+        XCTAssertEqual(span.startSeconds, 57)
+        XCTAssertEqual(span.endSeconds, 69)
+        XCTAssertEqual(span.colorToken, "ad-inferred")
+        XCTAssertTrue(span.signals.contains("verified:ad"))
+    }
+
+    func testSnapshotPropagatesCachedAdClassificationToRepeatedAdCopy() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:55:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 58,
+            segmentURI: "main-058.ts",
+            startedAt: "2026-05-01T15:55:01Z",
+            endedAt: "2026-05-01T15:55:11Z"
+        )
+        let repeatedCopy = "This is the sound of Jack bus cutting his way to a small fortune."
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(58, "announcer", 58, 70, repeatedCopy),
+                    segment(59, "dj", 92, 104, "Now back to the music after this message."),
+                    segment(60, "announcer", 118, 130, repeatedCopy),
+                ],
+                createdAt: "2026-05-01T15:55:02Z"
+            )
+        )
+        let segmentIDs = try fixture.temporary.database.read { db in
+            try Int64.fetchAll(
+                db,
+                sql: "SELECT id FROM transcript_segments WHERE run_id = ? ORDER BY sequence",
+                arguments: [runID]
+            )
+        }
+        XCTAssertEqual(segmentIDs.count, 3)
+        try TranscriptAdClassificationCache(database: fixture.temporary.database).upsert(
+            TranscriptAdClassificationCacheEntry(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentIDs[0],
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                ),
+                isAd: true,
+                confidence: 0.90,
+                signals: ["verified:ad"],
+                classifiedAt: "2026-05-01T15:55:03Z"
+            )
+        )
+        try TranscriptAdClassificationCache(database: fixture.temporary.database).upsert(
+            TranscriptAdClassificationCacheEntry(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentIDs[2],
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                ),
+                isAd: false,
+                confidence: 0.15,
+                signals: ["heuristic:no-ad"],
+                classifiedAt: "2026-05-01T15:55:04Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 130,
+                    liveEdgeSeconds: 140
+                ),
+                paragraphLimit: 10,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: 140,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+        let repeatedRow = try XCTUnwrap(
+            try TranscriptAdClassificationCache(database: fixture.temporary.database).fetch(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentIDs[2],
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                )
+            )
+        )
+
+        XCTAssertTrue(repeatedRow.isAd)
+        XCTAssertTrue(repeatedRow.signals.contains("duplicate-ad-copy"))
+        let repeatedSpan = try XCTUnwrap(
+            snapshot.timelineRail.spans.first {
+                $0.source == .transcript && $0.startSeconds == 118 && $0.endSeconds == 130
+            }
+        )
+        XCTAssertTrue(repeatedSpan.isAd)
+        XCTAssertTrue(repeatedSpan.signals.contains("duplicate-ad-copy"))
+        XCTAssertTrue(
+            snapshot.timelineItems.contains {
+                $0.kind == .transcript
+                    && ($0.subtitle?.contains(repeatedCopy) == true)
+                    && $0.isAd
+            }
+        )
+    }
+
     func testSnapshotCachesMissingTranscriptAdClassification() throws {
         let fixture = try makeFixture()
         let writer = IngestPersistence(database: fixture.temporary.database)
@@ -1964,5 +2165,31 @@ final class StreamAppTimelineStoreTests: XCTestCase {
                 )
             }
         )
+    }
+}
+
+private actor StoreRecordingAdVerifier: TranscriptAdVerifier {
+    struct Call: Equatable {
+        var paragraph: StreamAppTranscriptParagraph
+        var neighbors: [StreamAppTranscriptParagraph]
+    }
+
+    private var calls: [Call] = []
+    private let response: TranscriptAdVerification
+
+    init(response: TranscriptAdVerification) {
+        self.response = response
+    }
+
+    func verify(
+        paragraph: StreamAppTranscriptParagraph,
+        neighbors: [StreamAppTranscriptParagraph]
+    ) async throws -> TranscriptAdVerification {
+        calls.append(Call(paragraph: paragraph, neighbors: neighbors))
+        return response
+    }
+
+    func recordedCalls() -> [Call] {
+        calls
     }
 }

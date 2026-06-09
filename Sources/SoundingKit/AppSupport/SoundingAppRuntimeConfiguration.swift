@@ -178,7 +178,13 @@ public struct SoundingAppRuntimeFactory {
         }
 
         let registry = StreamRegistry(database: database)
-        let timelineStore = StreamAppTimelineStore(database: database)
+        let timelineStore = StreamAppTimelineStore(
+            database: database,
+            adClassificationRefresher: Self.transcriptAdClassificationRefresher(
+                database: database,
+                configuration: configuration
+            )
+        )
         let searchStore = StreamAppSearchStore(database: database)
         let statusStore = AppStreamRuntimeStatusStore(database: database)
         if runtimeStatusResetPolicy() {
@@ -299,6 +305,25 @@ public struct SoundingAppRuntimeFactory {
                     queue: queue
                 )
             }
+        )
+    }
+
+    private static func transcriptAdClassificationRefresher(
+        database: SoundingDatabase,
+        configuration: SoundingAppConfiguration
+    ) -> TranscriptAdClassificationRefresher? {
+        guard configuration.isTranscriptAdVerifierEnabled,
+              let verifier = FoundationModelsAdVerifierFactory.makeIfAvailable()
+        else {
+            return nil
+        }
+        return TranscriptAdClassificationRefresher(
+            database: database,
+            pipeline: TranscriptAdScoringPipeline(
+                verifier: verifier,
+                isVerifierEnabled: true,
+                now: { SoundingTimestampClock.timestamp() }
+            )
         )
     }
 

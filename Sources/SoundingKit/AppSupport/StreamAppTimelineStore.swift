@@ -53,12 +53,35 @@ public struct StreamAppTimelineStore: Sendable {
     public static let allowedColorTokens = StreamAppSpeakerDisplayProjection.allowedColorTokens
 
     private let database: SoundingDatabase
+    private let adClassificationRefresher: TranscriptAdClassificationRefresher?
 
-    public init(database: SoundingDatabase) {
+    public init(
+        database: SoundingDatabase,
+        adClassificationRefresher: TranscriptAdClassificationRefresher? = nil
+    ) {
         self.database = database
+        self.adClassificationRefresher = adClassificationRefresher
     }
 
     public func snapshot(request: StreamAppTimelineRequest) throws -> StreamAppTimelineSnapshot {
+        try snapshot(request: request, fillsMissingAdClassifications: true)
+    }
+
+    public func snapshotRefreshingAdClassifications(
+        request: StreamAppTimelineRequest
+    ) async throws -> StreamAppTimelineSnapshot {
+        guard let adClassificationRefresher else {
+            return try snapshot(request: request)
+        }
+        let initial = try snapshot(request: request, fillsMissingAdClassifications: false)
+        _ = try await adClassificationRefresher.refresh(paragraphs: initial.transcriptParagraphs)
+        return try snapshot(request: request, fillsMissingAdClassifications: true)
+    }
+
+    private func snapshot(
+        request: StreamAppTimelineRequest,
+        fillsMissingAdClassifications: Bool
+    ) throws -> StreamAppTimelineSnapshot {
         try validate(request)
         do {
             return try database.write { db in
@@ -143,6 +166,7 @@ public struct StreamAppTimelineStore: Sendable {
                 let adClassifications = try cachedTranscriptAdClassifications(
                     for: projection.paragraphs,
                     classifiedAt: request.refreshedAt,
+                    fillsMissing: fillsMissingAdClassifications,
                     db: db
                 )
                 let timelineRail = makeTimelineRail(
@@ -212,14 +236,15 @@ public struct StreamAppTimelineStore: Sendable {
     private func cachedTranscriptAdClassifications(
         for paragraphs: [StreamAppTranscriptParagraph],
         classifiedAt: String,
+        fillsMissing: Bool,
         db: Database
     ) throws -> [Int64: TranscriptAdClassificationCacheRow] {
         let segmentIDs = paragraphs.map(\.id)
         var cached = try TranscriptAdClassificationCache.fetch(segmentIDs: segmentIDs, db: db)
-        let missingParagraphs = paragraphs.filter { cached[$0.id] == nil }
-        guard !missingParagraphs.isEmpty else { return cached }
+        guard fillsMissing else { return cached }
 
         let scores = TranscriptAdScorer.scores(for: paragraphs)
+        let missingParagraphs = paragraphs.filter { cached[$0.id] == nil }
         for paragraph in missingParagraphs {
             let score = scores[paragraph.id] ?? TranscriptAdScorer.score(paragraph: paragraph, neighbors: [])
             try TranscriptAdClassificationCache.upsert(
@@ -238,12 +263,97 @@ public struct StreamAppTimelineStore: Sendable {
             )
         }
         cached = try TranscriptAdClassificationCache.fetch(segmentIDs: segmentIDs, db: db)
+        cached = try promoteDuplicateAdCopyClassifications(
+            paragraphs: paragraphs,
+            cached: cached,
+            scores: scores,
+            classifiedAt: classifiedAt,
+            db: db
+        )
         return cached
     }
 
     private static func cacheSignals(for score: TranscriptAdScorer.Score) -> [String] {
         guard !score.signals.isEmpty else { return ["heuristic:no-signals"] }
         return score.signals
+    }
+
+    private func duplicateAdCopyKeys(
+        paragraphs: [StreamAppTranscriptParagraph],
+        cached: [Int64: TranscriptAdClassificationCacheRow],
+        scores: [Int64: TranscriptAdScorer.Score]
+    ) -> Set<String> {
+        var countsByKey: [String: Int] = [:]
+        for paragraph in paragraphs {
+            let key = Self.adCopyKey(for: paragraph.text)
+            guard !key.isEmpty else { continue }
+            countsByKey[key, default: 0] += 1
+        }
+        var keys: Set<String> = []
+        for paragraph in paragraphs {
+            let key = Self.adCopyKey(for: paragraph.text)
+            guard (countsByKey[key] ?? 0) > 1 else { continue }
+            if cached[paragraph.id]?.isAd == true || (scores[paragraph.id]?.confidence ?? 0) >= 0.50 {
+                keys.insert(key)
+            }
+        }
+        return keys
+    }
+
+    private func promoteDuplicateAdCopyClassifications(
+        paragraphs: [StreamAppTranscriptParagraph],
+        cached: [Int64: TranscriptAdClassificationCacheRow],
+        scores: [Int64: TranscriptAdScorer.Score],
+        classifiedAt: String,
+        db: Database
+    ) throws -> [Int64: TranscriptAdClassificationCacheRow] {
+        let duplicateAdTextKeys = duplicateAdCopyKeys(
+            paragraphs: paragraphs,
+            cached: cached,
+            scores: scores
+        )
+        guard !duplicateAdTextKeys.isEmpty else { return cached }
+
+        var promoted = cached
+        for paragraph in paragraphs {
+            let key = Self.adCopyKey(for: paragraph.text)
+            guard duplicateAdTextKeys.contains(key),
+                  promoted[paragraph.id]?.isAd != true
+            else {
+                continue
+            }
+            let score = scores[paragraph.id] ?? TranscriptAdScorer.score(paragraph: paragraph, neighbors: [])
+            let existing = promoted[paragraph.id]
+            let signals = Array(
+                Set((existing?.signals ?? Self.cacheSignals(for: score)) + ["duplicate-ad-copy"])
+            ).sorted()
+            try TranscriptAdClassificationCache.upsert(
+                TranscriptAdClassificationCacheEntry(
+                    identity: TranscriptAdClassificationCacheIdentity(
+                        segmentID: paragraph.id,
+                        classifier: TranscriptAdScorer.classifier,
+                        classifierVersion: TranscriptAdScorer.classifierVersion
+                    ),
+                    isAd: true,
+                    confidence: max(existing?.confidence ?? 0, score.confidence, 0.65),
+                    signals: signals,
+                    classifiedAt: classifiedAt
+                ),
+                db: db
+            )
+        }
+        promoted = try TranscriptAdClassificationCache.fetch(segmentIDs: paragraphs.map(\.id), db: db)
+        return promoted
+    }
+
+    private static func adCopyKey(for text: String) -> String {
+        let words = text
+            .lowercased()
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        guard words.count >= 8 else { return "" }
+        return words.joined(separator: " ")
     }
 
     @discardableResult

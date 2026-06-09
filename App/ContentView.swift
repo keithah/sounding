@@ -791,7 +791,7 @@ struct ContentView: View {
 
     private func refreshSelectedTimelineLoop(streamID: Int64?) async {
         guard streamID != nil else { return }
-        refreshSelectedTimeline()
+        await refreshSelectedTimelineAsync()
         while !Task.isCancelled {
             do {
                 try await Task.sleep(nanoseconds: 3_000_000_000)
@@ -803,15 +803,30 @@ struct ContentView: View {
                 viewModel.applyRuntimeEvent(event)
             }
             refreshRuntimeStatuses()
-            refreshSelectedTimeline()
+            await refreshSelectedTimelineAsync()
         }
     }
 
     private func refreshSelectedTimeline() {
-        guard let timelineStore, viewModel.selectedStreamID != nil else { return }
+        Task {
+            await refreshSelectedTimelineAsync()
+        }
+    }
+
+    @MainActor private func refreshSelectedTimelineAsync() async {
+        guard let timelineStore, let selectedStreamID = viewModel.selectedStreamID else { return }
+        let request: StreamAppTimelineRequest
         do {
-            _ = try viewModel.refreshSelectedTimeline(using: timelineStore)
+            request = try viewModel.selectedTimelineRequest()
         } catch {
+            viewModel.recordTimelineRefreshFailure(error, streamID: selectedStreamID)
+            return
+        }
+        do {
+            let snapshot = try await timelineStore.snapshotRefreshingAdClassifications(request: request)
+            _ = try viewModel.applySelectedTimelineSnapshot(snapshot, expectedStreamID: selectedStreamID)
+        } catch {
+            viewModel.recordTimelineRefreshFailure(error, streamID: selectedStreamID)
             // The view model preserves the last good snapshot and stores a redacted error message.
         }
     }
