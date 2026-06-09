@@ -512,7 +512,9 @@ struct TimelineRailView: View {
             normalizedStart: normalized(clampedStart, in: current),
             normalizedEnd: normalized(clampedEnd, in: current),
             colorToken: span.colorToken,
-            isSeekable: span.isSeekable
+            isSeekable: span.isSeekable,
+            confidence: span.confidence,
+            signals: span.signals
         )
     }
 

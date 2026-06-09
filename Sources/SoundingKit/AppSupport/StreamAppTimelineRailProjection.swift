@@ -172,8 +172,34 @@ public enum StreamAppTimelineRailProjection {
 
     private static func inferredAdSubtitle(confidence: Double?, signals: [String]) -> String {
         let confidenceLabel = confidence.map { "\(Int(($0 * 100).rounded()))%" } ?? "Inferred"
-        guard !signals.isEmpty else { return "Transcript · \(confidenceLabel)" }
-        return "Transcript · \(confidenceLabel) · \(signals.prefix(3).joined(separator: ", "))"
+        let labels = friendlySignalLabels(for: signals)
+        guard !labels.isEmpty else { return "Transcript inferred · \(confidenceLabel)" }
+        return "Transcript inferred · \(confidenceLabel) · \(labels.prefix(4).joined(separator: ", "))"
+    }
+
+    private static func friendlySignalLabels(for signals: [String]) -> [String] {
+        let labeled = signals.compactMap { signal -> (label: String, priority: Int)? in
+            if signal.hasPrefix("url:") { return ("URL", 0) }
+            if signal.hasPrefix("disclaimer") { return ("legal disclaimer", 1) }
+            if signal.hasPrefix("sponsor:") { return ("sponsor", 2) }
+            if signal.hasPrefix("cta") { return ("call to action", 3) }
+            if signal == "commercial-pitch" { return ("commercial pitch", 4) }
+            if signal == "music-sfx" { return ("music/SFX cue", 5) }
+            if signal.hasPrefix("keyword") { return ("ad keyword", 6) }
+            if signal.hasPrefix("neighbor-reinforced") { return ("nearby ad copy", 7) }
+            if signal == "length>=20s" { return ("long read", 8) }
+            return nil
+        }
+        var bestPriorityByLabel: [String: Int] = [:]
+        for entry in labeled {
+            bestPriorityByLabel[entry.label] = min(entry.priority, bestPriorityByLabel[entry.label] ?? entry.priority)
+        }
+        return bestPriorityByLabel
+            .sorted {
+                if $0.value != $1.value { return $0.value < $1.value }
+                return $0.key < $1.key
+            }
+            .map(\.key)
     }
 
     private static func coalescedAdSpans(

@@ -327,6 +327,32 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertTrue(adSpan.signals.contains { $0.contains("url") })
     }
 
+    func testTranscriptInferredAdSubtitleUsesFriendlySignalLabels() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            metadata: [],
+            paragraphs: [
+                paragraph(
+                    1,
+                    start: 10,
+                    end: 35,
+                    text: "Brought to you by Acme. Visit acme dot com. Call now. [MUSIC]"
+                ),
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 60
+        )
+
+        let adSpan = try XCTUnwrap(rail.spans.first)
+        let subtitle = try XCTUnwrap(adSpan.subtitle)
+        XCTAssertTrue(subtitle.hasPrefix("Transcript inferred · "))
+        XCTAssertTrue(subtitle.contains("URL"), subtitle)
+        XCTAssertTrue(subtitle.contains("call to action"), subtitle)
+        XCTAssertTrue(subtitle.contains("sponsor"), subtitle)
+        XCTAssertFalse(subtitle.contains("ctax"), subtitle)
+        XCTAssertFalse(subtitle.contains("url:"), subtitle)
+        XCTAssertFalse(subtitle.contains("sponsor:"), subtitle)
+    }
+
     func testDefiniteAdSpanWinsOverOverlappingTranscriptInferredSpan() throws {
         let rail = StreamAppTimelineRailProjection.project(
             metadata: [
