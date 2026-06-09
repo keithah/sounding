@@ -49,6 +49,7 @@ final class SoundingDatabaseMigrationTests: XCTestCase {
                 "stream_runtime_status",
                 "hls_ingest_segments",
                 "audio_archive_segments",
+                "transcript_ad_classification_cache",
                 "grdb_migrations"
             ]
         )

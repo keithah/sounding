@@ -508,6 +508,37 @@ enum SoundingDatabaseMigrator {
             )
         }
 
+        migrator.registerMigration("addTranscriptAdClassificationCache") { db in
+            try db.create(table: "transcript_ad_classification_cache") { table in
+                table.autoIncrementedPrimaryKey("id")
+                table.column("segment_id", .integer)
+                    .notNull()
+                    .references("transcript_segments", onDelete: .cascade)
+                table.column("classifier", .text).notNull()
+                    .check(sql: "length(trim(classifier)) > 0")
+                table.column("classifier_version", .text).notNull()
+                    .check(sql: "length(trim(classifier_version)) > 0")
+                table.column("is_ad", .boolean).notNull()
+                table.column("confidence", .double).notNull()
+                    .check(sql: "confidence >= 0 AND confidence <= 1")
+                table.column("signals_json", .text).notNull()
+                    .check(sql: "length(trim(signals_json)) > 0")
+                table.column("created_at", .text).notNull()
+                table.column("updated_at", .text).notNull()
+                table.uniqueKey(["segment_id", "classifier", "classifier_version"])
+            }
+            try db.create(
+                index: "transcript_ad_classification_cache_on_identity",
+                on: "transcript_ad_classification_cache",
+                columns: ["segment_id", "classifier", "classifier_version"]
+            )
+            try db.create(
+                index: "transcript_ad_classification_cache_on_updated_at",
+                on: "transcript_ad_classification_cache",
+                columns: ["updated_at"]
+            )
+        }
+
         try migrator.migrate(writer)
     }
 }
