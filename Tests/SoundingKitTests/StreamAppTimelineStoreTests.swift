@@ -84,6 +84,62 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.diagnostics.bufferedSeekUnavailableMessage, "Requested 40s is unavailable (available range 10-30s).")
     }
 
+    func testTimelineRailIncludesTranscriptInferredAdSpansFromSnapshotParagraphs() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:50:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 50,
+            segmentURI: "main-050.ts",
+            startedAt: "2026-05-01T15:50:01Z",
+            endedAt: "2026-05-01T15:50:26Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(
+                        50,
+                        "announcer",
+                        45,
+                        70,
+                        "Visit example.com today. Terms and conditions apply."
+                    ),
+                ],
+                createdAt: "2026-05-01T15:50:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 70,
+                    liveEdgeSeconds: 80
+                ),
+                paragraphLimit: 10,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: 80,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        let inferredSpan = try XCTUnwrap(snapshot.timelineRail.spans.first { $0.source == .transcript })
+        XCTAssertEqual(inferredSpan.title, "AD")
+        XCTAssertEqual(inferredSpan.colorToken, "ad-inferred")
+        XCTAssertEqual(inferredSpan.isAd, true)
+        XCTAssertGreaterThanOrEqual(inferredSpan.confidence ?? 0, 0.50)
+        XCTAssertTrue(inferredSpan.signals.contains { $0.contains("url") })
+    }
+
     func testTranscriptionPolicyControlsDisplayedTranscriptRows() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

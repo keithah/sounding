@@ -275,6 +275,7 @@ public enum StreamAppTimelineMarkerSource: String, Equatable, Sendable {
     case timedID3
     case scte35
     case icy
+    case transcript
     case unknown
 }
 
@@ -290,6 +291,8 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
     public var normalizedEnd: Double
     public var colorToken: String
     public var isSeekable: Bool
+    public var confidence: Double?
+    public var signals: [String]
 
     public init(
         id: String,
@@ -302,7 +305,9 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
         normalizedStart: Double,
         normalizedEnd: Double,
         colorToken: String,
-        isSeekable: Bool
+        isSeekable: Bool,
+        confidence: Double? = nil,
+        signals: [String] = []
     ) {
         self.id = id
         self.title = title
@@ -315,6 +320,8 @@ public struct StreamAppTimelineRailSpan: Equatable, Identifiable, Sendable {
         self.normalizedEnd = normalizedEnd
         self.colorToken = colorToken
         self.isSeekable = isSeekable
+        self.confidence = confidence
+        self.signals = signals
     }
 }
 

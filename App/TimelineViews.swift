@@ -575,6 +575,9 @@ struct TimelineRailView: View {
         if token == "ad" {
             return Color(red: 1.0, green: 0.14, blue: 0.34)
         }
+        if token == "ad-inferred" {
+            return Color(red: 1.0, green: 0.36, blue: 0.36).opacity(0.55)
+        }
         if token == "gray" {
             return .secondary
         }

@@ -305,6 +305,52 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
         XCTAssertEqual(rail.markers, [])
     }
 
+    func testTranscriptParagraphsCreateInferredAdSpan() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            metadata: [],
+            paragraphs: [
+                paragraph(1, start: 10, end: 24, text: "Start your free trial today at Shopify.com/win."),
+                paragraph(2, start: 26, end: 38, text: "Terms and conditions apply. Member FDIC."),
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 60
+        )
+
+        let adSpan = try XCTUnwrap(rail.spans.first)
+        XCTAssertEqual(adSpan.id, "ad-inferred:1")
+        XCTAssertEqual(adSpan.title, "AD")
+        XCTAssertEqual(adSpan.source, .transcript)
+        XCTAssertEqual(adSpan.colorToken, "ad-inferred")
+        XCTAssertEqual(adSpan.startSeconds, 10, accuracy: 0.001)
+        XCTAssertEqual(adSpan.endSeconds, 38, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(adSpan.confidence ?? 0, 0.70)
+        XCTAssertTrue(adSpan.signals.contains { $0.contains("url") })
+    }
+
+    func testDefiniteAdSpanWinsOverOverlappingTranscriptInferredSpan() throws {
+        let rail = StreamAppTimelineRailProjection.project(
+            metadata: [
+                metadata("event:ad:start", kind: .event, title: "Ad break start", artist: nil, start: 10, end: 10, source: "scte35"),
+                metadata("event:ad:end", kind: .event, title: "Ad break end", artist: nil, start: 50, end: 50, source: "scte35"),
+            ],
+            paragraphs: [
+                paragraph(1, start: 20, end: 30, text: "Visit acme dot com. Terms and conditions apply."),
+            ],
+            visibleStartSeconds: 0,
+            visibleEndSeconds: 60
+        )
+
+        let adSpans = rail.spans.filter(\.isAd)
+        XCTAssertEqual(adSpans.count, 1)
+        let adSpan = try XCTUnwrap(adSpans.first)
+        XCTAssertEqual(adSpan.source, .scte35)
+        XCTAssertEqual(adSpan.colorToken, "ad")
+        XCTAssertNil(adSpan.confidence)
+        XCTAssertEqual(adSpan.signals, [])
+        XCTAssertEqual(adSpan.startSeconds, 10, accuracy: 0.001)
+        XCTAssertEqual(adSpan.endSeconds, 50, accuracy: 0.001)
+    }
+
     private func timeline(
         _ id: String,
         kind: StreamAppTimelineItemKind,
@@ -344,6 +390,30 @@ final class StreamAppTimelineRailProjectionTests: XCTestCase {
             artist: artist,
             subtitle: nil,
             source: source
+        )
+    }
+
+    private func paragraph(
+        _ id: Int64,
+        start: Double,
+        end: Double,
+        text: String
+    ) -> StreamAppTranscriptParagraph {
+        StreamAppTranscriptParagraph(
+            id: id,
+            streamID: 1,
+            runID: 1,
+            chunkID: 1,
+            sequence: Int(id),
+            speakerDisplay: StreamAppSpeakerDisplay(
+                rawLabel: "speaker",
+                displayLabel: "speaker",
+                colorToken: "blue"
+            ),
+            startSeconds: start,
+            endSeconds: end,
+            text: text,
+            confidence: nil
         )
     }
 }

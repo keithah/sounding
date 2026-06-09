@@ -6,9 +6,24 @@ public enum StreamAppTimelineRailProjection {
         visibleStartSeconds: Double,
         visibleEndSeconds: Double
     ) -> StreamAppTimelineRailSnapshot {
+        project(
+            metadata: metadata,
+            paragraphs: [],
+            visibleStartSeconds: visibleStartSeconds,
+            visibleEndSeconds: visibleEndSeconds
+        )
+    }
+
+    public static func project(
+        metadata: [StreamAppMetadataItem],
+        paragraphs: [StreamAppTranscriptParagraph],
+        visibleStartSeconds: Double,
+        visibleEndSeconds: Double
+    ) -> StreamAppTimelineRailSnapshot {
         let items = broadcastItems(from: metadata)
         return project(
             items: items,
+            paragraphs: paragraphs,
             visibleStartSeconds: visibleStartSeconds,
             visibleEndSeconds: visibleEndSeconds
         )
@@ -16,6 +31,20 @@ public enum StreamAppTimelineRailProjection {
 
     public static func project(
         items: [StreamAppTimelineItem],
+        visibleStartSeconds: Double,
+        visibleEndSeconds: Double
+    ) -> StreamAppTimelineRailSnapshot {
+        project(
+            items: items,
+            paragraphs: [],
+            visibleStartSeconds: visibleStartSeconds,
+            visibleEndSeconds: visibleEndSeconds
+        )
+    }
+
+    public static func project(
+        items: [StreamAppTimelineItem],
+        paragraphs: [StreamAppTranscriptParagraph],
         visibleStartSeconds: Double,
         visibleEndSeconds: Double
     ) -> StreamAppTimelineRailSnapshot {
@@ -40,7 +69,16 @@ public enum StreamAppTimelineRailProjection {
             visibleEndSeconds: orderedVisibleEndSeconds,
             duration: duration
         )
-        let spans = (songSpans + coalescedAdSpans(adSpans))
+        let transcriptAdSpans = inferredTranscriptAdSpans(
+            from: paragraphs,
+            visibleStartSeconds: orderedVisibleStartSeconds,
+            visibleEndSeconds: orderedVisibleEndSeconds,
+            duration: duration
+        )
+        let spans = (songSpans + mergedWithTranscriptAdSpans(
+            definiteSpans: coalescedAdSpans(adSpans),
+            transcriptSpans: transcriptAdSpans
+        ))
             .sorted {
                 if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
                 if $0.isAd != $1.isAd { return !$0.isAd && $1.isAd }
@@ -69,6 +107,75 @@ public enum StreamAppTimelineRailProjection {
         )
     }
 
+    private static func inferredTranscriptAdSpans(
+        from paragraphs: [StreamAppTranscriptParagraph],
+        visibleStartSeconds: Double,
+        visibleEndSeconds: Double,
+        duration: Double
+    ) -> [StreamAppTimelineRailSpan] {
+        guard duration > 0 else { return [] }
+        let visibleParagraphs = paragraphs.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            return $0.id < $1.id
+        }.filter {
+            $0.endSeconds >= visibleStartSeconds && $0.startSeconds <= visibleEndSeconds
+        }
+        let scores = TranscriptAdScorer.scores(for: visibleParagraphs)
+        let scored = visibleParagraphs.compactMap { paragraph -> (StreamAppTranscriptParagraph, TranscriptAdScorer.Score)? in
+            guard let score = scores[paragraph.id],
+                  score.confidence >= 0.50 else { return nil }
+            return (paragraph, score)
+        }
+
+        var grouped: [(paragraphs: [StreamAppTranscriptParagraph], scores: [TranscriptAdScorer.Score])] = []
+        for entry in scored {
+            if var last = grouped.last,
+               let previous = last.paragraphs.last,
+               entry.0.startSeconds <= previous.endSeconds + 10 {
+                last.paragraphs.append(entry.0)
+                last.scores.append(entry.1)
+                grouped[grouped.count - 1] = last
+            } else {
+                grouped.append(([entry.0], [entry.1]))
+            }
+        }
+
+        return grouped.compactMap { group in
+            guard let first = group.paragraphs.first,
+                  let last = group.paragraphs.last else {
+                return nil
+            }
+            let start = first.startSeconds
+            let end = last.endSeconds
+            guard end > start else { return nil }
+            let clampedStart = clamp(start, lower: visibleStartSeconds, upper: visibleEndSeconds)
+            let clampedEnd = clamp(end, lower: visibleStartSeconds, upper: visibleEndSeconds)
+            let confidence = group.scores.map(\.confidence).max()
+            let signals = Array(Set(group.scores.flatMap(\.signals))).sorted()
+            return StreamAppTimelineRailSpan(
+                id: "ad-inferred:\(first.id)",
+                title: "AD",
+                subtitle: inferredAdSubtitle(confidence: confidence, signals: signals),
+                source: .transcript,
+                isAd: true,
+                startSeconds: start,
+                endSeconds: end,
+                normalizedStart: normalized(clampedStart, visibleStartSeconds: visibleStartSeconds, duration: duration),
+                normalizedEnd: normalized(clampedEnd, visibleStartSeconds: visibleStartSeconds, duration: duration),
+                colorToken: "ad-inferred",
+                isSeekable: false,
+                confidence: confidence,
+                signals: signals
+            )
+        }
+    }
+
+    private static func inferredAdSubtitle(confidence: Double?, signals: [String]) -> String {
+        let confidenceLabel = confidence.map { "\(Int(($0 * 100).rounded()))%" } ?? "Inferred"
+        guard !signals.isEmpty else { return "Transcript · \(confidenceLabel)" }
+        return "Transcript · \(confidenceLabel) · \(signals.prefix(3).joined(separator: ", "))"
+    }
+
     private static func coalescedAdSpans(
         _ spans: [StreamAppTimelineRailSpan]
     ) -> [StreamAppTimelineRailSpan] {
@@ -90,6 +197,30 @@ public enum StreamAppTimelineRailProjection {
             result[result.count - 1] = last
         }
         return result
+    }
+
+    private static func mergedWithTranscriptAdSpans(
+        definiteSpans: [StreamAppTimelineRailSpan],
+        transcriptSpans: [StreamAppTimelineRailSpan]
+    ) -> [StreamAppTimelineRailSpan] {
+        var result = definiteSpans
+        for transcriptSpan in transcriptSpans {
+            guard result.contains(where: { overlapsDefiniteAdSpan($0, transcriptSpan) }) else {
+                result.append(transcriptSpan)
+                continue
+            }
+        }
+        return result
+    }
+
+    private static func overlapsDefiniteAdSpan(
+        _ lhs: StreamAppTimelineRailSpan,
+        _ rhs: StreamAppTimelineRailSpan
+    ) -> Bool {
+        lhs.isAd
+            && rhs.isAd
+            && lhs.source != .transcript
+            && max(lhs.startSeconds, rhs.startSeconds) < min(lhs.endSeconds, rhs.endSeconds)
     }
 
     private static func broadcastItems(from metadata: [StreamAppMetadataItem]) -> [StreamAppTimelineItem] {
@@ -449,6 +580,7 @@ public enum StreamAppTimelineRailProjection {
         case .scte35: return "SCTE-35"
         case .icy: return "ICY"
         case .timedID3: return "ID3"
+        case .transcript: return "Transcript"
         case .unknown: return "Ad cue"
         }
     }
@@ -489,6 +621,8 @@ public enum StreamAppTimelineRailProjection {
             return "ad"
         case .icy:
             return "blue"
+        case .transcript:
+            return "ad-inferred"
         case .unknown:
             return "gray"
         }
