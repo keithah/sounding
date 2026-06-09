@@ -1,6 +1,9 @@
 import Foundation
 
 public enum TranscriptAdScorer {
+    public static let classifier = "transcript-ad-heuristic"
+    public static let classifierVersion = "1"
+
     public struct Score: Equatable, Sendable {
         public let confidence: Double
         public let signals: [String]

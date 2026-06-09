@@ -140,6 +140,77 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertTrue(inferredSpan.signals.contains { $0.contains("url") })
     }
 
+    func testTimelineRailUsesCachedTranscriptAdClassification() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:55:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 55,
+            segmentURI: "main-055.ts",
+            startedAt: "2026-05-01T15:55:01Z",
+            endedAt: "2026-05-01T15:55:11Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(55, "announcer", 55, 65, "Visit example.com."),
+                ],
+                createdAt: "2026-05-01T15:55:02Z"
+            )
+        )
+        let segmentID = try fixture.temporary.database.read { db in
+            try XCTUnwrap(
+                Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM transcript_segments WHERE run_id = ? AND sequence = ?",
+                    arguments: [runID, 55]
+                )
+            )
+        }
+        try TranscriptAdClassificationCache(database: fixture.temporary.database).upsert(
+            TranscriptAdClassificationCacheEntry(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentID,
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                ),
+                isAd: true,
+                confidence: 0.91,
+                signals: ["verifier:cached"],
+                classifiedAt: "2026-05-01T15:55:03Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 65,
+                    liveEdgeSeconds: 80
+                ),
+                paragraphLimit: 10,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: 80,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        let cachedSpan = try XCTUnwrap(snapshot.timelineRail.spans.first { $0.source == .transcript })
+        XCTAssertEqual(cachedSpan.startSeconds, 55)
+        XCTAssertEqual(cachedSpan.endSeconds, 65)
+        XCTAssertEqual(cachedSpan.confidence, 0.91)
+        XCTAssertEqual(cachedSpan.signals, ["verifier:cached"])
+    }
+
     func testTranscriptionPolicyControlsDisplayedTranscriptRows() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)

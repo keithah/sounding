@@ -140,10 +140,15 @@ public struct StreamAppTimelineStore: Sendable {
                 let recentMetadata = projection.recentMetadata(limit: request.metadataLimit)
                 let currentMetadata = projection.currentMetadata()
                 let timelineItems = projection.timelineItems(limit: request.timelineLimit)
+                let adClassifications = try TranscriptAdClassificationCache.fetch(
+                    segmentIDs: projection.paragraphs.map(\.id),
+                    db: db
+                )
                 let timelineRail = makeTimelineRail(
                     request: request,
                     metadata: projection.metadataChanges,
-                    paragraphs: projection.paragraphs
+                    paragraphs: projection.paragraphs,
+                    adClassifications: adClassifications
                 )
                 let latestSegmentEnd = try latestSegmentEndSeconds(
                     streamID: request.streamID, db: db)
@@ -978,7 +983,8 @@ public struct StreamAppTimelineStore: Sendable {
     private func makeTimelineRail(
         request: StreamAppTimelineRequest,
         metadata: [StreamAppMetadataItem],
-        paragraphs: [StreamAppTranscriptParagraph]
+        paragraphs: [StreamAppTranscriptParagraph],
+        adClassifications: [Int64: TranscriptAdClassificationCacheRow]
     ) -> StreamAppTimelineRailSnapshot {
         let itemEnd = metadata
             .map { $0.endSeconds ?? $0.startSeconds }
@@ -991,6 +997,7 @@ public struct StreamAppTimelineStore: Sendable {
         return StreamAppTimelineRailProjection.project(
             metadata: metadata,
             paragraphs: paragraphs,
+            adClassifications: adClassifications,
             visibleStartSeconds: visibleStart,
             visibleEndSeconds: visibleEnd
         )

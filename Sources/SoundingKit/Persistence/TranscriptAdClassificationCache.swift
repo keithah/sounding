@@ -85,6 +85,42 @@ public final class TranscriptAdClassificationCache {
         }
     }
 
+    static func fetch(
+        segmentIDs: [Int64],
+        classifier: String = TranscriptAdScorer.classifier,
+        classifierVersion: String = TranscriptAdScorer.classifierVersion,
+        db: Database
+    ) throws -> [Int64: TranscriptAdClassificationCacheRow] {
+        let segmentIDs = Array(Set(segmentIDs.filter { $0 > 0 })).sorted()
+        let classifier = classifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let classifierVersion = classifierVersion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !segmentIDs.isEmpty else { return [:] }
+        guard !classifier.isEmpty, !classifierVersion.isEmpty else {
+            throw TranscriptAdClassificationCacheError.invalidIdentity
+        }
+
+        let placeholders = Array(repeating: "?", count: segmentIDs.count).joined(separator: ", ")
+        var arguments = StatementArguments()
+        segmentIDs.forEach { arguments += [$0] }
+        arguments += [classifier, classifierVersion]
+        let rows = try Row.fetchAll(
+            db,
+            sql: """
+            SELECT id, segment_id, classifier, classifier_version, is_ad, confidence,
+                   signals_json, created_at, updated_at
+            FROM transcript_ad_classification_cache
+            WHERE segment_id IN (\(placeholders))
+              AND classifier = ?
+              AND classifier_version = ?
+            """,
+            arguments: arguments
+        )
+        return try Dictionary(uniqueKeysWithValues: rows.map { row in
+            let decoded = try Self.decode(row: row)
+            return (decoded.identity.segmentID, decoded)
+        })
+    }
+
     public func upsert(_ entry: TranscriptAdClassificationCacheEntry) throws {
         let identity = try validated(identity: entry.identity)
         let confidence = try validated(confidence: entry.confidence)

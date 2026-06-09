@@ -17,6 +17,7 @@ public enum StreamAppTimelineRailProjection {
     public static func project(
         metadata: [StreamAppMetadataItem],
         paragraphs: [StreamAppTranscriptParagraph],
+        adClassifications: [Int64: TranscriptAdClassificationCacheRow] = [:],
         visibleStartSeconds: Double,
         visibleEndSeconds: Double
     ) -> StreamAppTimelineRailSnapshot {
@@ -24,6 +25,7 @@ public enum StreamAppTimelineRailProjection {
         return project(
             items: items,
             paragraphs: paragraphs,
+            adClassifications: adClassifications,
             visibleStartSeconds: visibleStartSeconds,
             visibleEndSeconds: visibleEndSeconds
         )
@@ -45,6 +47,7 @@ public enum StreamAppTimelineRailProjection {
     public static func project(
         items: [StreamAppTimelineItem],
         paragraphs: [StreamAppTranscriptParagraph],
+        adClassifications: [Int64: TranscriptAdClassificationCacheRow] = [:],
         visibleStartSeconds: Double,
         visibleEndSeconds: Double
     ) -> StreamAppTimelineRailSnapshot {
@@ -71,6 +74,7 @@ public enum StreamAppTimelineRailProjection {
         )
         let transcriptAdSpans = inferredTranscriptAdSpans(
             from: paragraphs,
+            adClassifications: adClassifications,
             visibleStartSeconds: orderedVisibleStartSeconds,
             visibleEndSeconds: orderedVisibleEndSeconds,
             duration: duration
@@ -109,6 +113,7 @@ public enum StreamAppTimelineRailProjection {
 
     private static func inferredTranscriptAdSpans(
         from paragraphs: [StreamAppTranscriptParagraph],
+        adClassifications: [Int64: TranscriptAdClassificationCacheRow],
         visibleStartSeconds: Double,
         visibleEndSeconds: Double,
         duration: Double
@@ -120,8 +125,18 @@ public enum StreamAppTimelineRailProjection {
         }.filter {
             $0.endSeconds >= visibleStartSeconds && $0.startSeconds <= visibleEndSeconds
         }
-        let scores = TranscriptAdScorer.scores(for: visibleParagraphs)
+        let scores = TranscriptAdScorer.scores(for: visibleParagraphs.filter { adClassifications[$0.id] == nil })
         let scored = visibleParagraphs.compactMap { paragraph -> (StreamAppTranscriptParagraph, TranscriptAdScorer.Score)? in
+            if let classification = adClassifications[paragraph.id] {
+                guard classification.isAd else { return nil }
+                return (
+                    paragraph,
+                    TranscriptAdScorer.Score(
+                        confidence: classification.confidence,
+                        signals: classification.signals
+                    )
+                )
+            }
             guard let score = scores[paragraph.id],
                   score.confidence >= 0.50 else { return nil }
             return (paragraph, score)
