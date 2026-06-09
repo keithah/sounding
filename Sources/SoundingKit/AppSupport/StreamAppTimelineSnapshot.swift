@@ -241,6 +241,10 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
     public var speakerDisplay: StreamAppSpeakerDisplay?
     public var rawMetadata: String?
     public var isSeekable: Bool
+    public var isAd: Bool
+    public var colorToken: String?
+    public var confidence: Double?
+    public var signals: [String]
 
     public init(
         id: String,
@@ -254,7 +258,11 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         source: String? = nil,
         speakerDisplay: StreamAppSpeakerDisplay? = nil,
         rawMetadata: String? = nil,
-        isSeekable: Bool
+        isSeekable: Bool,
+        isAd: Bool = false,
+        colorToken: String? = nil,
+        confidence: Double? = nil,
+        signals: [String] = []
     ) {
         self.id = id
         self.kind = kind
@@ -268,6 +276,10 @@ public struct StreamAppTimelineItem: Equatable, Identifiable, Sendable {
         self.speakerDisplay = speakerDisplay
         self.rawMetadata = rawMetadata
         self.isSeekable = isSeekable
+        self.isAd = isAd
+        self.colorToken = colorToken
+        self.confidence = confidence
+        self.signals = signals
     }
 }
 

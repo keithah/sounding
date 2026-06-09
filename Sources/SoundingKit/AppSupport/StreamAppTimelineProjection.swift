@@ -1089,7 +1089,11 @@ public struct StreamAppTimelineProjection: Sendable {
             source: preferred.source,
             speakerDisplay: preferred.speakerDisplay,
             rawMetadata: preferred.rawMetadata ?? lhs.rawMetadata ?? rhs.rawMetadata,
-            isSeekable: lhs.isSeekable || rhs.isSeekable
+            isSeekable: lhs.isSeekable || rhs.isSeekable,
+            isAd: preferred.isAd,
+            colorToken: preferred.colorToken,
+            confidence: preferred.confidence,
+            signals: preferred.signals
         )
     }
 

@@ -209,6 +209,11 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(cachedSpan.endSeconds, 65)
         XCTAssertEqual(cachedSpan.confidence, 0.91)
         XCTAssertEqual(cachedSpan.signals, ["verifier:cached"])
+        let cachedItem = try XCTUnwrap(snapshot.timelineItems.first { $0.id == "transcript:\(segmentID)" })
+        XCTAssertTrue(cachedItem.isAd)
+        XCTAssertEqual(cachedItem.colorToken, "ad-inferred")
+        XCTAssertEqual(cachedItem.confidence, 0.91)
+        XCTAssertEqual(cachedItem.signals, ["verifier:cached"])
     }
 
     func testSnapshotCachesMissingTranscriptAdClassification() throws {
@@ -1330,6 +1335,8 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(adItem.kind, .event)
         XCTAssertEqual(adItem.title, "AD")
         XCTAssertEqual(adItem.subtitle, "PADULTHT26 | icy")
+        XCTAssertTrue(adItem.isAd)
+        XCTAssertEqual(adItem.colorToken, "ad")
         XCTAssertTrue(snapshot.timelineItems.contains { $0.subtitle == "Stingray ad copy should remain visible." })
         XCTAssertTrue(snapshot.timelineRail.spans.contains { $0.isAd && $0.startSeconds == 204 })
     }

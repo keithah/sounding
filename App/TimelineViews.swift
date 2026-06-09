@@ -676,6 +676,29 @@ struct TimelineItemButton: View {
         return source
     }
 
+    private var rowColor: Color {
+        if item.colorToken == "ad" {
+            return Color(red: 1.0, green: 0.14, blue: 0.34)
+        }
+        if item.colorToken == "ad-inferred" {
+            return Color(red: 1.0, green: 0.36, blue: 0.36)
+        }
+        return .secondary
+    }
+
+    private var rowBackgroundOpacity: Double {
+        item.isAd ? (item.colorToken == "ad-inferred" ? 0.16 : 0.22) : 0.25
+    }
+
+    private var rowBorderOpacity: Double {
+        item.isAd ? (item.colorToken == "ad-inferred" ? 0.58 : 0.72) : 0
+    }
+
+    private var adBadgeText: String {
+        guard let confidence = item.confidence, confidence.isFinite else { return "AD" }
+        return "AD \(Int((confidence * 100).rounded()))%"
+    }
+
     var body: some View {
         Button {
             if item.isSeekable {
@@ -686,19 +709,27 @@ struct TimelineItemButton: View {
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Image(systemName: item.kind.systemImage)
-                    .foregroundStyle(item.isSeekable ? .blue : .secondary)
+                    .foregroundStyle(item.isAd ? rowColor : (item.isSeekable ? .blue : .secondary))
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(timeRange(item: item))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if item.isAd {
+                            Text(adBadgeText)
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(rowColor, in: Capsule())
+                        }
                         if showsSpeaker, let speaker = item.speakerDisplay {
                             SpeakerBadge(speaker: speaker)
                         }
                         Text(primaryText)
                             .font(item.kind == .transcript && !isDiarizationEnabled ? .body : .headline)
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(item.isAd ? rowColor : .primary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let subtitle = secondaryText {
@@ -715,7 +746,14 @@ struct TimelineItemButton: View {
                 }
             }
             .padding(10)
-            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+            .background(
+                item.isAd ? rowColor.opacity(rowBackgroundOpacity) : Color.secondary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 12)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(rowColor.opacity(rowBorderOpacity), lineWidth: item.isAd ? 1 : 0)
+            }
         }
         .buttonStyle(.plain)
         .timelineItemContextMenu(

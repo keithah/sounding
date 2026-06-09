@@ -139,7 +139,7 @@ public struct StreamAppTimelineStore: Sendable {
                 )
                 let recentMetadata = projection.recentMetadata(limit: request.metadataLimit)
                 let currentMetadata = projection.currentMetadata()
-                let timelineItems = projection.timelineItems(limit: request.timelineLimit)
+                let projectedTimelineItems = projection.timelineItems(limit: request.timelineLimit)
                 let adClassifications = try cachedTranscriptAdClassifications(
                     for: projection.paragraphs,
                     classifiedAt: request.refreshedAt,
@@ -150,6 +150,10 @@ public struct StreamAppTimelineStore: Sendable {
                     metadata: projection.metadataChanges,
                     paragraphs: projection.paragraphs,
                     adClassifications: adClassifications
+                )
+                let timelineItems = timelineItemsWithAdDisplay(
+                    projectedTimelineItems,
+                    rail: timelineRail
                 )
                 let latestSegmentEnd = try latestSegmentEndSeconds(
                     streamID: request.streamID, db: db)
@@ -174,6 +178,35 @@ public struct StreamAppTimelineStore: Sendable {
         } catch {
             throw StreamAppTimelineStoreError.databaseReadFailed
         }
+    }
+
+    private func timelineItemsWithAdDisplay(
+        _ items: [StreamAppTimelineItem],
+        rail: StreamAppTimelineRailSnapshot
+    ) -> [StreamAppTimelineItem] {
+        let adSpans = rail.spans.filter { $0.isAd }
+        guard !adSpans.isEmpty else { return items }
+        return items.map { item in
+            guard item.kind != .song,
+                  let span = adSpans.first(where: { overlaps(item, span: $0) })
+            else {
+                return item
+            }
+            var updated = item
+            updated.isAd = true
+            updated.colorToken = span.colorToken
+            updated.confidence = span.confidence
+            updated.signals = span.signals
+            return updated
+        }
+    }
+
+    private func overlaps(_ item: StreamAppTimelineItem, span: StreamAppTimelineRailSpan) -> Bool {
+        let itemEnd = item.endSeconds ?? item.startSeconds
+        if itemEnd <= item.startSeconds {
+            return item.startSeconds >= span.startSeconds && item.startSeconds <= span.endSeconds
+        }
+        return max(item.startSeconds, span.startSeconds) < min(itemEnd, span.endSeconds)
     }
 
     private func cachedTranscriptAdClassifications(
