@@ -133,6 +133,22 @@ public final class TranscriptAdClassificationCache {
         }
     }
 
+    @discardableResult
+    public func deleteAll() throws -> Int {
+        do {
+            return try database.write { db in
+                let count = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM transcript_ad_classification_cache"
+                ) ?? 0
+                try db.execute(sql: "DELETE FROM transcript_ad_classification_cache")
+                return count
+            }
+        } catch {
+            throw TranscriptAdClassificationCacheError.databaseWriteFailed(message: String(describing: error))
+        }
+    }
+
     static func upsert(_ entry: TranscriptAdClassificationCacheEntry, db: Database) throws {
         let identity = try validated(identity: entry.identity)
         let confidence = try validated(confidence: entry.confidence)

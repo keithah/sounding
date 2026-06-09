@@ -19,7 +19,8 @@ final class SoundingAppPreferencesStorageTests: XCTestCase {
             audioArchiveDirectory: archiveDirectory,
             audioArchiveMaximumBytes: 123_456,
             audioArchiveDefaultRetentionSeconds: 3_600,
-            isDiarizationEnabled: true
+            isDiarizationEnabled: true,
+            isTranscriptAdVerifierEnabled: true
         )
         let preferences = storage.load(secretStore: StatusSecretStore(status: .present))
 
@@ -30,6 +31,7 @@ final class SoundingAppPreferencesStorageTests: XCTestCase {
         XCTAssertEqual(preferences.audioArchiveMaximumBytes, 123_456)
         XCTAssertEqual(preferences.audioArchiveDefaultRetentionSeconds, 3_600)
         XCTAssertEqual(preferences.isDiarizationEnabled, true)
+        XCTAssertEqual(preferences.isTranscriptAdVerifierEnabled, true)
         XCTAssertEqual(preferences.acoustIDKeyStatus, .present)
         XCTAssertFalse(String(describing: preferences).contains("acoustid-secret"))
     }
@@ -120,6 +122,7 @@ final class SoundingAppPreferencesStorageTests: XCTestCase {
         XCTAssertEqual(preferences.whisperModelName, SoundingAppPreferences.defaultWhisperModelName)
         XCTAssertEqual(preferences.rollingBufferTargetSeconds, RollingBufferConfiguration.appDefault().targetDurationSeconds)
         XCTAssertFalse(preferences.isDiarizationEnabled)
+        XCTAssertFalse(preferences.isTranscriptAdVerifierEnabled)
         XCTAssertEqual(preferences.acoustIDKeyStatus, .missing)
         XCTAssertEqual(preferences.databaseURL.lastPathComponent, SoundingAppPreferences.defaultDatabaseFilename)
     }

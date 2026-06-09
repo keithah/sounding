@@ -11,6 +11,7 @@ final class AppPreferencesController: ObservableObject {
     @Published var audioArchiveMaximumGB: Double
     @Published var audioArchiveRetentionHours: Double
     @Published var isDiarizationEnabled: Bool
+    @Published var isTranscriptAdVerifierEnabled: Bool
     @Published private(set) var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
     @Published private(set) var issues: [SoundingAppConfigurationIssue]
     @Published private(set) var actionMessage: String?
@@ -34,6 +35,7 @@ final class AppPreferencesController: ObservableObject {
         audioArchiveMaximumGB = Double(preferences.audioArchiveMaximumBytes) / 1_073_741_824
         audioArchiveRetentionHours = preferences.audioArchiveDefaultRetentionSeconds / 3_600
         isDiarizationEnabled = preferences.isDiarizationEnabled
+        isTranscriptAdVerifierEnabled = preferences.isTranscriptAdVerifierEnabled
         acoustIDKeyStatus = preferences.acoustIDKeyStatus
         issues = SoundingAppConfiguration.validated(preferences: preferences).issues
     }
@@ -51,6 +53,7 @@ final class AppPreferencesController: ObservableObject {
         audioArchiveMaximumGB = Double(preferences.audioArchiveMaximumBytes) / 1_073_741_824
         audioArchiveRetentionHours = preferences.audioArchiveDefaultRetentionSeconds / 3_600
         isDiarizationEnabled = preferences.isDiarizationEnabled
+        isTranscriptAdVerifierEnabled = preferences.isTranscriptAdVerifierEnabled
         acoustIDKeyStatus = preferences.acoustIDKeyStatus
         issues = SoundingAppConfiguration.validated(preferences: preferences).issues
     }
@@ -64,7 +67,8 @@ final class AppPreferencesController: ObservableObject {
             audioArchiveDirectory: archiveDirectory(),
             audioArchiveMaximumBytes: Int64(max(0.01, audioArchiveMaximumGB) * 1_073_741_824),
             audioArchiveDefaultRetentionSeconds: max(0.01, audioArchiveRetentionHours) * 3_600,
-            isDiarizationEnabled: isDiarizationEnabled
+            isDiarizationEnabled: isDiarizationEnabled,
+            isTranscriptAdVerifierEnabled: isTranscriptAdVerifierEnabled
         )
         actionMessage = "Preferences saved. Restart the app runtime to apply startup settings."
         refreshStatus()
@@ -153,6 +157,21 @@ final class AppPreferencesController: ObservableObject {
         refreshStatus()
     }
 
+    var transcriptAdVerifierAvailability: FoundationModelsAdVerifierAvailabilityStatus {
+        FoundationModelsAdVerifierFactory.availability()
+    }
+
+    func resetTranscriptAdClassifications() {
+        do {
+            let database = try SoundingDatabase(fileURL: currentPreferences().databaseURL)
+            let deletedCount = try TranscriptAdClassificationCache(database: database).deleteAll()
+            actionMessage = "Reset \(deletedCount) transcript ad classification\(deletedCount == 1 ? "" : "s")."
+        } catch {
+            actionMessage = IngestRedaction.redact(String(describing: error))
+        }
+        refreshStatus()
+    }
+
     private func archiveDirectory() -> URL? {
         let trimmed = audioArchivePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -171,6 +190,7 @@ struct PreferencesView: View {
                 softwareUpdateSection
                 acoustIDEnrichmentSection
                 whisperSection
+                transcriptAdVerifierSection
                 rollingBufferSection
                 audioArchiveSection
                 databaseSection
@@ -280,6 +300,38 @@ struct PreferencesView: View {
 
             Button("Save Model", systemImage: "checkmark.circle") {
                 controller.saveNonSecretPreferences()
+            }
+        }
+    }
+
+    private var transcriptAdVerifierSection: some View {
+        SettingsSection(title: "Transcript Ad Verification", systemImage: "sparkles") {
+            let availability = controller.transcriptAdVerifierAvailability
+            HStack(alignment: .center, spacing: 12) {
+                if availability.isAvailable {
+                    Pill(text: "Available", color: .green, systemImage: "checkmark.circle")
+                } else {
+                    Pill(text: "Unavailable", color: .orange, systemImage: "exclamationmark.triangle")
+                }
+                Text(availability.message)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            Toggle("Use on-device verifier", isOn: $controller.isTranscriptAdVerifierEnabled)
+                .disabled(!availability.isAvailable)
+
+            HStack {
+                Button("Save Verifier Setting", systemImage: "checkmark.circle") {
+                    controller.saveNonSecretPreferences()
+                }
+                .buttonStyle(.bordered)
+                .disabled(controller.isTranscriptAdVerifierEnabled && !availability.isAvailable)
+
+                Button("Reset Classifications", systemImage: "arrow.counterclockwise") {
+                    controller.resetTranscriptAdClassifications()
+                }
+                .buttonStyle(.bordered)
             }
         }
     }

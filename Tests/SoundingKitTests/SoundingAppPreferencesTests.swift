@@ -14,6 +14,7 @@ final class SoundingAppPreferencesTests: XCTestCase {
         )
         XCTAssertEqual(preferences.acoustIDKeyStatus, .missing)
         XCTAssertFalse(preferences.isDiarizationEnabled)
+        XCTAssertFalse(preferences.isTranscriptAdVerifierEnabled)
         XCTAssertEqual(preferences.databaseURL.lastPathComponent, "Sounding.sqlite")
         XCTAssertEqual(preferences.databaseURL.deletingLastPathComponent().lastPathComponent, "Sounding")
         XCTAssertFalse(String(describing: preferences).contains("api_key"))
@@ -37,10 +38,27 @@ final class SoundingAppPreferencesTests: XCTestCase {
         XCTAssertEqual(configuration.whisperModelName, "tiny.en")
         XCTAssertEqual(configuration.rollingBuffer.targetDurationSeconds, 120)
         XCTAssertFalse(configuration.isDiarizationEnabled)
+        XCTAssertFalse(configuration.isTranscriptAdVerifierEnabled)
         XCTAssertFalse(configuration.hasBlockingIssues)
         XCTAssertEqual(configuration.issues.map(\.id), ["acoustid.key-missing"])
         XCTAssertEqual(configuration.issues.first?.severity, .warning)
         XCTAssertEqual(configuration.issues.first?.action.kind, .addAcoustIDKey)
+    }
+
+    func testTranscriptAdVerifierPreferenceFlowsIntoConfiguration() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let preferences = SoundingAppPreferences(
+            databaseURL: directory.appendingPathComponent("Sounding.sqlite"),
+            isTranscriptAdVerifierEnabled: true,
+            acoustIDKeyStatus: .present
+        )
+
+        let configuration = SoundingAppConfiguration.validated(preferences: preferences)
+
+        XCTAssertTrue(preferences.isTranscriptAdVerifierEnabled)
+        XCTAssertTrue(configuration.isTranscriptAdVerifierEnabled)
+        XCTAssertFalse(configuration.hasBlockingIssues)
     }
 
     func testPresentAcoustIDStatusIsStatusOnlyAndProducesNoIssue() throws {

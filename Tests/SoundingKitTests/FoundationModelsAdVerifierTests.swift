@@ -70,6 +70,9 @@ final class FoundationModelsAdVerifierTests: XCTestCase {
     }
 
     func testAvailabilityFactoryIsCallableOnCurrentRuntime() {
+        let status = FoundationModelsAdVerifierFactory.availability()
+
+        XCTAssertFalse(status.message.isEmpty)
         _ = FoundationModelsAdVerifierFactory.makeIfAvailable(
             now: { "2026-06-09T21:13:00Z" }
         )

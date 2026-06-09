@@ -10,6 +10,8 @@ public struct SoundingAppPreferencesStorage {
         public static let audioArchiveDefaultRetentionSeconds =
             "sounding.preferences.audioArchiveDefaultRetentionSeconds"
         public static let isDiarizationEnabled = "sounding.preferences.isDiarizationEnabled"
+        public static let isTranscriptAdVerifierEnabled =
+            "sounding.preferences.isTranscriptAdVerifierEnabled"
     }
 
     private let defaults: UserDefaults
@@ -48,6 +50,7 @@ public struct SoundingAppPreferencesStorage {
                 audioArchiveDefaultRetentionSeconds: validAudioArchiveRetentionSeconds(
                     audioArchiveRetentionSeconds),
                 isDiarizationEnabled: defaults.bool(forKey: Key.isDiarizationEnabled),
+                isTranscriptAdVerifierEnabled: defaults.bool(forKey: Key.isTranscriptAdVerifierEnabled),
                 secretStore: secretStore,
                 fileManager: fileManager
             )
@@ -62,6 +65,7 @@ public struct SoundingAppPreferencesStorage {
             audioArchiveDefaultRetentionSeconds: validAudioArchiveRetentionSeconds(
                 audioArchiveRetentionSeconds),
             isDiarizationEnabled: defaults.bool(forKey: Key.isDiarizationEnabled),
+            isTranscriptAdVerifierEnabled: defaults.bool(forKey: Key.isTranscriptAdVerifierEnabled),
             fileManager: fileManager
         )
     }
@@ -74,7 +78,8 @@ public struct SoundingAppPreferencesStorage {
         audioArchiveMaximumBytes: Int64 = SoundingAppPreferences.defaultAudioArchiveMaximumBytes,
         audioArchiveDefaultRetentionSeconds: Double =
             SoundingAppPreferences.defaultAudioArchiveRetentionSeconds,
-        isDiarizationEnabled: Bool = false
+        isDiarizationEnabled: Bool = false,
+        isTranscriptAdVerifierEnabled: Bool = false
     ) {
         defaults.set(databaseURL.path, forKey: Key.databasePath)
         defaults.set(whisperModelName.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.whisperModelName)
@@ -90,6 +95,7 @@ public struct SoundingAppPreferencesStorage {
             forKey: Key.audioArchiveDefaultRetentionSeconds
         )
         defaults.set(isDiarizationEnabled, forKey: Key.isDiarizationEnabled)
+        defaults.set(isTranscriptAdVerifierEnabled, forKey: Key.isTranscriptAdVerifierEnabled)
     }
 
     public func resetNonSecretPreferences() {
@@ -100,6 +106,7 @@ public struct SoundingAppPreferencesStorage {
         defaults.removeObject(forKey: Key.audioArchiveMaximumBytes)
         defaults.removeObject(forKey: Key.audioArchiveDefaultRetentionSeconds)
         defaults.removeObject(forKey: Key.isDiarizationEnabled)
+        defaults.removeObject(forKey: Key.isTranscriptAdVerifierEnabled)
     }
 
     public static func clampedRollingBufferSeconds(_ value: Double) -> Double {

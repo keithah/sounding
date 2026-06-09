@@ -61,6 +61,22 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
         XCTAssertEqual(rows[0]["updated_at"] as String, "2026-05-01T10:05:00Z")
     }
 
+    func testDeleteAllRemovesCachedTranscriptAdClassifications() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let firstSegmentID = try makeTranscriptSegment(database: temporary.database, sequence: 0)
+        let secondSegmentID = try makeTranscriptSegment(database: temporary.database, sequence: 1)
+        let cache = TranscriptAdClassificationCache(database: temporary.database)
+
+        try cache.upsert(.fixture(segmentID: firstSegmentID, isAd: true))
+        try cache.upsert(.fixture(segmentID: secondSegmentID, isAd: false))
+
+        let deletedCount = try cache.deleteAll()
+
+        XCTAssertEqual(deletedCount, 2)
+        XCTAssertNil(try cache.fetch(identity: .fixture(segmentID: firstSegmentID)))
+        XCTAssertNil(try cache.fetch(identity: .fixture(segmentID: secondSegmentID)))
+    }
+
     func testRejectsInvalidIdentityConfidenceAndSignals() throws {
         let temporary = try TemporarySoundingDatabase()
         let cache = TranscriptAdClassificationCache(database: temporary.database)
@@ -82,12 +98,12 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
         }
     }
 
-    private func makeTranscriptSegment(database: SoundingDatabase) throws -> Int64 {
+    private func makeTranscriptSegment(database: SoundingDatabase, sequence: Int = 0) throws -> Int64 {
         let registry = StreamRegistry(database: database)
         let stream = try registry.add(
-            name: "Cache Test",
+            name: "Cache Test \(sequence)",
             streamType: .hls,
-            source: "https://example.test/cache.m3u8",
+            source: "https://example.test/cache-\(sequence).m3u8",
             createdAt: "2026-05-01T09:59:00Z"
         )
         let writer = IngestPersistence(database: database)
@@ -99,7 +115,7 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
         let chunkID = try writer.createChunk(
             runID: runID,
             sequence: 0,
-            segmentURI: "cache-000.ts",
+            segmentURI: "cache-\(sequence).ts",
             startedAt: "2026-05-01T10:00:01Z",
             endedAt: "2026-05-01T10:00:11Z"
         )
@@ -109,7 +125,7 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
                 chunkID: chunkID,
                 segments: [
                     TranscriptSegmentDraft(
-                        sequence: 0,
+                        sequence: sequence,
                         speakerLabel: "announcer",
                         startSeconds: 0,
                         endSeconds: 10,
@@ -121,12 +137,24 @@ final class TranscriptAdClassificationCacheTests: XCTestCase {
             )
         )
         return try database.read { db in
-            try Int64.fetchOne(db, sql: "SELECT id FROM transcript_segments LIMIT 1")
+            try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM transcript_segments WHERE chunk_id = ? LIMIT 1",
+                arguments: [chunkID]
+            )
         }!
     }
 }
 
 private extension TranscriptAdClassificationCacheIdentity {
+    static func fixture(segmentID: Int64) -> TranscriptAdClassificationCacheIdentity {
+        TranscriptAdClassificationCacheIdentity(
+            segmentID: segmentID,
+            classifier: "transcript-ad-heuristic",
+            classifierVersion: "1"
+        )
+    }
+
     static var fixture: TranscriptAdClassificationCacheIdentity {
         TranscriptAdClassificationCacheIdentity(
             segmentID: 1,

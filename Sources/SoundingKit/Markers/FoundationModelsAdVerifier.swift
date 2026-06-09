@@ -9,7 +9,42 @@ public enum FoundationModelsAdVerifierError: Error, Equatable, Sendable {
     case invalidResponse
 }
 
+public enum FoundationModelsAdVerifierAvailabilityStatus: Equatable, Sendable {
+    case available
+    case unavailable(message: String)
+
+    public var isAvailable: Bool {
+        if case .available = self { return true }
+        return false
+    }
+
+    public var message: String {
+        switch self {
+        case .available:
+            return "Available"
+        case .unavailable(let message):
+            return message
+        }
+    }
+}
+
 public enum FoundationModelsAdVerifierFactory {
+    public static func availability() -> FoundationModelsAdVerifierAvailabilityStatus {
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, *) {
+            switch SystemLanguageModel.default.availability {
+            case .available:
+                return .available
+            case .unavailable(let reason):
+                return .unavailable(message: unavailableMessage(for: reason))
+            }
+        }
+        return .unavailable(message: "Requires macOS 26 or later.")
+        #else
+        return .unavailable(message: "Foundation Models is unavailable in this build.")
+        #endif
+    }
+
     public static func makeIfAvailable(
         now: @escaping @Sendable () -> String = { SoundingTimestampClock.timestamp() }
     ) -> (any TranscriptAdVerifier)? {
@@ -20,6 +55,24 @@ public enum FoundationModelsAdVerifierFactory {
         #endif
         return nil
     }
+
+    #if canImport(FoundationModels)
+    @available(macOS 26.0, *)
+    private static func unavailableMessage(
+        for reason: SystemLanguageModel.Availability.UnavailableReason
+    ) -> String {
+        switch reason {
+        case .deviceNotEligible:
+            return "This Mac is not eligible for Apple Intelligence."
+        case .appleIntelligenceNotEnabled:
+            return "Enable Apple Intelligence to use on-device ad verification."
+        case .modelNotReady:
+            return "Apple Intelligence is still preparing the local model."
+        @unknown default:
+            return "Foundation Models is currently unavailable."
+        }
+    }
+    #endif
 }
 
 enum FoundationModelsAdVerifierResponseParser {

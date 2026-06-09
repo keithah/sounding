@@ -116,6 +116,7 @@ public struct SoundingAppPreferences: Equatable, Sendable {
     public var audioArchiveMaximumBytes: Int64
     public var audioArchiveDefaultRetentionSeconds: Double
     public var isDiarizationEnabled: Bool
+    public var isTranscriptAdVerifierEnabled: Bool
     public var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
 
     public init(
@@ -126,6 +127,7 @@ public struct SoundingAppPreferences: Equatable, Sendable {
         audioArchiveMaximumBytes: Int64 = Self.defaultAudioArchiveMaximumBytes,
         audioArchiveDefaultRetentionSeconds: Double = Self.defaultAudioArchiveRetentionSeconds,
         isDiarizationEnabled: Bool = false,
+        isTranscriptAdVerifierEnabled: Bool = false,
         acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus = .missing,
         fileManager: FileManager = .default
     ) {
@@ -136,6 +138,7 @@ public struct SoundingAppPreferences: Equatable, Sendable {
         self.audioArchiveMaximumBytes = audioArchiveMaximumBytes
         self.audioArchiveDefaultRetentionSeconds = audioArchiveDefaultRetentionSeconds
         self.isDiarizationEnabled = isDiarizationEnabled
+        self.isTranscriptAdVerifierEnabled = isTranscriptAdVerifierEnabled
         self.acoustIDKeyStatus = acoustIDKeyStatus
     }
 
@@ -147,6 +150,7 @@ public struct SoundingAppPreferences: Equatable, Sendable {
         audioArchiveMaximumBytes: Int64 = Self.defaultAudioArchiveMaximumBytes,
         audioArchiveDefaultRetentionSeconds: Double = Self.defaultAudioArchiveRetentionSeconds,
         isDiarizationEnabled: Bool = false,
+        isTranscriptAdVerifierEnabled: Bool = false,
         secretStore: any AppSecretStore,
         fileManager: FileManager = .default
     ) {
@@ -164,6 +168,7 @@ public struct SoundingAppPreferences: Equatable, Sendable {
             audioArchiveMaximumBytes: audioArchiveMaximumBytes,
             audioArchiveDefaultRetentionSeconds: audioArchiveDefaultRetentionSeconds,
             isDiarizationEnabled: isDiarizationEnabled,
+            isTranscriptAdVerifierEnabled: isTranscriptAdVerifierEnabled,
             acoustIDKeyStatus: status,
             fileManager: fileManager
         )
@@ -189,6 +194,7 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
     public var audioArchiveMaximumBytes: Int64
     public var audioArchiveDefaultRetentionSeconds: Double
     public var isDiarizationEnabled: Bool
+    public var isTranscriptAdVerifierEnabled: Bool
     public var acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus
     public var issues: [SoundingAppConfigurationIssue]
 
@@ -206,6 +212,7 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
         audioArchiveMaximumBytes: Int64 = SoundingAppPreferences.defaultAudioArchiveMaximumBytes,
         audioArchiveDefaultRetentionSeconds: Double = SoundingAppPreferences.defaultAudioArchiveRetentionSeconds,
         isDiarizationEnabled: Bool = false,
+        isTranscriptAdVerifierEnabled: Bool = false,
         acoustIDKeyStatus: SoundingAppAcoustIDKeyStatus,
         issues: [SoundingAppConfigurationIssue] = []
     ) {
@@ -216,6 +223,7 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
         self.audioArchiveMaximumBytes = audioArchiveMaximumBytes
         self.audioArchiveDefaultRetentionSeconds = audioArchiveDefaultRetentionSeconds
         self.isDiarizationEnabled = isDiarizationEnabled
+        self.isTranscriptAdVerifierEnabled = isTranscriptAdVerifierEnabled
         self.acoustIDKeyStatus = acoustIDKeyStatus
         self.issues = issues
     }
@@ -255,6 +263,7 @@ public struct SoundingAppConfiguration: Equatable, Sendable {
             audioArchiveMaximumBytes: archiveMaximumBytes,
             audioArchiveDefaultRetentionSeconds: archiveRetentionSeconds,
             isDiarizationEnabled: preferences.isDiarizationEnabled,
+            isTranscriptAdVerifierEnabled: preferences.isTranscriptAdVerifierEnabled,
             acoustIDKeyStatus: preferences.acoustIDKeyStatus,
             issues: issues
         )
