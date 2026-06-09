@@ -612,6 +612,84 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         )
     }
 
+    func testNonSongPolicyKeepsTranscriptInsideICYNonSongMetadataWindow() {
+        let speaker = display(StreamAppSpeakerDisplayProjection.unknownSpeakerLabel)
+        let projection = StreamAppTimelineProjection(
+            paragraphs: [
+                paragraph(1, speaker: speaker, start: 214, end: 226, text: "Ad copy under placeholder metadata."),
+                paragraph(2, speaker: speaker, start: 190, end: 198, text: "Lyrics before placeholder."),
+            ],
+            metadata: [
+                metadata(
+                    "song:stressed-out",
+                    title: "Stressed Out",
+                    artist: "TWENTY ONE PILOTS",
+                    start: 0,
+                    end: 360,
+                    source: "icy"
+                ),
+                metadata(
+                    "event:padultht26",
+                    title: "PADULTHT26",
+                    artist: "Stingray",
+                    start: 204,
+                    end: 204,
+                    kind: .event,
+                    source: "icy"
+                ),
+            ],
+            transcriptionPolicy: .nonSongs
+        )
+
+        XCTAssertEqual(
+            projection.timelineItems(limit: 10).filter { $0.kind == .transcript }.map(\.subtitle),
+            ["Ad copy under placeholder metadata."]
+        )
+    }
+
+    func testNonSongPolicyKeepsTranscriptInsideGenericICYNonMusicMetadataWindow() {
+        let speaker = display(StreamAppSpeakerDisplayProjection.unknownSpeakerLabel)
+        let projection = StreamAppTimelineProjection(
+            paragraphs: [
+                paragraph(1, speaker: speaker, start: 66, end: 78, text: "Station promo transcript."),
+                paragraph(2, speaker: speaker, start: 42, end: 50, text: "Lyrics before promo."),
+            ],
+            metadata: [
+                metadata(
+                    "song:active",
+                    title: "Active Song",
+                    artist: "Known Artist",
+                    start: 0,
+                    end: 180,
+                    source: "icy"
+                ),
+                metadata(
+                    "event:promo",
+                    title: "Station promo",
+                    artist: nil,
+                    start: 60,
+                    end: 60,
+                    kind: .event,
+                    source: "icy"
+                ),
+                metadata(
+                    "song:next",
+                    title: "Next Song",
+                    artist: "Known Artist",
+                    start: 90,
+                    end: 180,
+                    source: "icy"
+                ),
+            ],
+            transcriptionPolicy: .nonSongs
+        )
+
+        XCTAssertEqual(
+            projection.timelineItems(limit: 10).filter { $0.kind == .transcript }.map(\.subtitle),
+            ["Station promo transcript."]
+        )
+    }
+
     private func display(_ label: String) -> StreamAppSpeakerDisplay {
         StreamAppSpeakerDisplay(
             rawLabel: label,

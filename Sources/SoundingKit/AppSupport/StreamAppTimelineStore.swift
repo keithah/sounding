@@ -61,7 +61,7 @@ public struct StreamAppTimelineStore: Sendable {
     public func snapshot(request: StreamAppTimelineRequest) throws -> StreamAppTimelineSnapshot {
         try validate(request)
         do {
-            return try database.read { db in
+            return try database.write { db in
                 guard try streamExists(request.streamID, db: db) else {
                     throw StreamAppTimelineStoreError.streamNotFound
                 }
@@ -140,8 +140,9 @@ public struct StreamAppTimelineStore: Sendable {
                 let recentMetadata = projection.recentMetadata(limit: request.metadataLimit)
                 let currentMetadata = projection.currentMetadata()
                 let timelineItems = projection.timelineItems(limit: request.timelineLimit)
-                let adClassifications = try TranscriptAdClassificationCache.fetch(
-                    segmentIDs: projection.paragraphs.map(\.id),
+                let adClassifications = try cachedTranscriptAdClassifications(
+                    for: projection.paragraphs,
+                    classifiedAt: request.refreshedAt,
                     db: db
                 )
                 let timelineRail = makeTimelineRail(
@@ -173,6 +174,43 @@ public struct StreamAppTimelineStore: Sendable {
         } catch {
             throw StreamAppTimelineStoreError.databaseReadFailed
         }
+    }
+
+    private func cachedTranscriptAdClassifications(
+        for paragraphs: [StreamAppTranscriptParagraph],
+        classifiedAt: String,
+        db: Database
+    ) throws -> [Int64: TranscriptAdClassificationCacheRow] {
+        let segmentIDs = paragraphs.map(\.id)
+        var cached = try TranscriptAdClassificationCache.fetch(segmentIDs: segmentIDs, db: db)
+        let missingParagraphs = paragraphs.filter { cached[$0.id] == nil }
+        guard !missingParagraphs.isEmpty else { return cached }
+
+        let scores = TranscriptAdScorer.scores(for: paragraphs)
+        for paragraph in missingParagraphs {
+            let score = scores[paragraph.id] ?? TranscriptAdScorer.score(paragraph: paragraph, neighbors: [])
+            try TranscriptAdClassificationCache.upsert(
+                TranscriptAdClassificationCacheEntry(
+                    identity: TranscriptAdClassificationCacheIdentity(
+                        segmentID: paragraph.id,
+                        classifier: TranscriptAdScorer.classifier,
+                        classifierVersion: TranscriptAdScorer.classifierVersion
+                    ),
+                    isAd: score.confidence >= 0.50,
+                    confidence: score.confidence,
+                    signals: Self.cacheSignals(for: score),
+                    classifiedAt: classifiedAt
+                ),
+                db: db
+            )
+        }
+        cached = try TranscriptAdClassificationCache.fetch(segmentIDs: segmentIDs, db: db)
+        return cached
+    }
+
+    private static func cacheSignals(for score: TranscriptAdScorer.Score) -> [String] {
+        guard !score.signals.isEmpty else { return ["heuristic:no-signals"] }
+        return score.signals
     }
 
     @discardableResult
@@ -775,16 +813,22 @@ public struct StreamAppTimelineStore: Sendable {
             let safeMarkerPayload = markerPayload.map(IngestRedaction.diagnostic)
             let isAdvertisementMarker = markerPayload?
                 .range(of: "advertisement", options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            let isPlaceholderAdMarker = isStingrayPlaceholderAdMarker(
+                markerTitle: markerTitle,
+                markerArtist: markerArtist
+            )
             let displayTitle = eventDisplayTitle(
                 classification: classification,
                 markerType: markerType,
                 markerTitle: markerTitle,
-                isAdvertisementMarker: isAdvertisementMarker
+                isAdvertisementMarker: isAdvertisementMarker,
+                isPlaceholderAdMarker: isPlaceholderAdMarker
             ) ?? classification
             let isAdBoundary = classification == MarkerClassification.adStart.rawValue
                 || classification == MarkerClassification.adEnd.rawValue
                 || displayTitle.caseInsensitiveCompare("AD") == .orderedSame
                 || isAdvertisementMarker
+                || isPlaceholderAdMarker
             let isMusicMetadata = !isAdBoundary
                 && ProgramMetadataClassifier.isMusic(
                     title: displayTitle,
@@ -883,9 +927,11 @@ public struct StreamAppTimelineStore: Sendable {
         classification: String,
         markerType: String,
         markerTitle: String?,
-        isAdvertisementMarker: Bool
+        isAdvertisementMarker: Bool,
+        isPlaceholderAdMarker: Bool = false
     ) -> String? {
-        if genericAdvertisementTitle(markerTitle, isAdvertisementMarker: isAdvertisementMarker) {
+        if isPlaceholderAdMarker
+            || genericAdvertisementTitle(markerTitle, isAdvertisementMarker: isAdvertisementMarker) {
             return "AD"
         }
         if let boundaryTitle = eventTitle(for: classification) {
@@ -906,6 +952,27 @@ public struct StreamAppTimelineStore: Sendable {
             || normalizedTitle?.isEmpty == true
             || normalizedTitle == "ad"
             || normalizedTitle == "advertisement"
+    }
+
+    private func isStingrayPlaceholderAdMarker(
+        markerTitle: String?,
+        markerArtist: String?
+    ) -> Bool {
+        guard let markerTitle = markerTitle?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            !markerTitle.isEmpty
+        else { return false }
+        let normalizedArtist = markerArtist?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let titleIsPlaceholder = markerTitle.range(
+            of: #"^(stingray\s*-\s*)?padultht[0-9]+$"#,
+            options: [.regularExpression]
+        ) != nil
+        guard titleIsPlaceholder else { return false }
+        return normalizedArtist?.contains("stingray") == true
+            || markerTitle.hasPrefix("stingray")
     }
 
     private func eventTitle(for classification: String) -> String? {

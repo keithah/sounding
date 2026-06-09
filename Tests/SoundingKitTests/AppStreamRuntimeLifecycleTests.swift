@@ -333,7 +333,7 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
 
         await runtime.setMuted(streamID: second.id, isMuted: true)
         let secondSelectedAfterMute = await playbackSelection.isSelected(streamID: second.id)
-        XCTAssertFalse(secondSelectedAfterMute)
+        XCTAssertTrue(secondSelectedAfterMute)
 
         _ = await rollingBuffer.append([
             SharedPCMFrame(
@@ -349,7 +349,68 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         XCTAssertTrue(firstSelectedAfterUnmute)
 
         let playbackActions = await player.actions()
-        XCTAssertEqual(playbackActions, ["replace:9"])
+        XCTAssertEqual(playbackActions, ["play:9"])
+        await gate.release()
+    }
+
+    func testMuteUnmuteCurrentPlaybackOwnerKeepsSelectionAndDoesNotReplay() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Tailgate",
+            streamType: "icy",
+            source: "https://example.test/tailgate.mp3"
+        )
+        let gate = RuntimeGate()
+        let ingester = RecordingBlockingAppRuntimeIngester(gate: gate)
+        let player = RecordingRuntimePlaybackAdapter()
+        let playbackSelection = AppPlaybackStreamSelection()
+        let rollingBuffer = RollingPCMBuffer(
+            configuration: RollingBufferConfiguration(
+                targetDurationSeconds: 120,
+                hotMemoryDurationSeconds: 120,
+                maximumSpillBytes: 0
+            )
+        )
+        await rollingBuffer.start(streamID: stream.id)
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: .noRetry,
+            playbackTimeline: AppPlayerTimelineClock(),
+            rollingBuffer: rollingBuffer,
+            playbackController: player,
+            playbackSelection: playbackSelection
+        )
+
+        try await runtime.start(streamID: stream.id)
+        for _ in 0..<20 {
+            if await ingester.callCount() >= 1 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let initiallySelected = await playbackSelection.isSelected(streamID: stream.id)
+        let initiallyPreparedStreams = await player.preparedStreams()
+        XCTAssertTrue(initiallySelected)
+        XCTAssertEqual(initiallyPreparedStreams, [stream.id])
+
+        _ = await rollingBuffer.append([
+            SharedPCMFrame(
+                streamID: stream.id,
+                sequence: 11,
+                audio: Data([0x11]),
+                startSeconds: 110,
+                endSeconds: 116
+            )
+        ])
+        await runtime.setMuted(streamID: stream.id, isMuted: true)
+        await runtime.setMuted(streamID: stream.id, isMuted: false)
+
+        let selectedAfterUnmute = await playbackSelection.isSelected(streamID: stream.id)
+        let preparedStreamsAfterUnmute = await player.preparedStreams()
+        let playbackActionsAfterUnmute = await player.actions()
+        XCTAssertTrue(selectedAfterUnmute)
+        XCTAssertEqual(preparedStreamsAfterUnmute, [stream.id])
+        XCTAssertEqual(playbackActionsAfterUnmute, [])
         await gate.release()
     }
 

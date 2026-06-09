@@ -61,7 +61,7 @@ public final class TranscriptAdClassificationCache {
     }
 
     public func fetch(identity: TranscriptAdClassificationCacheIdentity) throws -> TranscriptAdClassificationCacheRow? {
-        let identity = try validated(identity: identity)
+        let identity = try Self.validated(identity: identity)
         do {
             return try database.read { db in
                 try Row.fetchOne(
@@ -122,35 +122,9 @@ public final class TranscriptAdClassificationCache {
     }
 
     public func upsert(_ entry: TranscriptAdClassificationCacheEntry) throws {
-        let identity = try validated(identity: entry.identity)
-        let confidence = try validated(confidence: entry.confidence)
-        let signalsJSON = try encodedSignals(entry.signals)
-
         do {
             try database.write { db in
-                try db.execute(
-                    sql: """
-                    INSERT INTO transcript_ad_classification_cache (
-                        segment_id, classifier, classifier_version, is_ad, confidence,
-                        signals_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(segment_id, classifier, classifier_version) DO UPDATE SET
-                        is_ad = excluded.is_ad,
-                        confidence = excluded.confidence,
-                        signals_json = excluded.signals_json,
-                        updated_at = excluded.updated_at
-                    """,
-                    arguments: [
-                        identity.segmentID,
-                        identity.classifier,
-                        identity.classifierVersion,
-                        entry.isAd,
-                        confidence,
-                        signalsJSON,
-                        entry.classifiedAt,
-                        entry.classifiedAt,
-                    ]
-                )
+                try Self.upsert(entry, db: db)
             }
         } catch let error as TranscriptAdClassificationCacheError {
             throw error
@@ -159,7 +133,36 @@ public final class TranscriptAdClassificationCache {
         }
     }
 
-    private func validated(
+    static func upsert(_ entry: TranscriptAdClassificationCacheEntry, db: Database) throws {
+        let identity = try validated(identity: entry.identity)
+        let confidence = try validated(confidence: entry.confidence)
+        let signalsJSON = try encodedSignals(entry.signals)
+        try db.execute(
+            sql: """
+            INSERT INTO transcript_ad_classification_cache (
+                segment_id, classifier, classifier_version, is_ad, confidence,
+                signals_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(segment_id, classifier, classifier_version) DO UPDATE SET
+                is_ad = excluded.is_ad,
+                confidence = excluded.confidence,
+                signals_json = excluded.signals_json,
+                updated_at = excluded.updated_at
+            """,
+            arguments: [
+                identity.segmentID,
+                identity.classifier,
+                identity.classifierVersion,
+                entry.isAd,
+                confidence,
+                signalsJSON,
+                entry.classifiedAt,
+                entry.classifiedAt,
+            ]
+        )
+    }
+
+    private static func validated(
         identity: TranscriptAdClassificationCacheIdentity
     ) throws -> TranscriptAdClassificationCacheIdentity {
         let classifier = identity.classifier.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -174,14 +177,14 @@ public final class TranscriptAdClassificationCache {
         )
     }
 
-    private func validated(confidence: Double) throws -> Double {
+    private static func validated(confidence: Double) throws -> Double {
         guard confidence.isFinite, confidence >= 0, confidence <= 1 else {
             throw TranscriptAdClassificationCacheError.invalidConfidence
         }
         return confidence
     }
 
-    private func encodedSignals(_ signals: [String]) throws -> String {
+    private static func encodedSignals(_ signals: [String]) throws -> String {
         let trimmed = signals.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard trimmed.allSatisfy({ !$0.isEmpty }) else {
             throw TranscriptAdClassificationCacheError.invalidSignals

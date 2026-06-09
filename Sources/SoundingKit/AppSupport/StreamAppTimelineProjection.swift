@@ -10,6 +10,7 @@ struct StreamAppTimelineMetadataIndex: Sendable {
     private let songMetadata: [StreamAppMetadataItem]
     private let confirmedSongMetadata: [StreamAppMetadataItem]
     private let adWindows: [AdWindow]
+    private let nonSongWindows: [AdWindow]
     private let songBoundaryStarts: [Double]
     private let artistSongMetadata: [StreamAppMetadataItem]
 
@@ -20,6 +21,7 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         self.songMetadata = songMetadata
         self.confirmedSongMetadata = songMetadata.filter(Self.isConfirmedMusicMetadata)
         self.adWindows = Self.adWindows(from: metadataChanges)
+        self.nonSongWindows = Self.nonSongWindows(from: metadataChanges)
         self.songBoundaryStarts = songMetadata.map(\.startSeconds).sorted()
         self.artistSongMetadata = songMetadata
             .filter { Self.firstNonEmpty([$0.artist]) != nil }
@@ -74,6 +76,12 @@ struct StreamAppTimelineMetadataIndex: Sendable {
 
     func overlapsAdBoundary(startSeconds: Double, endSeconds: Double) -> Bool {
         adWindow(overlappingStart: startSeconds, endSeconds: endSeconds) != nil
+    }
+
+    func overlapsNonSongMetadata(startSeconds: Double, endSeconds: Double) -> Bool {
+        nonSongWindows.contains { window in
+            max(startSeconds, window.startSeconds) < min(endSeconds, window.endSeconds)
+        }
     }
 
     func adWindow(overlappingStart startSeconds: Double, endSeconds: Double) -> AdWindow? {
@@ -183,6 +191,38 @@ struct StreamAppTimelineMetadataIndex: Sendable {
             windows.append(AdWindow(id: start.id, startSeconds: start.startSeconds, endSeconds: start.startSeconds + 300))
         }
         return coalescedAdWindows(windows)
+    }
+
+    private static func nonSongWindows(from items: [StreamAppMetadataItem]) -> [AdWindow] {
+        let ordered = items.sorted {
+            if $0.startSeconds != $1.startSeconds { return $0.startSeconds < $1.startSeconds }
+            return $0.id < $1.id
+        }
+        var windows: [AdWindow] = []
+        for (index, item) in ordered.enumerated() {
+            guard isNonSongTimedMetadataEvent(item) else { continue }
+            let end = ordered[(index + 1)...].first { next in
+                next.startSeconds > item.startSeconds
+                    && (next.kind == .song || isNonSongTimedMetadataEvent(next) || isAdEndMetadata(next))
+            }?.startSeconds ?? item.startSeconds + 300
+            guard end > item.startSeconds else { continue }
+            windows.append(AdWindow(id: item.id, startSeconds: item.startSeconds, endSeconds: end))
+        }
+        return coalescedAdWindows(windows)
+    }
+
+    private static func isNonSongTimedMetadataEvent(_ item: StreamAppMetadataItem) -> Bool {
+        guard item.kind == .event, !isAdEndMetadata(item) else { return false }
+        let source = [
+            item.id,
+            item.source ?? "",
+            item.subtitle ?? "",
+        ].joined(separator: " ").lowercased()
+        let isICYMetadata = source.contains("icy")
+            || source.contains("icecast")
+            || source.contains("timed")
+        guard isICYMetadata else { return false }
+        return true
     }
 
     private static func explicitAdEndSeconds(for item: StreamAppMetadataItem) -> Double? {
@@ -829,6 +869,12 @@ public struct StreamAppTimelineProjection: Sendable {
         case .nonSongs:
             return paragraphs.filter { paragraph in
                 if metadataIndex.overlapsAdBoundary(
+                    startSeconds: paragraph.startSeconds,
+                    endSeconds: paragraph.endSeconds
+                ) {
+                    return true
+                }
+                if metadataIndex.overlapsNonSongMetadata(
                     startSeconds: paragraph.startSeconds,
                     endSeconds: paragraph.endSeconds
                 ) {

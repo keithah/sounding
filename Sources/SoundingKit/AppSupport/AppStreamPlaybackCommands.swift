@@ -49,11 +49,16 @@ struct AppStreamPlaybackCommands: Sendable {
         return true
     }
 
-    func seekToLive(streamID: Int64) async -> Bool {
+    func seekToLive(streamID: Int64, replacingScheduledBuffers: Bool = true) async -> Bool {
         guard let rollingBuffer, let playbackTimeline else { return false }
         let result = await rollingBuffer.seekToLive(streamID: streamID)
         guard result.availableStreamID.map({ $0 == streamID }) ?? true else { return false }
-        await playSeekResult(result, streamID: streamID, playbackTimeline: playbackTimeline)
+        await playSeekResult(
+            result,
+            streamID: streamID,
+            playbackTimeline: playbackTimeline,
+            replacingScheduledBuffers: replacingScheduledBuffers
+        )
         return true
     }
 
@@ -70,7 +75,8 @@ struct AppStreamPlaybackCommands: Sendable {
     private func playSeekResult(
         _ result: RollingBufferSeekResult,
         streamID: Int64,
-        playbackTimeline: AppPlayerTimelineClock
+        playbackTimeline: AppPlayerTimelineClock,
+        replacingScheduledBuffers: Bool = true
     ) async {
         if case .available(let frame) = result, let playbackController {
             diagnosticsLog.recordEvent(
@@ -81,13 +87,18 @@ struct AppStreamPlaybackCommands: Sendable {
                     "frameSequence": String(frame.sequence),
                     "startSeconds": String(format: "%.3f", frame.startSeconds),
                     "endSeconds": String(format: "%.3f", frame.endSeconds),
+                    "replacingScheduledBuffers": String(replacingScheduledBuffers),
                 ]
             )
             do {
-                try await playbackController.playReplacingScheduledBuffers(
-                    [frame],
-                    timeline: playbackTimeline
-                )
+                if replacingScheduledBuffers {
+                    try await playbackController.playReplacingScheduledBuffers(
+                        [frame],
+                        timeline: playbackTimeline
+                    )
+                } else {
+                    try await playbackController.play([frame], timeline: playbackTimeline)
+                }
             } catch {
                 diagnosticsLog.recordEvent(
                     "runtime.seek.playback.failed",

@@ -625,6 +625,73 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 12)
     }
 
+    func testAdjacentChunkInsideActiveICYMetadataSongStillCapturesTranscriptAcrossRuns()
+        async throws
+    {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let firstChunk = Self.chunk(
+            sequence: 0,
+            adMarkers: [
+                AdMarker(
+                    type: "ICY",
+                    classification: .unknown,
+                    source: "icy_stream",
+                    pts: 0,
+                    fields: [
+                        "StreamTitle": .string("Justin Bieber - DAISIES"),
+                        "Artist": .string("Justin Bieber"),
+                        "Title": .string("DAISIES"),
+                    ]
+                )
+            ]
+        )
+        let secondChunk = Self.chunk(sequence: 1)
+        let firstPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [firstChunk]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+        let secondPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [secondChunk]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let first = try await firstPipeline.run(
+            source: "https://example.test/live.mp3", streamType: .icecast, maxChunks: 1)
+        let second = try await secondPipeline.run(
+            streamID: first.streamID,
+            source: "https://example.test/live.mp3",
+            streamType: .icecast,
+            maxChunks: 1
+        )
+
+        XCTAssertEqual(first.processedChunks, 1)
+        XCTAssertEqual(second.processedChunks, 1)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+        let rows = try temporary.database.read { db in
+            try (
+                segmentCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                songPlay: Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT songs.artist, songs.title, song_plays.start_seconds, song_plays.end_seconds
+                        FROM song_plays
+                        JOIN songs ON songs.id = song_plays.song_id
+                        """)
+            )
+        }
+        XCTAssertEqual(rows.segmentCount, 1)
+        XCTAssertEqual(rows.songPlay?["artist"] as String?, "Justin Bieber")
+        XCTAssertEqual(rows.songPlay?["title"] as String?, "DAISIES")
+        XCTAssertEqual(rows.songPlay?["start_seconds"] as Double?, 0)
+        XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 4)
+    }
+
     func testAdjacentSameFingerprintChunksMergeAndChangedFingerprintSplitsPlay() async throws {
         let temporary = try TemporarySoundingDatabase()
         let fingerprinter = StubFingerprinter(outputs: [

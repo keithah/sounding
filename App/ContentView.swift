@@ -44,6 +44,7 @@ struct ContentView: View {
             await refreshSelectedTimelineLoop(streamID: viewModel.selectedStreamID)
         }
         .onChange(of: viewModel.selectedStreamID) { _, _ in
+            timelineActionMessage = nil
             refreshRuntimeStatuses()
             refreshSelectedTimeline()
         }

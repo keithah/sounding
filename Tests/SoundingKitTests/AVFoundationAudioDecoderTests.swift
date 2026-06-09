@@ -351,6 +351,50 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         XCTAssertEqual(start, 10, accuracy: 0.001)
     }
 
+    func testICYStreamingSessionKeepsFutureMetadataMarkersQueued() {
+        let current = ICYStreamingSession.PendingMarker(
+            marker: AdMarker(
+                type: "ICY",
+                classification: .unknown,
+                source: "icy_stream",
+                fields: ["StreamTitle": .string("Current Song")]
+            ),
+            audioByteOffset: 160_000
+        )
+        let future = ICYStreamingSession.PendingMarker(
+            marker: AdMarker(
+                type: "ICY",
+                classification: .unknown,
+                source: "icy_stream",
+                fields: ["StreamTitle": .string("Future Song")]
+            ),
+            audioByteOffset: 320_000
+        )
+        let unpositioned = ICYStreamingSession.PendingMarker(
+            marker: AdMarker(
+                type: "ICY",
+                classification: .unknown,
+                source: "icy_stream",
+                fields: ["StreamTitle": .string("Unpositioned")]
+            ),
+            audioByteOffset: nil
+        )
+
+        let split = ICYStreamingSession.splitPendingMarkersForRead(
+            [current, future, unpositioned],
+            readEndAudioByteOffset: 160_000
+        )
+
+        XCTAssertEqual(
+            split.ready.map { streamTitle(from: $0.marker) },
+            ["Current Song", "Unpositioned"]
+        )
+        XCTAssertEqual(
+            split.remaining.map { streamTitle(from: $0.marker) },
+            ["Future Song"]
+        )
+    }
+
     func testDurationBoundCanEndBeforeAnyHLSChunk() async throws {
         let manifestURL = temporaryManifestURL(
             contents: """
@@ -426,6 +470,11 @@ final class AVFoundationAudioDecoderTests: XCTestCase {
         let manifest = directory.appendingPathComponent("manifest.m3u8")
         try! contents.data(using: .utf8)!.write(to: manifest)
         return manifest
+    }
+
+    private func streamTitle(from marker: AdMarker) -> String? {
+        guard case let .string(title)? = marker.fields["StreamTitle"] else { return nil }
+        return title
     }
 
     private func temporaryWAVURL(seconds: Double) -> URL {

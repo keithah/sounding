@@ -211,6 +211,73 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(cachedSpan.signals, ["verifier:cached"])
     }
 
+    func testSnapshotCachesMissingTranscriptAdClassification() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:56:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 56,
+            segmentURI: "main-056.ts",
+            startedAt: "2026-05-01T15:56:01Z",
+            endedAt: "2026-05-01T15:56:21Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(56, "announcer", 56, 76, "Visit example.com today. Terms and conditions apply."),
+                ],
+                createdAt: "2026-05-01T15:56:02Z"
+            )
+        )
+        let segmentID = try fixture.temporary.database.read { db in
+            try XCTUnwrap(
+                Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM transcript_segments WHERE run_id = ? AND sequence = ?",
+                    arguments: [runID, 56]
+                )
+            )
+        }
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 76,
+                    liveEdgeSeconds: 90
+                ),
+                paragraphLimit: 10,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: 90,
+                refreshedAt: "2026-05-01T16:00:03Z"
+            )
+        )
+        let row = try XCTUnwrap(
+            try TranscriptAdClassificationCache(database: fixture.temporary.database).fetch(
+                identity: TranscriptAdClassificationCacheIdentity(
+                    segmentID: segmentID,
+                    classifier: TranscriptAdScorer.classifier,
+                    classifierVersion: TranscriptAdScorer.classifierVersion
+                )
+            )
+        )
+
+        XCTAssertTrue(row.isAd)
+        XCTAssertGreaterThanOrEqual(row.confidence, 0.50)
+        XCTAssertEqual(row.updatedAt, "2026-05-01T16:00:03Z")
+        XCTAssertTrue(row.signals.contains { $0.contains("url") })
+        XCTAssertTrue(snapshot.timelineRail.spans.contains { $0.source == .transcript && $0.confidence == row.confidence })
+    }
+
     func testTranscriptionPolicyControlsDisplayedTranscriptRows() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -353,6 +420,85 @@ final class StreamAppTimelineStoreTests: XCTestCase {
 
         XCTAssertEqual(snapshot.currentMetadata?.title, "Song 4")
         XCTAssertEqual(snapshot.recentMetadata.map(\.title), ["Song 4", "Song 3"])
+    }
+
+    func testSnapshotShowsICYSongMetadataInTimelineAndRailWhenFingerprintsAreUnknown() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Tailgate",
+            streamType: .icy,
+            source: "https://example.test/live.mp3",
+            createdAt: "2026-05-01T15:00:00Z"
+        )
+        let writer = IngestPersistence(database: temporary.database)
+        let runID = try writer.createRun(
+            streamID: stream.id,
+            startedAt: "2026-05-01T15:00:01Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 0,
+            segmentURI: "icy-live",
+            startedAt: "2026-05-01T15:00:02Z",
+            endedAt: "2026-05-01T15:01:02Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(0, "song-speaker", 10, 20, "Misheard lyrics should not be the song row")
+                ],
+                songPlays: [
+                    SongPlayDraft(
+                        song: unknownSong(songKey: "fingerprint:missed-song"),
+                        startSeconds: 0,
+                        endSeconds: 30,
+                        confidence: 0.5,
+                        source: "chromaprint"
+                    ),
+                    SongPlayDraft(
+                        song: song(title: "HAND IN MY POCKET", artist: "ALANIS MORRISETTE"),
+                        startSeconds: 30,
+                        endSeconds: 90,
+                        confidence: 1,
+                        source: "icy"
+                    ),
+                ],
+                createdAt: "2026-05-01T15:00:03Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: stream.id,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: stream.id,
+                    positionSeconds: 60,
+                    liveEdgeSeconds: 90,
+                    bufferedStartSeconds: 0,
+                    bufferedEndSeconds: 90
+                ),
+                metadataLimit: 10,
+                timelineLimit: 10,
+                hideDeterministicUnknownSongs: true,
+                refreshedAt: "2026-05-01T15:01:30Z"
+            )
+        )
+
+        XCTAssertEqual(snapshot.currentMetadata?.title, "HAND IN MY POCKET")
+        XCTAssertEqual(snapshot.currentMetadata?.artist, "ALANIS MORRISETTE")
+        XCTAssertEqual(snapshot.recentMetadata.map(\.title), ["HAND IN MY POCKET"])
+        XCTAssertTrue(
+            snapshot.timelineItems.contains {
+                $0.kind == .song
+                    && $0.title == "HAND IN MY POCKET"
+                    && $0.speakerDisplay?.displayLabel == "ALANIS MORRISETTE"
+            }
+        )
+        XCTAssertEqual(snapshot.timelineRail.spans.map(\.title), ["HAND IN MY POCKET"])
     }
 
     func testDefaultTimelineRequestKeepsOlderMarkersOutsidePlaybackLookback() throws {
@@ -1115,6 +1261,79 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.timelineRail.markers.first { $0.id == adEvents.first?.id }?.colorToken, "ad")
     }
 
+    func testTimelineTreatsStingrayPADULTHTMarkersAsAdBreaksForNonSongTranscripts() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T16:10:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 90,
+            segmentURI: "stingray-ad.mp3",
+            startedAt: "2026-05-01T16:10:01Z",
+            endedAt: "2026-05-01T16:10:31Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(90, "speaker", 214, 226, "Stingray ad copy should remain visible."),
+                ],
+                adMarkers: [
+                    AdMarker(
+                        type: "ICY",
+                        classification: .unknown,
+                        source: "icy_stream",
+                        pts: 204,
+                        fields: [
+                            "StreamTitle": .string("Stingray - PADULTHT26"),
+                            "Artist": .string("Stingray"),
+                            "Title": .string("PADULTHT26"),
+                        ]
+                    )
+                ],
+                songPlays: [
+                    SongPlayDraft(
+                        song: song(title: "Stressed Out", artist: "TWENTY ONE PILOTS"),
+                        startSeconds: 0,
+                        endSeconds: 360,
+                        confidence: 0.99,
+                        source: "icy"
+                    )
+                ],
+                createdAt: "2026-05-01T16:10:02Z"
+            )
+        )
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 230,
+                    liveEdgeSeconds: 240
+                ),
+                paragraphLimit: 20,
+                metadataLimit: 20,
+                timelineLimit: 20,
+                lookbackSeconds: 240,
+                transcriptionPolicy: .nonSongs,
+                refreshedAt: "2026-05-01T16:10:35Z"
+            )
+        )
+
+        let adItem = try XCTUnwrap(snapshot.timelineItems.first { $0.startSeconds == 204 })
+        XCTAssertEqual(adItem.kind, .event)
+        XCTAssertEqual(adItem.title, "AD")
+        XCTAssertEqual(adItem.subtitle, "PADULTHT26 | icy")
+        XCTAssertTrue(snapshot.timelineItems.contains { $0.subtitle == "Stingray ad copy should remain visible." })
+        XCTAssertTrue(snapshot.timelineRail.spans.contains { $0.isAd && $0.startSeconds == 204 })
+    }
+
     func testTimelineCollapsesSegmentRepeatedID3AdsInsideSCTEBreak() throws {
         let fixture = try makeFixture()
         let writer = IngestPersistence(database: fixture.temporary.database)
@@ -1700,6 +1919,14 @@ final class StreamAppTimelineStoreTests: XCTestCase {
             artist: artist,
             album: "Metadata Fixture",
             displayName: "\(artist) — \(title)"
+        )
+    }
+
+    private func unknownSong(songKey: String) -> UnresolvedSongDraft {
+        UnresolvedSongDraft(
+            songKey: songKey,
+            displayName: songKey,
+            isUnknown: true
         )
     }
 

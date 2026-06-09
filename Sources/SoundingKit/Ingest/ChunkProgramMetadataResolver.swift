@@ -19,6 +19,7 @@ extension StreamTranscriptionPolicy {
 struct ChunkProgramMetadataContext: Equatable, Sendable {
     var markers: [AdMarker]
     var songPlays: [SongPlayDraft]
+    var transcriptSuppressionSongPlays: [SongPlayDraft]? = nil
     var activeAdBreak: Bool = false
 
     func shouldCaptureTranscript(
@@ -84,7 +85,8 @@ struct ChunkProgramMetadataContext: Equatable, Sendable {
     }
 
     private func hasConfirmedMusicPlay(overlapping chunk: DecodedAudioChunk) -> Bool {
-        songPlays.contains { play in
+        let suppressionPlays = transcriptSuppressionSongPlays ?? songPlays
+        return suppressionPlays.contains { play in
             isConfirmedMusicPlay(play)
                 && max(0, min(play.endSeconds, chunk.endSeconds) - max(play.startSeconds, chunk.startSeconds)) > 0
         }
@@ -127,6 +129,7 @@ struct ChunkProgramMetadataResolver {
             return ChunkProgramMetadataContext(
                 markers: markers,
                 songPlays: timedMetadataSongPlays,
+                transcriptSuppressionSongPlays: timedMetadataSongPlays,
                 activeAdBreak: activeAdBreak
             )
         }
@@ -134,14 +137,22 @@ struct ChunkProgramMetadataResolver {
             return ChunkProgramMetadataContext(
                 markers: markers,
                 songPlays: [activeTimedSongPlay],
+                transcriptSuppressionSongPlays: carriedTimedMetadataSuppressionPlays(
+                    [activeTimedSongPlay]
+                ),
                 activeAdBreak: activeAdBreak
             )
         }
         return ChunkProgramMetadataContext(
             markers: markers,
             songPlays: fingerprintSongPlays,
+            transcriptSuppressionSongPlays: fingerprintSongPlays,
             activeAdBreak: activeAdBreak
         )
+    }
+
+    private func carriedTimedMetadataSuppressionPlays(_ plays: [SongPlayDraft]) -> [SongPlayDraft] {
+        plays.filter { ProgramMetadataSource(raw: $0.source) != .icy }
     }
 
     private func normalizedTimelineMarkers(_ markers: [AdMarker], in chunk: DecodedAudioChunk) -> [AdMarker] {

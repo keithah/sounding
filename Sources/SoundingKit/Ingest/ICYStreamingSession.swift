@@ -16,13 +16,18 @@ public actor ICYStreamingSession {
         public let byteRate: Double?
     }
 
+    struct PendingMarker: Equatable, Sendable {
+        var marker: AdMarker
+        var audioByteOffset: Int?
+    }
+
     private let url: URL
     private let metaInt: Int?
     private let byteRate: Double?
     private var byteIterator: URLSession.AsyncBytes.AsyncIterator?
     private var parser: ICYMetadataParser
     private var pendingAudio: Data
-    private var pendingMarkers: [AdMarker]
+    private var pendingMarkers: [PendingMarker]
     private var totalAudioBytes: Int
     private var bytesUntilNextMetadata: Int
     private var readerTask: Task<Void, Never>?
@@ -109,16 +114,44 @@ public actor ICYStreamingSession {
         }
         try Task.checkCancellation()
         let take = min(byteCount, pendingAudio.count)
+        let pendingAudioStartOffset = max(0, totalAudioBytes - pendingAudio.count)
+        let readEndAudioByteOffset = pendingAudioStartOffset + take
         let audio = Data(pendingAudio.prefix(take))
         pendingAudio.removeFirst(take)
-        let markers = pendingMarkers
-        pendingMarkers = []
+        let splitMarkers = Self.splitPendingMarkersForRead(
+            pendingMarkers,
+            readEndAudioByteOffset: readEndAudioByteOffset
+        )
+        pendingMarkers = splitMarkers.remaining
         return ReadResult(
             audio: audio,
-            markers: markers,
+            markers: splitMarkers.ready.map(\.marker),
             totalAudioBytes: totalAudioBytes,
             byteRate: byteRate
         )
+    }
+
+    static func splitPendingMarkersForRead(
+        _ markers: [PendingMarker],
+        readEndAudioByteOffset: Int
+    ) -> (ready: [PendingMarker], remaining: [PendingMarker]) {
+        var ready: [PendingMarker] = []
+        var remaining: [PendingMarker] = []
+        ready.reserveCapacity(markers.count)
+        remaining.reserveCapacity(markers.count)
+
+        for marker in markers {
+            guard let audioByteOffset = marker.audioByteOffset else {
+                ready.append(marker)
+                continue
+            }
+            if audioByteOffset <= readEndAudioByteOffset {
+                ready.append(marker)
+            } else {
+                remaining.append(marker)
+            }
+        }
+        return (ready, remaining)
     }
 
     public func close() {
@@ -234,7 +267,12 @@ public actor ICYStreamingSession {
             marker.pts = Double(totalAudioBytes) / byteRate
         }
         marker.segment = "icy-\(pendingMarkers.count)"
-        pendingMarkers.append(marker)
+        pendingMarkers.append(
+            PendingMarker(
+                marker: marker,
+                audioByteOffset: byteRate.map { _ in totalAudioBytes }
+            )
+        )
     }
 
     private func recordMetadataBlock(_ fields: [String: String]) {

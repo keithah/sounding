@@ -570,7 +570,8 @@ public enum StreamAppTimelineRailProjection {
 
     private static func isAdBreakStart(_ item: StreamAppTimelineItem) -> Bool {
         let text = timelineText(for: item)
-        return text.contains("ad break start")
+        return normalized(item.title) == "ad"
+            || text.contains("ad break start")
             || text.contains(" advertisement ")
             || text.contains("break start")
             || text.contains("cue-out")

@@ -273,6 +273,17 @@ struct TimelineRailView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            if inferredAdSpanCount > 0 {
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(railColor("ad-inferred"))
+                        .frame(width: 14, height: 8)
+                    Text(inferredAdSummary)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityLabel(inferredAdSummary)
+            }
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 6)
@@ -337,6 +348,22 @@ struct TimelineRailView: View {
 
     private var hasVisibleContent: Bool {
         !viewportRail.spans.isEmpty || !viewportRail.markers.isEmpty
+    }
+
+    private var inferredAdSpans: [StreamAppTimelineRailSpan] {
+        rail.spans.filter { $0.colorToken == "ad-inferred" }
+    }
+
+    private var inferredAdSpanCount: Int {
+        inferredAdSpans.count
+    }
+
+    private var inferredAdSummary: String {
+        let duration = inferredAdSpans.reduce(0) { total, span in
+            total + max(0, span.endSeconds - span.startSeconds)
+        }
+        let spanLabel = inferredAdSpanCount == 1 ? "span" : "spans"
+        return "Transcript-inferred AD: \(inferredAdSpanCount) \(spanLabel), \(Int(duration.rounded()))s"
     }
 
     private var fullStart: Double {

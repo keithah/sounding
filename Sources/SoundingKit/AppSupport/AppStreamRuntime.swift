@@ -588,18 +588,30 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
     public func setMuted(streamID: Int64, isMuted: Bool) async {
         // Mute-as-switch UX: only one stream is audible at a time. Unmuting a stream
         // that isn't the current playback owner makes it the owner and mutes the
-        // siblings. Muting the current owner releases playback ownership so the
-        // selected decoders stop scheduling new buffers. A real Stop command owns
-        // queue flushing; mute must not block on AVAudioPlayerNode.stop().
+        // siblings. Muting the current owner keeps playback ownership and only
+        // lowers effective volume so rapid mute/unmute does not re-enter AV
+        // prepare while live buffers are still arriving.
         if !isMuted {
             await playbackCommands.setMuted(streamID: streamID, isMuted: false)
-            await replacePlaybackOwner(with: streamID, phase: "runtime.setMuted.unmute")
-            let replayedLiveBuffer = await playbackCommands.seekToLive(streamID: streamID)
-            diagnosticsLog.recordEvent(
-                replayedLiveBuffer ? "runtime.setMuted.unmute.live_buffer_replayed" : "runtime.setMuted.unmute.live_buffer_unavailable",
-                streamID: streamID,
-                phase: "runtime.setMuted.unmute"
-            )
+            if currentStreamID == streamID {
+                await playbackSelection?.select(streamID: streamID)
+                diagnosticsLog.recordEvent(
+                    "runtime.setMuted.unmute.owner_retained",
+                    streamID: streamID,
+                    phase: "runtime.setMuted.unmute"
+                )
+            } else {
+                await replacePlaybackOwner(with: streamID, phase: "runtime.setMuted.unmute")
+                let replayedLiveBuffer = await playbackCommands.seekToLive(
+                    streamID: streamID,
+                    replacingScheduledBuffers: false
+                )
+                diagnosticsLog.recordEvent(
+                    replayedLiveBuffer ? "runtime.setMuted.unmute.live_buffer_replayed" : "runtime.setMuted.unmute.live_buffer_unavailable",
+                    streamID: streamID,
+                    phase: "runtime.setMuted.unmute"
+                )
+            }
             let siblings = streamRuns.keys.filter { $0 != streamID }.sorted()
             for siblingID in siblings {
                 await playbackCommands.setMuted(streamID: siblingID, isMuted: true)
@@ -621,13 +633,11 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             await playbackCommands.setMuted(streamID: streamID, isMuted: true)
             if currentStreamID == streamID {
                 diagnosticsLog.recordEvent(
-                    "runtime.playback.owner.released",
+                    "runtime.playback.owner.retained_muted",
                     streamID: streamID,
                     phase: "runtime.setMuted.mute",
                     fields: ["stopsPlayback": "false"]
                 )
-                currentStreamID = nil
-                await playbackSelection?.clear(ifStreamID: streamID)
             }
         }
         if let existing = latestEvents[streamID] {
