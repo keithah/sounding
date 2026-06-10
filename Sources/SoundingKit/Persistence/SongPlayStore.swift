@@ -12,7 +12,8 @@ struct SongPlayStore {
         streamID: Int64,
         startSeconds: Double,
         endSeconds: Double,
-        toleranceSeconds: Double = 15
+        toleranceSeconds: Double = 15,
+        inferredDurationToleranceSeconds: Double = 30
     ) throws -> SongPlayDraft? {
         try database.read { db in
             guard let row = try Row.fetchOne(
@@ -26,8 +27,28 @@ struct SongPlayStore {
                         songs.isrc,
                         songs.display_name,
                         songs.is_unknown,
+                        song_plays.start_seconds AS play_start_seconds,
                         song_plays.confidence,
-                        song_plays.source
+                        song_plays.source,
+                        (
+                            SELECT cache.duration_seconds
+                            FROM acoustid_lookup_cache AS cache
+                            WHERE cache.duration_seconds IS NOT NULL
+                              AND cache.duration_seconds > 0
+                              AND (
+                                  (
+                                      TRIM(COALESCE(songs.isrc, '')) <> ''
+                                      AND LOWER(TRIM(COALESCE(cache.isrc, ''))) = LOWER(TRIM(songs.isrc))
+                                  )
+                                  OR (
+                                      TRIM(COALESCE(songs.artist, '')) <> ''
+                                      AND LOWER(TRIM(COALESCE(cache.title, ''))) = LOWER(TRIM(COALESCE(songs.title, songs.display_name)))
+                                      AND LOWER(TRIM(COALESCE(cache.artist, ''))) = LOWER(TRIM(songs.artist))
+                                  )
+                              )
+                            ORDER BY COALESCE(cache.score, 0) DESC, cache.updated_at DESC, cache.id DESC
+                            LIMIT 1
+                        ) AS expected_duration_seconds
                     FROM song_plays
                     JOIN songs ON songs.id = song_plays.song_id
                     WHERE song_plays.stream_id = ?
@@ -50,6 +71,13 @@ struct SongPlayStore {
             }
             guard let songKey: String = row["song_key"] else {
                 throw SongPlayStoreError.missingSong("active timed metadata song")
+            }
+            if let durationSeconds: Double = row["expected_duration_seconds"],
+               durationSeconds.isFinite,
+               durationSeconds > 0,
+               let playStartSeconds: Double = row["play_start_seconds"],
+               startSeconds > playStartSeconds + durationSeconds + inferredDurationToleranceSeconds {
+                return nil
             }
             let displayName: String = row["display_name"] ?? songKey
             return SongPlayDraft(

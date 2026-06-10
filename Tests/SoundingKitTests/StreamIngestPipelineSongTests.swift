@@ -625,6 +625,99 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 12)
     }
 
+    func testKnownDurationExpiresCarriedTimedID3SongAndResumesTranscription()
+        async throws
+    {
+        let temporary = try TemporarySoundingDatabase()
+        try Self.cacheLookupDuration(
+            2,
+            title: "The Great Divide",
+            artist: "Noah Kahan",
+            database: temporary.database
+        )
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: Self.timedMetadataCarryChunks(count: 18)),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live.m3u8", streamType: .hls, maxChunks: 18)
+
+        XCTAssertEqual(result.processedChunks, 18)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 1)
+        let rows = try temporary.database.read { db in
+            try (
+                segmentCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                songPlay: Row.fetchOne(
+                    db,
+                    sql: """
+                        SELECT songs.artist, songs.title, song_plays.start_seconds, song_plays.end_seconds
+                        FROM song_plays
+                        JOIN songs ON songs.id = song_plays.song_id
+                        """)
+            )
+        }
+        XCTAssertEqual(rows.segmentCount, 1)
+        XCTAssertEqual(rows.songPlay?["artist"] as String?, "Noah Kahan")
+        XCTAssertEqual(rows.songPlay?["title"] as String?, "The Great Divide")
+        XCTAssertEqual(rows.songPlay?["start_seconds"] as Double?, 0)
+        XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 34)
+    }
+
+    func testMissingDurationKeepsCarriedTimedID3SongSuppression()
+        async throws
+    {
+        let temporary = try TemporarySoundingDatabase()
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: Self.timedMetadataCarryChunks(count: 18)),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live.m3u8", streamType: .hls, maxChunks: 18)
+
+        XCTAssertEqual(result.processedChunks, 18)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 0)
+        let segmentCount = try temporary.database.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments")
+        }
+        XCTAssertEqual(segmentCount, 0)
+    }
+
+    func testDurationForDifferentRecordingDoesNotExpireCarriedTimedID3Song()
+        async throws
+    {
+        let temporary = try TemporarySoundingDatabase()
+        try Self.cacheLookupDuration(
+            2,
+            title: "The Great Divide",
+            artist: "Different Artist",
+            database: temporary.database
+        )
+        let invocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: Self.timedMetadataCarryChunks(count: 18)),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live.m3u8", streamType: .hls, maxChunks: 18)
+
+        XCTAssertEqual(result.processedChunks, 18)
+        let invocationCount = await invocations.countValue()
+        XCTAssertEqual(invocationCount, 0)
+    }
+
     func testAdjacentChunkInsideActiveICYMetadataSongStillCapturesTranscriptAcrossRuns()
         async throws
     {
@@ -1138,6 +1231,54 @@ final class StreamIngestPipelineSongTests: XCTestCase {
             durationSeconds: 2,
             score: 0.98,
             responseJSON: #"{"status":"ok","source":"pipeline"}"#
+        )
+    }
+
+    private static func timedMetadataCarryChunks(count: Int) -> [DecodedAudioChunk] {
+        (0..<count).map { sequence in
+            chunk(
+                sequence: sequence,
+                adMarkers: sequence == 0
+                    ? [
+                        AdMarker(
+                            type: "ID3",
+                            classification: .unknown,
+                            source: "hls_segment",
+                            pts: 0,
+                            tags: [
+                                "TIT2": .string("The Great Divide"),
+                                "TPE1": .string("Noah Kahan"),
+                                "TALB": .string("ID3"),
+                            ]
+                        )
+                    ]
+                    : []
+            )
+        }
+    }
+
+    private static func cacheLookupDuration(
+        _ durationSeconds: Double?,
+        title: String,
+        artist: String,
+        database: SoundingDatabase
+    ) throws {
+        try AcoustIDLookupCache(database: database).upsert(
+            AcoustIDLookupCacheEntry(
+                identity: AcoustIDLookupCacheIdentity(
+                    algorithm: "test-deterministic",
+                    algorithmVersion: "1",
+                    fingerprintHash: "duration-\(title)-\(artist)"
+                ),
+                acoustID: "acoustid-\(title)",
+                recordingID: "recording-\(title)",
+                title: title,
+                artist: artist,
+                durationSeconds: durationSeconds,
+                score: 0.98,
+                responseJSON: #"{"status":"ok","source":"duration-test"}"#,
+                fetchedAt: "2026-05-01T12:30:00Z"
+            )
         )
     }
 
