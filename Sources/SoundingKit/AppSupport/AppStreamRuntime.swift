@@ -777,6 +777,9 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
         failureMessage: String? = nil
     ) async {
         guard streamRuns[streamID]?.token == token else { return }
+        if attempt > 0 && event.phase == .connecting && currentStreamID == streamID {
+            await preparePlaybackOwner(streamID: streamID, phase: "runtime.reconnect")
+        }
         let eventToPublish = await eventWithCurrentPlayerTimelineForLifecycleIfNeeded(event)
         publish(
             eventToPublish,

@@ -545,6 +545,45 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         XCTAssertEqual(callCount, 2)
     }
 
+    func testSelectedPlaybackOwnerIsPreparedAgainBeforeRetryRun() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let registry = StreamRegistry(database: temporary.database)
+        let stream = try registry.add(
+            name: "Retry ICY",
+            streamType: "icy",
+            source: "https://example.test/retry.mp3"
+        )
+        let ingester = FlakyAppRuntimeIngester(streamID: stream.id)
+        let player = RecordingRuntimePlaybackAdapter()
+        let playbackSelection = AppPlaybackStreamSelection()
+        let runtime = AppStreamRuntimeService(
+            registry: registry,
+            ingester: ingester,
+            retryPolicy: AppStreamRuntimeRetryPolicy(
+                maximumReconnectAttempts: 1,
+                backoffSeconds: { _ in 0 }
+            ),
+            playbackTimeline: AppPlayerTimelineClock(),
+            playbackController: player,
+            playbackSelection: playbackSelection,
+            retrySleep: { _ in }
+        )
+        let events = await runtime.events()
+        var iterator = events.makeAsyncIterator()
+
+        try await runtime.start(streamID: stream.id)
+
+        _ = try await nextEvent(matching: { $0.phase == .connecting }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.phase == .running }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.phase.statusPhase == .reconnecting }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.phase == .connecting }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.phase == .running }, from: &iterator)
+        _ = try await nextEvent(matching: { $0.phase == .stopped }, from: &iterator)
+
+        let preparedStreams = await player.preparedStreams()
+        XCTAssertEqual(preparedStreams, [stream.id, stream.id])
+    }
+
     func testFlakyStreamReconnectsWhileSiblingRemainsRunningAndStatusesAreIsolated() async throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
@@ -934,7 +973,11 @@ final class AppStreamRuntimeLifecycleTests: AppStreamRuntimeTestCase {
         XCTAssertEqual(recovering.lifecycleEvidence?.recoveryLatencySeconds, 0)
         _ = try await nextEvent(matching: { $0.streamID == stream.id && $0.phase == .connecting }, from: &iterator)
         _ = try await nextEvent(matching: { $0.streamID == stream.id && $0.phase == .running }, from: &iterator)
-        let requestStreamIDs = await ingester.requestStreamIDs()
+        var requestStreamIDs = await ingester.requestStreamIDs()
+        for _ in 0..<20 where requestStreamIDs.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            requestStreamIDs = await ingester.requestStreamIDs()
+        }
         XCTAssertEqual(try statusStore.status(streamID: stream.id)?.phase, .running)
         XCTAssertEqual(requestStreamIDs, [stream.id])
 
