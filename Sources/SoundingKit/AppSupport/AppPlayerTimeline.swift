@@ -196,6 +196,15 @@ public struct AppPlayerTimelineSnapshot: Equatable, Sendable {
         self.unavailableRangeMessage = unavailableRangeMessage.map(IngestRedaction.redact)
         self.lastMessage = IngestRedaction.redact(lastMessage)
     }
+
+    public var hasActivePlayback: Bool {
+        switch state {
+        case .buffering, .playing, .paused:
+            return true
+        case .idle, .stopped, .failed:
+            return false
+        }
+    }
 }
 
 /// Actor-owned single timeline shared by ingest and playback for one app stream.

@@ -364,6 +364,7 @@ public struct StreamAppViewModel: Equatable, Sendable {
         runtimeEventMessages[event.streamID] = event.message
         if let playerTimeline = event.result?.playerTimeline {
             playerTimelines[event.streamID] = playerTimeline
+            applyActivePlayerTimelineStatus(streamID: event.streamID, timeline: playerTimeline)
             refreshSearchSeekability()
         }
         lastLifecycleMessage = event.message
@@ -376,6 +377,10 @@ public struct StreamAppViewModel: Equatable, Sendable {
             return
         }
         runtimeStatuses[snapshot.streamID] = snapshot
+        if shouldIgnoreStaleStoppedStatus(snapshot, streamID: snapshot.streamID) {
+            applyActivePlayerTimelineStatus(streamID: snapshot.streamID)
+            return
+        }
         streams[index].status = StreamAppSelectedStream.status(from: snapshot)
         streams[index].runtimeStatusDetail = StreamAppSelectedStream.runtimeStatusDetail(
             for: snapshot)
@@ -391,6 +396,10 @@ public struct StreamAppViewModel: Equatable, Sendable {
         )
         for index in streams.indices {
             if let snapshot = runtimeStatuses[streams[index].id] {
+                if shouldIgnoreStaleStoppedStatus(snapshot, streamID: streams[index].id) {
+                    applyActivePlayerTimelineStatus(streamID: streams[index].id)
+                    continue
+                }
                 streams[index].status = StreamAppSelectedStream.status(from: snapshot)
                 streams[index].runtimeStatusDetail = StreamAppSelectedStream.runtimeStatusDetail(
                     for: snapshot)
@@ -399,6 +408,25 @@ public struct StreamAppViewModel: Equatable, Sendable {
             }
         }
         runtimeEventMessages = runtimeEventMessages.filter { activeIDs.contains($0.key) }
+    }
+
+    private mutating func applyActivePlayerTimelineStatus(
+        streamID: Int64,
+        timeline: AppPlayerTimelineSnapshot? = nil
+    ) {
+        let snapshot = timeline ?? playerTimelines[streamID]
+        guard snapshot?.hasActivePlayback == true,
+            let index = streams.firstIndex(where: { $0.id == streamID })
+        else { return }
+        streams[index].status = .running
+        streams[index].runtimeStatusDetail = snapshot?.lastMessage ?? "Playback is active."
+    }
+
+    private func shouldIgnoreStaleStoppedStatus(
+        _ snapshot: AppStreamRuntimeStatusSnapshot,
+        streamID: Int64
+    ) -> Bool {
+        snapshot.phase == .stopped && playerTimelines[streamID]?.hasActivePlayback == true
     }
 
     @discardableResult

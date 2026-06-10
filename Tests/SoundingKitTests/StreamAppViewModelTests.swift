@@ -312,7 +312,7 @@ final class StreamAppViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedStream?.playerStateTitle, "Buffering")
     }
 
-    func testActivePlayerTimelineKeepsControlsActiveWhenRuntimeStatusIsStaleStopped() throws {
+    func testActivePlayerTimelineKeepsStreamRunningWhenRuntimeStatusIsStaleStopped() throws {
         let temporary = try TemporarySoundingDatabase()
         let registry = StreamRegistry(database: temporary.database)
         var viewModel = StreamAppViewModel()
@@ -367,7 +367,8 @@ final class StreamAppViewModelTests: XCTestCase {
         )
 
         let selected = try XCTUnwrap(viewModel.selectedStream)
-        XCTAssertEqual(selected.item.status, .stopped)
+        XCTAssertEqual(selected.item.status, .running)
+        XCTAssertEqual(viewModel.streams.first?.status, .running)
         XCTAssertEqual(selected.playerStateTitle, "Playing")
         XCTAssertEqual(selected.canStartRuntime, false)
         XCTAssertEqual(selected.canPauseRuntime, true)

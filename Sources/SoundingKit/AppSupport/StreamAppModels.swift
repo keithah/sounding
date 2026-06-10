@@ -410,8 +410,13 @@ public struct StreamAppSelectedStream: Equatable, Sendable {
     ) {
         var projectedItem = item
         if let runtimeStatus {
-            projectedItem.status = Self.status(from: runtimeStatus)
-            projectedItem.runtimeStatusDetail = Self.runtimeStatusDetail(for: runtimeStatus)
+            if runtimeStatus.phase == .stopped && timeline?.hasActivePlayback == true {
+                projectedItem.status = .running
+                projectedItem.runtimeStatusDetail = timeline?.lastMessage ?? "Playback is active."
+            } else {
+                projectedItem.status = Self.status(from: runtimeStatus)
+                projectedItem.runtimeStatusDetail = Self.runtimeStatusDetail(for: runtimeStatus)
+            }
         }
         self.item = projectedItem
         runtimeStatusDetail = projectedItem.runtimeStatusDetail ?? projectedItem.status.detail

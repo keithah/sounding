@@ -3,12 +3,34 @@ import SoundingKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private final class ContentViewRuntimeState: ObservableObject {
+    private static let lock = NSLock()
+    private static var cached: ContentViewRuntimeState?
+
+    let startup: SoundingAppRuntimeStartupState
+
+    static func shared(preferences: SoundingAppPreferences?) -> ContentViewRuntimeState {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached {
+            return cached
+        }
+        let state = ContentViewRuntimeState(preferences: preferences)
+        cached = state
+        return state
+    }
+
+    private init(preferences: SoundingAppPreferences?) {
+        if let preferences {
+            startup = SoundingAppRuntimeFactory().makeStartupState(preferences: preferences)
+        } else {
+            startup = SoundingAppRuntimeFactory().makeStartupState()
+        }
+    }
+}
+
 struct ContentView: View {
-    private let registry: StreamRegistry?
-    private let runtime: (any AppStreamRuntimeControlling)?
-    private let timelineStore: StreamAppTimelineStore?
-    private let searchStore: StreamAppSearchStore?
-    private let statusStore: AppStreamRuntimeStatusStore?
+    @StateObject private var runtimeState: ContentViewRuntimeState
     private let diagnosticsLog = AppRuntimeDiagnosticsLog()
     private let transportDetector = StreamAppTransportDetector()
     @State private var viewModel: StreamAppViewModel
@@ -18,15 +40,18 @@ struct ContentView: View {
     @State private var editingStreamID: Int64?
 
     init(preferences: SoundingAppPreferences? = nil) {
-        let initial = Self.makeInitialState(preferences: preferences)
-        registry = initial.registry
-        runtime = initial.runtime
-        timelineStore = initial.timelineStore
-        searchStore = initial.searchStore
-        statusStore = initial.statusStore
+        let runtimeState = ContentViewRuntimeState.shared(preferences: preferences)
+        let initial = runtimeState.startup
+        _runtimeState = StateObject(wrappedValue: runtimeState)
         _viewModel = State(initialValue: initial.viewModel)
         _persistenceError = State(initialValue: initial.persistenceError)
     }
+
+    private var registry: StreamRegistry? { runtimeState.startup.registry }
+    private var runtime: (any AppStreamRuntimeControlling)? { runtimeState.startup.runtime }
+    private var timelineStore: StreamAppTimelineStore? { runtimeState.startup.timelineStore }
+    private var searchStore: StreamAppSearchStore? { runtimeState.startup.searchStore }
+    private var statusStore: AppStreamRuntimeStatusStore? { runtimeState.startup.statusStore }
 
     var body: some View {
         NavigationSplitView {
@@ -909,14 +934,6 @@ struct ContentView: View {
         }
     }
 
-    private static func makeInitialState(preferences: SoundingAppPreferences? = nil)
-        -> SoundingAppRuntimeStartupState
-    {
-        if let preferences {
-            return SoundingAppRuntimeFactory().makeStartupState(preferences: preferences)
-        }
-        return SoundingAppRuntimeFactory().makeStartupState()
-    }
 }
 
 #Preview {
