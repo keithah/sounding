@@ -31,6 +31,19 @@ final class SoundingAppRuntimeFactoryTests: AppStreamRuntimeTestCase {
         )
     }
 
+    func testDefaultRuntimeUsesSoundAnalysisAudioContentClassifierWhenEnabled() throws {
+        XCTAssertTrue(
+            SoundingAppRuntimeFactory.defaultAudioContentClassifier(
+                environment: [:]
+            ) is SoundAnalysisAudioContentClassifier
+        )
+        XCTAssertNil(
+            SoundingAppRuntimeFactory.defaultAudioContentClassifier(
+                environment: ["SOUNDING_DISABLE_AUDIO_CONTENT_CLASSIFIER": "1"]
+            )
+        )
+    }
+
     func testRuntimeFactoryBuildsDefaultStartupStateWithConfiguredModelBufferAndNonBlockingAcoustID() throws {
         let directory = try makeRuntimeFactoryTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

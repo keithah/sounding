@@ -126,6 +126,47 @@ final class IngestPersistenceTests: XCTestCase {
         XCTAssertEqual(counts, ["chunks": 1, "segments": 0, "words": 0, "turns": 0])
     }
 
+    func testActiveAdBreakExpiresAfterDeclaredIcyDuration() throws {
+        let temporary = try TemporarySoundingDatabase()
+        let writer = IngestPersistence(database: temporary.database)
+        let streamID = try writer.createStream(
+            streamType: "icy",
+            source: "https://example.test/radio",
+            createdAt: "2026-04-30T12:00:00Z"
+        )
+        let runID = try writer.createRun(
+            streamID: streamID,
+            startedAt: "2026-04-30T12:00:01Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 0,
+            startedAt: "2026-04-30T12:00:02Z"
+        )
+
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                adMarkers: [
+                    AdMarker(
+                        type: "ICY",
+                        classification: .adStart,
+                        source: "icy_stream",
+                        pts: 0,
+                        fields: ["durationMilliseconds": .string("30000")]
+                    )
+                ],
+                createdAt: "2026-04-30T12:00:03Z"
+            )
+        )
+
+        XCTAssertTrue(try writer.activeAdBreakOverlaps(streamID: streamID, startSeconds: 10, endSeconds: 20))
+        XCTAssertTrue(try writer.activeAdBreakOverlaps(streamID: streamID, startSeconds: 29, endSeconds: 35))
+        XCTAssertFalse(try writer.activeAdBreakOverlaps(streamID: streamID, startSeconds: 36, endSeconds: 46))
+    }
+
     func testDuplicateChunkSequencesAreRejected() throws {
         let temporary = try TemporarySoundingDatabase()
         let writer = IngestPersistence(database: temporary.database)

@@ -105,7 +105,11 @@ final class AcoustIDEnrichmentTests: XCTestCase {
                 request: Self.request
             )
 
-            XCTAssertEqual(result.fingerprintResult, Self.baseResult(hash: "failure-\(expectedReason)"))
+            var expectedResult = Self.baseResult(hash: "failure-\(expectedReason)")
+            if expectedReason == "acoustid-not-found" {
+                expectedResult.songPlays = []
+            }
+            XCTAssertEqual(result.fingerprintResult, expectedResult)
             XCTAssertEqual(result.diagnostics.map(\.reason), [expectedReason])
             let context = String(describing: result.diagnostics.first?.context ?? [:])
             XCTAssertFalse(context.contains("super-secret"), context)

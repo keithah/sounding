@@ -187,6 +187,7 @@ public struct AcoustIDAudioFingerprintEnricher: AudioFingerprintEnriching {
         case .disabled(let reason):
             diagnostics.append(outcomeDiagnostic("acoustid-lookup-disabled", reason: reason, fingerprint: fingerprint, chunk: chunk))
         case .notFound(let reason):
+            removeUnknownSongPlay(fingerprintHash: identity.fingerprintHash, from: &enriched)
             diagnostics.append(outcomeDiagnostic("acoustid-not-found", reason: reason, fingerprint: fingerprint, chunk: chunk))
         case .transientFailure(let reason):
             diagnostics.append(outcomeDiagnostic("acoustid-transient-failure", reason: reason, fingerprint: fingerprint, chunk: chunk))
@@ -280,6 +281,16 @@ public struct AcoustIDAudioFingerprintEnricher: AudioFingerprintEnriching {
             var enrichedPlay = play
             enrichedPlay.song = enrichedSong(from: play.song, match: match)
             return enrichedPlay
+        }
+    }
+
+    private func removeUnknownSongPlay(
+        fingerprintHash: String,
+        from result: inout AudioFingerprintResult
+    ) {
+        let songKey = "fingerprint:\(fingerprintHash)"
+        result.songPlays.removeAll { play in
+            play.song.songKey == songKey && play.song.isUnknown
         }
     }
 

@@ -37,6 +37,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
     private let diarizer: any SpeakerDiarization
     private let diarizerFactory: @Sendable (Bool) -> any SpeakerDiarization
     private let fingerprinter: any AudioFingerprinting
+    private let audioContentClassifier: (any AudioContentClassifying)?
+    private let minimumMusicProbabilityForFingerprinting: Double
     private let fingerprintEnricher: any AudioFingerprintEnriching
     private let now: StreamIngestPipeline.TimestampProvider
     private let player: (any AppPCMPlaybackAdapting)?
@@ -57,6 +59,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         transcriber: any MLTranscription,
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
+        audioContentClassifier: (any AudioContentClassifying)? = nil,
+        minimumMusicProbabilityForFingerprinting: Double = 0.80,
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
         player: (any AppPCMPlaybackAdapting)? = nil,
         timeline: AppPlayerTimelineClock = AppPlayerTimelineClock(),
@@ -78,6 +82,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
         self.diarizer = diarizer
         self.diarizerFactory = diarizerFactory ?? { _ in diarizer }
         self.fingerprinter = fingerprinter
+        self.audioContentClassifier = audioContentClassifier
+        self.minimumMusicProbabilityForFingerprinting = minimumMusicProbabilityForFingerprinting
         self.fingerprintEnricher = fingerprintEnricher
         self.player = player
         self.timeline = timeline
@@ -379,6 +385,8 @@ public struct StreamIngestAppRuntimeRunner: AppStreamRuntimeIngesting {
             transcriber: transcriber,
             diarizer: runtimeDiarizer,
             fingerprinter: fingerprinter,
+            audioContentClassifier: audioContentClassifier,
+            minimumMusicProbabilityForFingerprinting: minimumMusicProbabilityForFingerprinting,
             fingerprintEnricher: fingerprintEnricher,
             audioArchiveStore: audioArchiveStore,
             audioArchiveEnabled: request.isAudioArchiveEnabled,

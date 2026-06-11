@@ -498,6 +498,31 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         XCTAssertEqual(transcripts.map(\.endSeconds), [145, 188])
     }
 
+    func testAdWindowTranscriptCoalescingIsDurationBoundedWithoutRepeatedMarkers() {
+        let speaker = display("announcer")
+        let projection = StreamAppTimelineProjection(
+            paragraphs: [
+                paragraph(1, speaker: speaker, start: 810, end: 830, text: "First spot opens."),
+                paragraph(2, speaker: speaker, start: 831, end: 850, text: "First spot continues."),
+                paragraph(3, speaker: speaker, start: 870, end: 890, text: "Second spot opens."),
+                paragraph(4, speaker: speaker, start: 891, end: 910, text: "Second spot continues."),
+            ],
+            metadata: [
+                metadata("event:padultht21", title: "AD", artist: "Stingray", start: 801, end: 801, kind: .event, source: "icy"),
+                metadata("song:next", title: "Next Song", artist: "Next Artist", start: 930, end: 1100, source: "icy"),
+            ],
+            transcriptionPolicy: .nonSongs
+        )
+
+        XCTAssertEqual(
+            projection.timelineItems(limit: 10).filter { $0.kind == .transcript }.map(\.subtitle),
+            [
+                "First spot opens. First spot continues.",
+                "Second spot opens. Second spot continues.",
+            ]
+        )
+    }
+
     func testLongTranscriptSegmentSplitsAtRepeatedAdMarkersUsingWordTiming() {
         let host = display("host")
         let words = timedWords(
@@ -540,6 +565,54 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         ])
         XCTAssertEqual(transcripts.map(\.startSeconds), [100, 134, 164])
         XCTAssertEqual(transcripts.map(\.endSeconds), [112, 145, 188])
+    }
+
+    func testLongTranscriptSegmentSplitsAtRawAdMarkerStartsAfterMetadataCoalescing() {
+        let host = display("host")
+        let words = timedWords(
+            segmentID: 1,
+            speaker: host,
+            entries: [
+                (12, 18, "First"),
+                (19, 24, "spot"),
+                (34, 40, "Second"),
+                (41, 46, "spot"),
+                (54, 60, "Third"),
+                (61, 66, "spot"),
+            ]
+        )
+        let projection = StreamAppTimelineProjection(
+            paragraphs: [
+                paragraph(
+                    1,
+                    speaker: host,
+                    start: 12,
+                    end: 66,
+                    text: "First spot Second spot Third spot",
+                    words: words
+                ),
+            ],
+            metadata: [
+                metadata("event:ad:1", title: "AD", artist: nil, start: 10, end: 10, kind: .event, source: "icy"),
+                metadata("event:ad:2", title: "AD", artist: nil, start: 30, end: 30, kind: .event, source: "icy"),
+                metadata("event:ad:3", title: "AD", artist: nil, start: 50, end: 50, kind: .event, source: "icy"),
+                metadata("song:next", title: "Next Song", artist: "Next Artist", start: 80, end: 120, source: "icy"),
+            ],
+            transcriptionPolicy: .nonSongs
+        )
+
+        XCTAssertEqual(
+            projection.metadataChanges.filter { $0.kind == .event }.map(\.title),
+            ["AD"]
+        )
+        XCTAssertEqual(
+            projection.timelineItems(limit: 10).filter { $0.kind == .transcript }.map(\.subtitle),
+            [
+                "First spot",
+                "Second spot",
+                "Third spot",
+            ]
+        )
     }
 
     func testCollapsesRepeatedGenericAdMetadataIntoOneRun() {
@@ -687,6 +760,35 @@ final class StreamAppTimelineProjectionTests: XCTestCase {
         XCTAssertEqual(
             projection.timelineItems(limit: 10).filter { $0.kind == .transcript }.map(\.subtitle),
             ["Station promo transcript."]
+        )
+    }
+
+    func testNonSongPolicySuppressesLyricBleedThroughWithoutMetadata() {
+        let speaker = display(StreamAppSpeakerDisplayProjection.unknownSpeakerLabel)
+        let projection = StreamAppTimelineProjection(
+            paragraphs: [
+                paragraph(
+                    1,
+                    speaker: speaker,
+                    start: 10,
+                    end: 42,
+                    text: "[MUSIC] ♪ I believe in you ♪ The mood is light and the music is just right."
+                ),
+                paragraph(
+                    2,
+                    speaker: speaker,
+                    start: 50,
+                    end: 80,
+                    text: "Shop online or visit your neighborhood Sherwin Williams store. See store for details."
+                ),
+            ],
+            metadata: [],
+            transcriptionPolicy: .nonSongs
+        )
+
+        XCTAssertEqual(
+            projection.timelineItems(limit: 10).filter { $0.kind == .transcript }.map(\.subtitle),
+            ["Shop online or visit your neighborhood Sherwin Williams store. See store for details."]
         )
     }
 

@@ -140,6 +140,72 @@ final class StreamAppTimelineStoreTests: XCTestCase {
         XCTAssertTrue(inferredSpan.signals.contains { $0.contains("url") })
     }
 
+    func testHeuristicTranscriptAdClassificationCarriesBrandToTimelineItems() throws {
+        let fixture = try makeFixture()
+        let writer = IngestPersistence(database: fixture.temporary.database)
+        let runID = try writer.createRun(
+            streamID: fixture.mainStreamID,
+            startedAt: "2026-05-01T15:50:00Z",
+            status: .running
+        )
+        let chunkID = try writer.createChunk(
+            runID: runID,
+            sequence: 51,
+            segmentURI: "main-051.ts",
+            startedAt: "2026-05-01T15:50:01Z",
+            endedAt: "2026-05-01T15:50:26Z"
+        )
+        try writer.persistTimeline(
+            IngestChunkTimeline(
+                runID: runID,
+                chunkID: chunkID,
+                segments: [
+                    segment(
+                        51,
+                        "announcer",
+                        45,
+                        70,
+                        "Mobile carriers message and data rates may apply. Wells Fargo Bank is a member FDIC."
+                    ),
+                ],
+                createdAt: "2026-05-01T15:50:02Z"
+            )
+        )
+        let segmentID = try fixture.temporary.database.read { db in
+            try XCTUnwrap(
+                Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM transcript_segments WHERE run_id = ? AND sequence = ?",
+                    arguments: [runID, 51]
+                )
+            )
+        }
+
+        let snapshot = try StreamAppTimelineStore(database: fixture.temporary.database).snapshot(
+            request: StreamAppTimelineRequest(
+                streamID: fixture.mainStreamID,
+                player: AppPlayerTimelineSnapshot(
+                    streamID: fixture.mainStreamID,
+                    positionSeconds: 70,
+                    liveEdgeSeconds: 80
+                ),
+                paragraphLimit: 10,
+                metadataLimit: 10,
+                timelineLimit: 10,
+                lookbackSeconds: 80,
+                refreshedAt: "2026-05-01T16:00:02Z"
+            )
+        )
+
+        let inferredSpan = try XCTUnwrap(snapshot.timelineRail.spans.first { $0.source == .transcript })
+        XCTAssertEqual(inferredSpan.title, "Wells Fargo")
+        XCTAssertEqual(inferredSpan.brand, "Wells Fargo")
+        let item = try XCTUnwrap(snapshot.timelineItems.first { $0.id == "transcript:\(segmentID)" })
+        XCTAssertTrue(item.isAd)
+        XCTAssertEqual(item.brand, "Wells Fargo")
+        XCTAssertTrue(item.signals.contains("brand:Wells Fargo"))
+    }
+
     func testTimelineRailUsesCachedTranscriptAdClassification() throws {
         let fixture = try makeFixture()
         let writer = IngestPersistence(database: fixture.temporary.database)

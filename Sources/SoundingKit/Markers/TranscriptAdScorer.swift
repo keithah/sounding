@@ -2,15 +2,17 @@ import Foundation
 
 public enum TranscriptAdScorer {
     public static let classifier = "transcript-ad-heuristic"
-    public static let classifierVersion = "3"
+    public static let classifierVersion = "5"
 
     public struct Score: Equatable, Sendable {
         public let confidence: Double
         public let signals: [String]
+        public let brand: String?
 
-        public init(confidence: Double, signals: [String]) {
+        public init(confidence: Double, signals: [String], brand: String? = nil) {
             self.confidence = min(max(confidence, 0), 1)
             self.signals = signals
+            self.brand = brand?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         }
     }
 
@@ -104,7 +106,8 @@ public enum TranscriptAdScorer {
         if reinforcement > 0 {
             score = Score(
                 confidence: score.confidence + reinforcement,
-                signals: score.signals + [reinforcementSignal ?? String(format: "neighbor-reinforced+%.2f", reinforcement)]
+                signals: score.signals + [reinforcementSignal ?? String(format: "neighbor-reinforced+%.2f", reinforcement)],
+                brand: score.brand
             )
         }
         return score
@@ -166,6 +169,14 @@ public enum TranscriptAdScorer {
             medium += 0.25
             signals.append("banking-pitch")
         }
+        if containsFinancingPitch(in: normalized) {
+            medium += 0.35
+            signals.append("financing-pitch")
+        }
+        if containsRetailPitch(in: normalized) {
+            medium += 0.30
+            signals.append("retail-pitch")
+        }
         medium = min(medium, 0.45)
 
         var weak = 0.0
@@ -184,7 +195,11 @@ public enum TranscriptAdScorer {
         }
         weak = min(weak, 0.25)
 
-        return Score(confidence: strong + medium + weak, signals: signals)
+        let brand = knownCommercialBrand(in: normalized)
+        if let brand {
+            signals.append("brand:\(brand)")
+        }
+        return Score(confidence: strong + medium + weak, signals: signals, brand: brand)
     }
 
     private static func midpoint(_ paragraph: StreamAppTranscriptParagraph) -> Double {
@@ -237,8 +252,35 @@ public enum TranscriptAdScorer {
             || text.contains("capital one cafe")
     }
 
+    private static func containsFinancingPitch(in text: String) -> Bool {
+        (text.contains("auto loan") || text.contains("loan rate") || text.contains("interest rate"))
+            && (
+                text.contains("apr")
+                    || text.contains("rate")
+                    || text.contains("refinancing")
+                    || text.contains("financing")
+                    || text.contains("smart move")
+            )
+    }
+
+    private static func containsRetailPitch(in text: String) -> Bool {
+        text.contains("shop online")
+            || text.contains("visit your neighborhood")
+            || text.contains("visit your local")
+            || text.contains("delivery available")
+            || text.contains("qualifying orders")
+            || text.contains("retail sales")
+            || text.contains("store for details")
+    }
+
     private static func containsKnownCommercialBrand(in text: String) -> Bool {
-        knownCommercialBrands.contains { text.contains($0) }
+        knownCommercialBrand(in: text) != nil
+    }
+
+    private static func knownCommercialBrand(in text: String) -> String? {
+        knownCommercialBrands.first { entry in
+            entry.aliases.contains { text.contains($0) }
+        }?.displayName
     }
 
     private static func containsWord(_ word: String, in text: String) -> Bool {
@@ -277,6 +319,7 @@ public enum TranscriptAdScorer {
         "terms and conditions",
         "member fdic",
         "see store for details",
+        "exclusions apply",
         "void where prohibited",
         "your money back",
         "results not typical",
@@ -322,17 +365,32 @@ public enum TranscriptAdScorer {
         "promo",
     ]
 
+    private struct KnownCommercialBrand {
+        var displayName: String
+        var aliases: [String]
+    }
+
     private static let knownCommercialBrands = [
-        "zocdoc",
-        "zokdok",
-        "zok-dok",
-        "zock dock",
-        "zokta",
-        "capital one",
-        "legalzoom",
-        "legal zoom",
-        "wells fargo",
-        "tune in",
-        "tunein",
+        KnownCommercialBrand(displayName: "Zocdoc", aliases: ["zocdoc", "zokdok", "zok-dok", "zock dock", "zokta"]),
+        KnownCommercialBrand(displayName: "Capital One", aliases: ["capital one"]),
+        KnownCommercialBrand(displayName: "LegalZoom", aliases: ["legalzoom", "legal zoom"]),
+        KnownCommercialBrand(displayName: "Wells Fargo", aliases: ["wells fargo"]),
+        KnownCommercialBrand(displayName: "TuneIn", aliases: ["tune in", "tunein"]),
+        KnownCommercialBrand(displayName: "Community First", aliases: ["community first"]),
+        KnownCommercialBrand(displayName: "Sherwin Williams", aliases: ["sherwin williams"]),
+        KnownCommercialBrand(displayName: "California Lottery", aliases: ["california lottery"]),
+        KnownCommercialBrand(displayName: "Craftsman", aliases: ["craftsman"]),
+        KnownCommercialBrand(displayName: "Safeway", aliases: ["safeway", "safe way"]),
+        KnownCommercialBrand(displayName: "Bose", aliases: ["bose"]),
+        KnownCommercialBrand(displayName: "Macy's", aliases: ["macy's", "macys", "macy"]),
+        KnownCommercialBrand(displayName: "J.D. Power", aliases: ["jd power", "j.d. power", "jdpower"]),
+        KnownCommercialBrand(displayName: "Nissan", aliases: ["nissan"]),
+        KnownCommercialBrand(displayName: "AdoptUSKids", aliases: ["adoptuskids", "adopt us kids", "adopt u.s. kids"]),
     ]
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
 }

@@ -212,6 +212,58 @@ final class TranscriptAdScoringPipelineTests: XCTestCase {
         XCTAssertTrue(entry.signals.contains("heuristic-brand"))
     }
 
+    func testReinforcedKnownBrandScoreKeepsStructuredBrand() {
+        let paragraphs = [
+            paragraph(
+                1,
+                "Wells Fargo Bank and a member FDIC.",
+                start: 0,
+                end: 3
+            ),
+            paragraph(
+                2,
+                "However you make money work, Wells Fargo can work with that.",
+                start: 4,
+                end: 8
+            ),
+            paragraph(
+                3,
+                "Mobile carriers message and data rates may apply.",
+                start: 9,
+                end: 13
+            ),
+        ]
+
+        let scores = TranscriptAdScorer.scores(for: paragraphs)
+        let score = scores[1]
+
+        XCTAssertEqual(score?.brand, "Wells Fargo")
+        XCTAssertTrue(score?.signals.contains("brand:Wells Fargo") == true)
+        XCTAssertTrue((score?.confidence ?? 0) >= 0.50)
+    }
+
+    func testObservedLiveAdBrandsAreAvailableAsStructuredAttribution() {
+        let examples: [(text: String, brand: String)] = [
+            ("Get a free select Craftsman power tool when you buy a battery kit.", "Craftsman"),
+            ("Safeway is proud to welcome you to our brand new South City store.", "Safeway"),
+            ("Find the perfect product for you at Bose.com.", "Bose"),
+            ("Macy's friends and family savings are on now.", "Macy's"),
+            ("Visit JDPower.com/awards for award information.", "J.D. Power"),
+            ("The new Nissan Pathfinder powers your adventure.", "Nissan"),
+            ("Learn about adopting from AdoptUSKids.org.", "AdoptUSKids"),
+        ]
+
+        for example in examples {
+            let score = TranscriptAdScorer.score(
+                paragraph: paragraph(1, example.text, start: 0, end: 20),
+                neighbors: []
+            )
+
+            XCTAssertEqual(score.brand, example.brand, example.text)
+            XCTAssertTrue(score.signals.contains("brand:\(example.brand)"), example.text)
+        }
+    }
+
     func testClassificationRefresherPersistsOnlyMissingParagraphs() async throws {
         let temporary = try TemporarySoundingDatabase()
         let firstSegmentID = try makeTranscriptSegment(

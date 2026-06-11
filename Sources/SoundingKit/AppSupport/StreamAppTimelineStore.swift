@@ -260,6 +260,7 @@ public struct StreamAppTimelineStore: Sendable {
                     isAd: score.confidence >= 0.50,
                     confidence: score.confidence,
                     signals: Self.cacheSignals(for: score),
+                    brand: score.confidence >= 0.50 ? score.brand : nil,
                     classifiedAt: classifiedAt
                 ),
                 db: db
@@ -340,6 +341,7 @@ public struct StreamAppTimelineStore: Sendable {
                     isAd: true,
                     confidence: max(existing?.confidence ?? 0, score.confidence, 0.65),
                     signals: signals,
+                    brand: existing?.brand ?? score.brand,
                     classifiedAt: classifiedAt
                 ),
                 db: db

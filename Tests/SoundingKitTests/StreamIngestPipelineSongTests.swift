@@ -61,6 +61,54 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(counts, ["segments": 1, "song_plays": 1])
     }
 
+    func testNonMusicClassificationSkipsFingerprintingButStillTranscribes() async throws {
+        let temporary = try TemporarySoundingDatabase()
+        let fingerprintInvocations = FingerprintInvocations()
+        let transcriberInvocations = TranscriberInvocations()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: RecordingSongTranscriber(invocations: transcriberInvocations),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: RecordingFingerprinter(invocations: fingerprintInvocations),
+            audioContentClassifier: StubAudioContentClassifier(results: [
+                0: AudioContentClassification(
+                    musicProbability: 0.12,
+                    speechProbability: 0.84,
+                    label: "speech"
+                )
+            ]),
+            minimumMusicProbabilityForFingerprinting: 0.80
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .icecast, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        let fingerprintCount = await fingerprintInvocations.count
+        let transcriberCount = await transcriberInvocations.countValue()
+        XCTAssertEqual(fingerprintCount, 0)
+        XCTAssertEqual(transcriberCount, 1)
+        let counts = try temporary.database.read { db in
+            try [
+                "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
+                "fingerprints": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM audio_fingerprints"),
+                "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+                "diagnostics": Int.fetchOne(
+                    db,
+                    sql:
+                        "SELECT COUNT(*) FROM ingest_diagnostics WHERE phase = 'fingerprint' AND reason = 'fingerprint-skipped-non-music'"
+                ),
+            ]
+        }
+        XCTAssertEqual(counts, [
+            "segments": 1,
+            "fingerprints": 0,
+            "song_plays": 0,
+            "diagnostics": 1,
+        ])
+    }
+
     func testOversizedTranscriptSegmentIsSplitBeforePersistence() async throws {
         let temporary = try TemporarySoundingDatabase()
         let longText = (0..<80).map { "word\($0)" }.joined(separator: " ")
@@ -281,9 +329,10 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(counts, ["segments": 1, "events": 1, "song_plays": 1])
     }
 
-    func testActiveAdBreakContinuesTranscribingAcrossSongIdentifiedChunks() async throws {
+    func testActiveAdBreakSkipsFingerprintingAndContinuesTranscribing() async throws {
         let temporary = try TemporarySoundingDatabase()
         let invocations = TranscriberInvocations()
+        let fingerprintInvocations = FingerprintInvocations()
         let pipeline = StreamIngestPipeline(
             database: temporary.database,
             decoder: FakeSongDecoder(chunks: [
@@ -291,21 +340,30 @@ final class StreamIngestPipelineSongTests: XCTestCase {
                     sequence: 0,
                     adMarkers: [
                         AdMarker(
-                            type: "SCTE35",
+                            type: "ICY",
                             classification: .adStart,
-                            source: "hls_segment",
+                            source: "icy_stream",
                             pts: 0,
                             breakDuration: 60
                         )
                     ]
                 ),
-                Self.chunk(sequence: 1),
+                Self.chunk(
+                    sequence: 1,
+                    adMarkers: [
+                        AdMarker(
+                            type: "ICY",
+                            classification: .adStart,
+                            source: "icy_stream",
+                            pts: 2,
+                            breakDuration: 60
+                        )
+                    ]
+                ),
             ]),
             transcriber: RecordingSongTranscriber(invocations: invocations),
             diarizer: FakeSongDiarizer(),
-            fingerprinter: StubFingerprinter(outputs: [
-                1: Self.knownSongFingerprintOutput(start: 2, end: 4)
-            ])
+            fingerprinter: RecordingFingerprinter(invocations: fingerprintInvocations)
         )
 
         let result = try await pipeline.run(
@@ -313,15 +371,29 @@ final class StreamIngestPipelineSongTests: XCTestCase {
 
         XCTAssertEqual(result.processedChunks, 2)
         let invocationCount = await invocations.countValue()
+        let fingerprintCount = await fingerprintInvocations.count
         XCTAssertEqual(invocationCount, 2)
+        XCTAssertEqual(fingerprintCount, 0)
         let counts = try temporary.database.read { db in
             try [
                 "segments": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
                 "events": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ad_events"),
                 "song_plays": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM song_plays"),
+                "fingerprints": Int.fetchOne(db, sql: "SELECT COUNT(*) FROM audio_fingerprints"),
+                "skip_diagnostics": Int.fetchOne(
+                    db,
+                    sql:
+                        "SELECT COUNT(*) FROM ingest_diagnostics WHERE phase = 'fingerprint' AND reason = 'fingerprint-skipped-ad-break'"
+                ),
             ]
         }
-        XCTAssertEqual(counts, ["segments": 2, "events": 1, "song_plays": 1])
+        XCTAssertEqual(counts, [
+            "segments": 2,
+            "events": 2,
+            "song_plays": 0,
+            "fingerprints": 0,
+            "skip_diagnostics": 2,
+        ])
     }
 
     func testAlwaysTranscriptionPolicyCapturesIdentifiedSongAudio() async throws {
@@ -718,7 +790,7 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(invocationCount, 0)
     }
 
-    func testAdjacentChunkInsideActiveICYMetadataSongStillCapturesTranscriptAcrossRuns()
+    func testAdjacentChunkInsideActiveICYMetadataSongSuppressesTranscriptAcrossRunsWithoutExtendingSong()
         async throws
     {
         let temporary = try TemporarySoundingDatabase()
@@ -752,6 +824,18 @@ final class StreamIngestPipelineSongTests: XCTestCase {
             transcriber: RecordingSongTranscriber(invocations: invocations),
             diarizer: FakeSongDiarizer()
         )
+        let thirdPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 2)]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
+        let laterPipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 30)]),
+            transcriber: RecordingSongTranscriber(invocations: invocations),
+            diarizer: FakeSongDiarizer()
+        )
 
         let first = try await firstPipeline.run(
             source: "https://example.test/live.mp3", streamType: .icecast, maxChunks: 1)
@@ -761,11 +845,25 @@ final class StreamIngestPipelineSongTests: XCTestCase {
             streamType: .icecast,
             maxChunks: 1
         )
+        let third = try await thirdPipeline.run(
+            streamID: first.streamID,
+            source: "https://example.test/live.mp3",
+            streamType: .icecast,
+            maxChunks: 1
+        )
+        let later = try await laterPipeline.run(
+            streamID: first.streamID,
+            source: "https://example.test/live.mp3",
+            streamType: .icecast,
+            maxChunks: 1
+        )
 
         XCTAssertEqual(first.processedChunks, 1)
         XCTAssertEqual(second.processedChunks, 1)
+        XCTAssertEqual(third.processedChunks, 1)
+        XCTAssertEqual(later.processedChunks, 1)
         let invocationCount = await invocations.countValue()
-        XCTAssertEqual(invocationCount, 1)
+        XCTAssertEqual(invocationCount, 0)
         let rows = try temporary.database.read { db in
             try (
                 segmentCount: Int.fetchOne(db, sql: "SELECT COUNT(*) FROM transcript_segments"),
@@ -778,11 +876,11 @@ final class StreamIngestPipelineSongTests: XCTestCase {
                         """)
             )
         }
-        XCTAssertEqual(rows.segmentCount, 1)
+        XCTAssertEqual(rows.segmentCount, 0)
         XCTAssertEqual(rows.songPlay?["artist"] as String?, "Justin Bieber")
         XCTAssertEqual(rows.songPlay?["title"] as String?, "DAISIES")
         XCTAssertEqual(rows.songPlay?["start_seconds"] as Double?, 0)
-        XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 4)
+        XCTAssertEqual(rows.songPlay?["end_seconds"] as Double?, 2)
     }
 
     func testAdjacentSameFingerprintChunksMergeAndChangedFingerprintSplitsPlay() async throws {
@@ -964,6 +1062,65 @@ final class StreamIngestPipelineSongTests: XCTestCase {
         XCTAssertEqual(evidence?["song_plays"] as Int?, 1)
         XCTAssertEqual(evidence?["cache_rows"] as Int?, 0)
         XCTAssertEqual(evidence?["reason"] as String?, "acoustid-transient-failure")
+        let context: String = evidence?["context"] ?? ""
+        XCTAssertTrue(context.contains("[redacted-path]"), context)
+        Self.assertNoForbiddenLiterals(
+            in: context,
+            forbidden: [
+                "user:pass", "api_key=secret", "token=secret", "/tmp/acoustid-token=secret.json",
+            ]
+        )
+    }
+
+    func testAcoustIDNotFoundPersistsFingerprintAndDiagnosticWithoutUnknownSongPlay()
+        async throws
+    {
+        let temporary = try TemporarySoundingDatabase()
+        let pipeline = StreamIngestPipeline(
+            database: temporary.database,
+            decoder: FakeSongDecoder(chunks: [Self.chunk(sequence: 0)]),
+            transcriber: FakeSongTranscriber(),
+            diarizer: FakeSongDiarizer(),
+            fingerprinter: StubFingerprinter(outputs: [
+                0: Self.fingerprintOutput(hash: "not-found-song", start: 0, end: 2)
+            ]),
+            fingerprintEnricher: AcoustIDAudioFingerprintEnricher(
+                cache: AcoustIDLookupCache(database: temporary.database),
+                lookup: CountingSongLookup(
+                    outcome: .notFound(
+                        reason:
+                            "no match for https://user:pass@example.test/acoustid?api_key=secret path=/tmp/acoustid-token=secret.json"
+                    )
+                )
+            )
+        )
+
+        let result = try await pipeline.run(
+            source: "https://example.test/live", streamType: .hls, maxChunks: 1)
+
+        XCTAssertEqual(result.processedChunks, 1)
+        XCTAssertEqual(result.diagnostics.map(\.phase), [.fingerprint])
+        XCTAssertEqual(result.diagnostics.map(\.reason), ["acoustid-not-found"])
+        let evidence = try temporary.database.read { db in
+            try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT (SELECT COUNT(*) FROM audio_fingerprints) AS fingerprints,
+                           (SELECT COUNT(*) FROM songs) AS songs,
+                           (SELECT COUNT(*) FROM song_plays) AS song_plays,
+                           (SELECT COUNT(*) FROM acoustid_lookup_cache) AS cache_rows,
+                           ingest_diagnostics.reason AS reason,
+                           ingest_diagnostics.context_json AS context
+                    FROM ingest_diagnostics
+                    WHERE ingest_diagnostics.reason = 'acoustid-not-found'
+                    LIMIT 1
+                    """)
+        }
+        XCTAssertEqual(evidence?["fingerprints"] as Int?, 1)
+        XCTAssertEqual(evidence?["songs"] as Int?, 0)
+        XCTAssertEqual(evidence?["song_plays"] as Int?, 0)
+        XCTAssertEqual(evidence?["cache_rows"] as Int?, 0)
+        XCTAssertEqual(evidence?["reason"] as String?, "acoustid-not-found")
         let context: String = evidence?["context"] ?? ""
         XCTAssertTrue(context.contains("[redacted-path]"), context)
         Self.assertNoForbiddenLiterals(
@@ -1413,6 +1570,21 @@ private struct RecordingFingerprinter: AudioFingerprinting {
     ) async throws -> AudioFingerprintResult {
         await invocations.record()
         return AudioFingerprintResult()
+    }
+}
+
+private struct StubAudioContentClassifier: AudioContentClassifying {
+    var results: [Int: AudioContentClassification]
+    var errors: [Int: Error] = [:]
+
+    func classify(
+        _ chunk: DecodedAudioChunk,
+        request: AudioContentClassificationRequest
+    ) async throws -> AudioContentClassification? {
+        if let error = errors[chunk.sequence] {
+            throw error
+        }
+        return results[chunk.sequence]
     }
 }
 

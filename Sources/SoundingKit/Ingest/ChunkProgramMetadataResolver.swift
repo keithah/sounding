@@ -34,9 +34,22 @@ struct ChunkProgramMetadataContext: Equatable, Sendable {
         }
     }
 
+    func shouldSkipFingerprinting(overlapping chunk: DecodedAudioChunk) -> Bool {
+        hasICYDurationAdCue(overlapping: chunk)
+    }
+
     private func hasAdCue(overlapping chunk: DecodedAudioChunk) -> Bool {
         markers.contains { marker in
             isAdCue(marker) && markerOverlapsChunk(marker, chunk)
+        }
+    }
+
+    private func hasICYDurationAdCue(overlapping chunk: DecodedAudioChunk) -> Bool {
+        markers.contains { marker in
+            isAdCue(marker)
+                && markerOverlapsChunk(marker, chunk)
+                && (marker.breakDuration ?? 0) > 0
+                && ProgramMetadataSource(marker: marker) == .icy
         }
     }
 
@@ -134,12 +147,18 @@ struct ChunkProgramMetadataResolver {
             )
         }
         if let activeTimedSongPlay = try activeTimedMetadataLookup(chunk.startSeconds, chunk.endSeconds) {
+            if ProgramMetadataSource(raw: activeTimedSongPlay.source) == .icy {
+                return ChunkProgramMetadataContext(
+                    markers: markers,
+                    songPlays: [],
+                    transcriptSuppressionSongPlays: [activeTimedSongPlay],
+                    activeAdBreak: activeAdBreak
+                )
+            }
             return ChunkProgramMetadataContext(
                 markers: markers,
                 songPlays: [activeTimedSongPlay],
-                transcriptSuppressionSongPlays: carriedTimedMetadataSuppressionPlays(
-                    [activeTimedSongPlay]
-                ),
+                transcriptSuppressionSongPlays: [activeTimedSongPlay],
                 activeAdBreak: activeAdBreak
             )
         }
@@ -149,10 +168,6 @@ struct ChunkProgramMetadataResolver {
             transcriptSuppressionSongPlays: fingerprintSongPlays,
             activeAdBreak: activeAdBreak
         )
-    }
-
-    private func carriedTimedMetadataSuppressionPlays(_ plays: [SongPlayDraft]) -> [SongPlayDraft] {
-        plays.filter { ProgramMetadataSource(raw: $0.source) != .icy }
     }
 
     private func normalizedTimelineMarkers(_ markers: [AdMarker], in chunk: DecodedAudioChunk) -> [AdMarker] {

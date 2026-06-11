@@ -304,6 +304,7 @@ struct TimelineRailView: View {
                                     }
                             }
                             .buttonStyle(.plain)
+                            .contentShape(Rectangle())
                             .frame(
                                 width: spanWidth(span, totalWidth: proxy.size.width),
                                 height: 30
@@ -584,6 +585,7 @@ struct TimelineRailView: View {
 
     private func spanHelp(_ span: StreamAppTimelineRailSpan) -> String {
         let range = "\(timeLabel(span.startSeconds))-\(timeLabel(span.endSeconds))"
+        let duration = "Duration \(durationLabel(span.endSeconds - span.startSeconds))"
         if span.isAd {
             let brand = span.brand?.trimmingCharacters(in: .whitespacesAndNewlines)
             let displayBrand = brand == span.title ? nil : brand
@@ -593,7 +595,7 @@ struct TimelineRailView: View {
                           !value.isEmpty else { return nil }
                     return value
                 }
-            return ([span.title] + attribution + [span.subtitle, range])
+            return ([span.title] + attribution + [span.subtitle, duration, range])
                 .compactMap { value in
                     guard let value, !value.isEmpty else { return nil }
                     return value
@@ -601,9 +603,9 @@ struct TimelineRailView: View {
                 .joined(separator: " · ")
         }
         if let subtitle = span.subtitle, !subtitle.isEmpty {
-            return "\(span.title) - \(subtitle) · \(range)"
+            return "\(span.title) - \(subtitle) · \(duration) · \(range)"
         }
-        return "\(span.title) · \(range)"
+        return "\(span.title) · \(duration) · \(range)"
     }
 
     private func markerHelp(_ marker: StreamAppTimelineRailMarker) -> String {
@@ -641,6 +643,18 @@ struct TimelineRailView: View {
 
     private func timeLabel(_ seconds: Double) -> String {
         String(format: "%.0fs", seconds)
+    }
+
+    private func durationLabel(_ seconds: Double) -> String {
+        let safeSeconds = max(0, Int(seconds.rounded()))
+        if safeSeconds < 60 {
+            return "\(safeSeconds)s"
+        }
+        let minutes = safeSeconds / 60
+        let remainingSeconds = safeSeconds % 60
+        return remainingSeconds == 0
+            ? "\(minutes)m"
+            : "\(minutes)m \(remainingSeconds)s"
     }
 
     private func clockLabel(_ seconds: Double) -> String {
@@ -743,6 +757,15 @@ struct TimelineItemButton: View {
         return "AD \(Int((confidence * 100).rounded()))%"
     }
 
+    private var brandBadgeText: String? {
+        guard item.isAd,
+              let brand = item.brand?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !brand.isEmpty else {
+            return nil
+        }
+        return brand
+    }
+
     private func displayAdType(_ adType: String?) -> String? {
         guard let adType = adType?.trimmingCharacters(in: .whitespacesAndNewlines),
               !adType.isEmpty else {
@@ -782,6 +805,15 @@ struct TimelineItemButton: View {
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 3)
                                 .background(rowColor, in: Capsule())
+                        }
+                        if let brandBadgeText {
+                            Text(brandBadgeText)
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.white)
+                                .lineLimit(1)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(rowColor.opacity(0.72), in: Capsule())
                         }
                         if showsSpeaker, let speaker = item.speakerDisplay {
                             SpeakerBadge(speaker: speaker)

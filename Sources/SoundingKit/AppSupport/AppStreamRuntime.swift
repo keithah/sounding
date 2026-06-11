@@ -631,23 +631,14 @@ public actor AppStreamRuntimeService: AppStreamRuntimeControlling {
             }
         } else {
             await playbackCommands.setMuted(streamID: streamID, isMuted: true)
-            if currentStreamID == streamID {
-                currentStreamID = nil
-                await playbackSelection?.clear(ifStreamID: streamID)
-                if let playbackController, let playbackTimeline {
-                    await stopPlaybackForRuntimeStop(
-                        playbackController,
-                        timeline: playbackTimeline,
-                        streamID: streamID
-                    )
-                }
-                diagnosticsLog.recordEvent(
-                    "runtime.playback.owner.cleared_muted",
-                    streamID: streamID,
-                    phase: "runtime.setMuted.mute",
-                    fields: ["stopsPlayback": "true"]
-                )
-            }
+            diagnosticsLog.recordEvent(
+                currentStreamID == streamID
+                    ? "runtime.setMuted.mute.owner_retained"
+                    : "runtime.setMuted.mute.non_owner",
+                streamID: streamID,
+                phase: "runtime.setMuted.mute",
+                fields: ["stopsPlayback": "false"]
+            )
         }
         if let existing = latestEvents[streamID] {
             publish(

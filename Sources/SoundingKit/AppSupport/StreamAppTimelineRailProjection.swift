@@ -139,7 +139,8 @@ public enum StreamAppTimelineRailProjection {
                     paragraph: paragraph,
                     score: TranscriptAdScorer.Score(
                         confidence: classification.confidence,
-                        signals: classification.signals
+                        signals: classification.signals,
+                        brand: classification.brand
                     ),
                     classification: classification
                 )
@@ -173,7 +174,7 @@ public enum StreamAppTimelineRailProjection {
             let clampedEnd = clamp(end, lower: visibleStartSeconds, upper: visibleEndSeconds)
             let confidence = group.map(\.score.confidence).max()
             let signals = Array(Set(group.flatMap(\.score.signals))).sorted()
-            let brand = firstNonEmpty(group.map(\.classification?.brand))
+            let brand = firstNonEmpty(group.flatMap { [$0.classification?.brand, $0.score.brand] })
             let product = firstNonEmpty(group.map(\.classification?.product))
             let adType = firstNonEmpty(group.map(\.classification?.adType))
             return StreamAppTimelineRailSpan(

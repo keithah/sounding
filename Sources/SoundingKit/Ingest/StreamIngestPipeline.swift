@@ -33,6 +33,8 @@ public struct StreamIngestPipeline {
     private let transcriber: any MLTranscription
     private let diarizer: any SpeakerDiarization
     private let fingerprinter: any AudioFingerprinting
+    private let audioContentClassifier: (any AudioContentClassifying)?
+    private let minimumMusicProbabilityForFingerprinting: Double
     private let fingerprintEnricher: any AudioFingerprintEnriching
     private let audioArchiveStore: AudioArchiveStore?
     private let audioArchiveEnabled: Bool
@@ -50,6 +52,8 @@ public struct StreamIngestPipeline {
         transcriber: any MLTranscription,
         diarizer: any SpeakerDiarization,
         fingerprinter: any AudioFingerprinting = NoOpAudioFingerprinter(),
+        audioContentClassifier: (any AudioContentClassifying)? = nil,
+        minimumMusicProbabilityForFingerprinting: Double = 0.80,
         fingerprintEnricher: any AudioFingerprintEnriching = NoOpAudioFingerprintEnricher(),
         audioArchiveStore: AudioArchiveStore? = nil,
         audioArchiveEnabled: Bool = false,
@@ -62,6 +66,8 @@ public struct StreamIngestPipeline {
         self.transcriber = transcriber
         self.diarizer = diarizer
         self.fingerprinter = fingerprinter
+        self.audioContentClassifier = audioContentClassifier
+        self.minimumMusicProbabilityForFingerprinting = minimumMusicProbabilityForFingerprinting
         self.fingerprintEnricher = fingerprintEnricher
         self.audioArchiveStore = audioArchiveStore
         self.audioArchiveEnabled = audioArchiveEnabled
@@ -174,7 +180,8 @@ public struct StreamIngestPipeline {
                 try persistence.activeTimedMetadataSongPlay(
                     streamID: streamID,
                     startSeconds: startSeconds,
-                    endSeconds: endSeconds
+                    endSeconds: endSeconds,
+                    toleranceSeconds: 300
                 )
             },
             activeAdBreakLookup: { startSeconds, endSeconds in
@@ -322,6 +329,10 @@ public struct StreamIngestPipeline {
                 }
                 var fingerprints: [AudioFingerprintDraft] = []
                 var songPlays: [SongPlayDraft] = []
+                let preFingerprintProgramContext = try programMetadataResolver.resolve(
+                    chunk: chunk,
+                    fingerprintSongPlays: []
+                )
                 do {
                     try Task.checkCancellation()
                     let fingerprintRequest = AudioFingerprintRequest(
@@ -330,31 +341,75 @@ public struct StreamIngestPipeline {
                         streamID: streamID,
                         runID: runID
                     )
-                    let fingerprintResult = try await fingerprinter.fingerprint(
-                        chunk,
-                        request: fingerprintRequest
-                    )
-                    try validate(fingerprintResult)
-                    let enrichment = await fingerprintEnricher.enrich(
-                        fingerprintResult,
-                        chunk: chunk,
-                        request: fingerprintRequest
-                    )
-                    fingerprints = enrichment.fingerprintResult.fingerprints
-                    songPlays = enrichment.fingerprintResult.songPlays
-                    chunkDiagnostics.append(
-                        contentsOf: enrichment.diagnostics.map { enrichmentDiagnostic in
+                    if preFingerprintProgramContext.shouldSkipFingerprinting(overlapping: chunk) {
+                        chunkDiagnostics.append(
                             diagnostic(
                                 streamID: streamID,
                                 phase: .fingerprint,
-                                severity: enrichmentDiagnostic.severity,
-                                reason: enrichmentDiagnostic.reason,
+                                severity: .info,
+                                reason: "fingerprint-skipped-ad-break",
                                 source: redactedSource,
                                 streamType: streamType,
-                                context: enrichmentDiagnostic.context
+                                context: fingerprintSkippedAdBreakContext(
+                                    preFingerprintProgramContext,
+                                    chunk: chunk
+                                )
+                            )
+                        )
+                    } else {
+                        let classification = try await classifyAudioContentIfNeeded(
+                            chunk,
+                            streamID: streamID,
+                            runID: runID,
+                            source: redactedSource,
+                            streamType: streamType,
+                            diagnostics: &chunkDiagnostics
+                        )
+                        if classification?.allowsFingerprinting(
+                            minimumMusicProbability: minimumMusicProbabilityForFingerprinting
+                        ) ?? true {
+                            let fingerprintResult = try await fingerprinter.fingerprint(
+                                chunk,
+                                request: fingerprintRequest
+                            )
+                            try validate(fingerprintResult)
+                            let enrichment = await fingerprintEnricher.enrich(
+                                fingerprintResult,
+                                chunk: chunk,
+                                request: fingerprintRequest
+                            )
+                            fingerprints = enrichment.fingerprintResult.fingerprints
+                            songPlays = enrichment.fingerprintResult.songPlays
+                            chunkDiagnostics.append(
+                                contentsOf: enrichment.diagnostics.map { enrichmentDiagnostic in
+                                    diagnostic(
+                                        streamID: streamID,
+                                        phase: .fingerprint,
+                                        severity: enrichmentDiagnostic.severity,
+                                        reason: enrichmentDiagnostic.reason,
+                                        source: redactedSource,
+                                        streamType: streamType,
+                                        context: enrichmentDiagnostic.context
+                                    )
+                                }
+                            )
+                        } else {
+                            chunkDiagnostics.append(
+                                diagnostic(
+                                    streamID: streamID,
+                                    phase: .fingerprint,
+                                    severity: .info,
+                                    reason: "fingerprint-skipped-non-music",
+                                    source: redactedSource,
+                                    streamType: streamType,
+                                    context: audioContentClassificationContext(
+                                        classification,
+                                        chunk: chunk
+                                    )
+                                )
                             )
                         }
-                    )
+                    }
                 } catch let cancellation as CancellationError {
                     throw cancellation
                 } catch {
@@ -834,6 +889,80 @@ public struct StreamIngestPipeline {
             }
         }
         return bestLabel
+    }
+
+    private func classifyAudioContentIfNeeded(
+        _ chunk: DecodedAudioChunk,
+        streamID: Int64,
+        runID: Int64,
+        source: String,
+        streamType: StreamType,
+        diagnostics: inout [IngestDiagnosticDraft]
+    ) async throws -> AudioContentClassification? {
+        guard let audioContentClassifier else { return nil }
+        do {
+            return try await audioContentClassifier.classify(
+                chunk,
+                request: AudioContentClassificationRequest(
+                    source: source,
+                    streamType: streamType,
+                    streamID: streamID,
+                    runID: runID
+                )
+            )
+        } catch let cancellation as CancellationError {
+            throw cancellation
+        } catch {
+            diagnostics.append(
+                diagnostic(
+                    streamID: streamID,
+                    phase: .fingerprint,
+                    severity: .warning,
+                    reason: "audio-content-classification-failed",
+                    source: source,
+                    streamType: streamType,
+                    context: errorContext(error, chunk: chunk)
+                )
+            )
+            return nil
+        }
+    }
+
+    private func audioContentClassificationContext(
+        _ classification: AudioContentClassification?,
+        chunk: DecodedAudioChunk
+    ) -> [String: JSONValue] {
+        var context: [String: JSONValue] = [
+            "chunkSequence": .number(Double(chunk.sequence)),
+            "minimumMusicProbability": .number(minimumMusicProbabilityForFingerprinting),
+        ]
+        if let musicProbability = classification?.musicProbability {
+            context["musicProbability"] = .number(musicProbability)
+        }
+        if let speechProbability = classification?.speechProbability {
+            context["speechProbability"] = .number(speechProbability)
+        }
+        if let label = classification?.label?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !label.isEmpty
+        {
+            context["label"] = .string(label)
+        }
+        return context
+    }
+
+    private func fingerprintSkippedAdBreakContext(
+        _ programContext: ChunkProgramMetadataContext,
+        chunk: DecodedAudioChunk
+    ) -> [String: JSONValue] {
+        let adMarkerCount = programContext.markers.filter { marker in
+            marker.classification == .adStart || marker.classification == .adEnd
+        }.count
+        return [
+            "chunkSequence": .number(Double(chunk.sequence)),
+            "activeAdBreak": .bool(programContext.activeAdBreak),
+            "markerCount": .number(Double(programContext.markers.count)),
+            "adMarkerCount": .number(Double(adMarkerCount)),
+        ]
     }
 
     private func validate(_ fingerprintResult: AudioFingerprintResult) throws {

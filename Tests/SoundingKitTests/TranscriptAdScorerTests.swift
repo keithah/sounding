@@ -102,6 +102,47 @@ final class TranscriptAdScorerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(scores[fragments[3].id]?.confidence ?? 0, 0.50)
     }
 
+    func testLocalCommercialCopyWithoutUrlStillScoresAsAd() {
+        let fragments = [
+            paragraph(
+                "Feeling stuck with a high interest rate auto loan, the smart move is a new direction. Community First auto loan rate is lowest 4.29% APR.",
+                start: 0,
+                end: 30
+            ),
+            paragraph(
+                "Whether you're refreshing your interior or exterior, shop online or visit your neighborhood Sherwin Williams store.",
+                start: 34,
+                end: 58
+            ),
+            paragraph(
+                "Retail sales are, please some exclusions apply, see store for details, delivery available on qualifying orders.",
+                start: 60,
+                end: 82
+            ),
+        ]
+
+        let scores = TranscriptAdScorer.scores(for: fragments)
+
+        XCTAssertGreaterThanOrEqual(scores[fragments[0].id]?.confidence ?? 0, 0.50)
+        XCTAssertGreaterThanOrEqual(scores[fragments[1].id]?.confidence ?? 0, 0.50)
+        XCTAssertGreaterThanOrEqual(scores[fragments[2].id]?.confidence ?? 0, 0.50)
+    }
+
+    func testKnownCommercialBrandIsReturnedForDetectedAdCopy() {
+        let score = TranscriptAdScorer.score(
+            paragraph: paragraph(
+                "Mobile carriers message and data rates may apply. Wells Fargo Bank is a member FDIC.",
+                start: 0,
+                end: 30
+            ),
+            neighbors: []
+        )
+
+        XCTAssertGreaterThanOrEqual(score.confidence, 0.50)
+        XCTAssertEqual(score.brand, "Wells Fargo")
+        XCTAssertTrue(score.signals.contains("brand:Wells Fargo"))
+    }
+
     private func paragraph(
         _ text: String,
         start: Double = 0,

@@ -12,9 +12,10 @@ struct StreamAppTimelineMetadataIndex: Sendable {
     private let adWindows: [AdWindow]
     private let nonSongWindows: [AdWindow]
     private let songBoundaryStarts: [Double]
+    private let timelineCutPoints: [Double]
     private let artistSongMetadata: [StreamAppMetadataItem]
 
-    init(metadataChanges: [StreamAppMetadataItem]) {
+    init(metadataChanges: [StreamAppMetadataItem], timelineCutPointMetadata: [StreamAppMetadataItem]? = nil) {
         let songMetadata = metadataChanges
             .filter { $0.kind == .song }
             .sorted(by: StreamAppTimelineProjection.metadataSort)
@@ -23,6 +24,8 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         self.adWindows = Self.adWindows(from: metadataChanges)
         self.nonSongWindows = Self.nonSongWindows(from: metadataChanges)
         self.songBoundaryStarts = songMetadata.map(\.startSeconds).sorted()
+        let cutPointMetadata = timelineCutPointMetadata ?? metadataChanges
+        self.timelineCutPoints = Self.timelineCutPoints(from: cutPointMetadata)
         self.artistSongMetadata = songMetadata
             .filter { Self.firstNonEmpty([$0.artist]) != nil }
     }
@@ -52,10 +55,14 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         return index < songBoundaryStarts.count && songBoundaryStarts[index] <= upperBound
     }
 
+    func hasTimelineBoundary(after lowerBound: Double, before upperBound: Double) -> Bool {
+        !timelineBoundaries(after: lowerBound, before: upperBound).isEmpty
+    }
+
     func timelineBoundaries(after lowerBound: Double, before upperBound: Double) -> [Double] {
         guard lowerBound < upperBound else { return [] }
         let adBoundarySeconds = adWindows.flatMap { [$0.startSeconds, $0.endSeconds] }
-        return Array(Set(adBoundarySeconds))
+        return Array(Set(adBoundarySeconds + timelineCutPoints))
             .filter { $0 > lowerBound && $0 < upperBound }
             .sorted()
     }
@@ -211,6 +218,16 @@ struct StreamAppTimelineMetadataIndex: Sendable {
         return coalescedAdWindows(windows)
     }
 
+    private static func timelineCutPoints(from items: [StreamAppMetadataItem]) -> [Double] {
+        items.compactMap { item in
+            guard isAdStartMetadata(item) || isNonSongTimedMetadataEvent(item) else {
+                return nil
+            }
+            return item.startSeconds
+        }
+        .sorted()
+    }
+
     private static func isNonSongTimedMetadataEvent(_ item: StreamAppMetadataItem) -> Bool {
         guard item.kind == .event, !isAdEndMetadata(item) else { return false }
         let source = [
@@ -295,6 +312,8 @@ struct StreamAppTimelineMetadataIndex: Sendable {
 }
 
 public struct StreamAppTimelineProjection: Sendable {
+    private static let maximumMergedAdTranscriptDuration = 60.0
+
     public let paragraphs: [StreamAppTranscriptParagraph]
     public let metadataChanges: [StreamAppMetadataItem]
     public let player: AppPlayerTimelineSnapshot?
@@ -309,7 +328,10 @@ public struct StreamAppTimelineProjection: Sendable {
         let metadataChanges = Self.coalescedMetadataChanges(metadata)
         self.metadataChanges = metadataChanges
         self.player = player
-        let metadataIndex = StreamAppTimelineMetadataIndex(metadataChanges: metadataChanges)
+        let metadataIndex = StreamAppTimelineMetadataIndex(
+            metadataChanges: metadataChanges,
+            timelineCutPointMetadata: metadata
+        )
         self.metadataIndex = metadataIndex
         self.paragraphs = Self.filteredParagraphs(
             paragraphs,
@@ -880,12 +902,31 @@ public struct StreamAppTimelineProjection: Sendable {
                 ) {
                     return true
                 }
+                if isLikelyMusicTranscript(paragraph),
+                   TranscriptAdScorer.score(paragraph: paragraph, neighbors: []).confidence < 0.50 {
+                    return false
+                }
                 return !metadataIndex.overlapsConfirmedSong(
                     startSeconds: paragraph.startSeconds,
                     endSeconds: paragraph.endSeconds
                 )
             }
         }
+    }
+
+    private static func isLikelyMusicTranscript(_ paragraph: StreamAppTranscriptParagraph) -> Bool {
+        let normalized = paragraph.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        if normalized.contains("♪") { return true }
+        let musicTagCount = [
+            "[music]",
+            "[music playing]",
+            "(upbeat music)",
+            "(music)",
+        ].filter { normalized.contains($0) }.count
+        guard musicTagCount > 0 else { return false }
+        let wordCount = normalized.split { !$0.isLetter && !$0.isNumber }.count
+        return musicTagCount >= 2 || wordCount <= 24 || normalized.contains("lyrics")
     }
 
     private static func transcriptParagraphsSplitAtTimelineBoundaries(
@@ -1135,11 +1176,17 @@ public struct StreamAppTimelineProjection: Sendable {
             let sameAdWindow = Self.sameAdWindow(last, paragraph, metadataIndex: metadataIndex)
             let smallGap = paragraph.startSeconds - last.endSeconds <= 12
             let boundedDuration = paragraph.endSeconds - last.startSeconds <= 30
+            let boundedAdDuration = paragraph.endSeconds - last.startSeconds <= Self.maximumMergedAdTranscriptDuration
             let noMetadataBoundary = !metadataIndex.hasSongBoundary(
                 after: last.endSeconds,
                 before: paragraph.startSeconds
             )
-            if sameAdWindow || (sameSpeaker && smallGap && boundedDuration && noMetadataBoundary) {
+            let noTimelineBoundary = !metadataIndex.hasTimelineBoundary(
+                after: last.endSeconds,
+                before: paragraph.startSeconds
+            )
+            if (sameAdWindow && smallGap && boundedAdDuration && noTimelineBoundary)
+                || (sameSpeaker && smallGap && boundedDuration && noMetadataBoundary && noTimelineBoundary) {
                 result[result.count - 1] = Self.mergedTranscriptParagraph(last, paragraph)
             } else {
                 result.append(paragraph)

@@ -289,6 +289,7 @@ public struct SoundingAppRuntimeFactory {
             ),
             diarizer: NoOpSpeakerDiarizer(),
             fingerprinter: defaultAudioFingerprinter(),
+            audioContentClassifier: defaultAudioContentClassifier(),
             fingerprintEnricher: defaultFingerprintEnricher(database: database),
             player: player,
             timeline: timeline,
@@ -333,6 +334,19 @@ public struct SoundingAppRuntimeFactory {
         environment["SOUNDING_DETERMINISTIC_FINGERPRINT"] == "1"
             ? DeterministicAudioFingerprinter()
             : ChromaSwiftAudioFingerprinter()
+    }
+
+    static func defaultAudioContentClassifier(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> (any AudioContentClassifying)? {
+        guard environment["SOUNDING_DISABLE_AUDIO_CONTENT_CLASSIFIER"] != "1" else {
+            return nil
+        }
+        #if canImport(SoundAnalysis) && canImport(AVFoundation)
+        return SoundAnalysisAudioContentClassifier()
+        #else
+        return nil
+        #endif
     }
 
     static func defaultFingerprintEnricher(

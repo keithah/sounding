@@ -651,7 +651,18 @@ public struct IngestPersistence {
             guard let row = try Row.fetchOne(
                 db,
                 sql: """
-                    SELECT ad_events.classification
+                    SELECT
+                        ad_events.classification,
+                        ad_events.pts,
+                        COALESCE(
+                            json_extract(ad_events.payload_json, '$.BreakDuration'),
+                            json_extract(ad_events.payload_json, '$.Fields.BreakDuration'),
+                            json_extract(ad_events.payload_json, '$.Command.BreakDuration'),
+                            CAST(json_extract(ad_events.payload_json, '$.Fields.durationMilliseconds') AS REAL) / 1000.0,
+                            CAST(json_extract(ad_events.payload_json, '$.Fields.DurationMilliseconds') AS REAL) / 1000.0,
+                            CAST(json_extract(ad_events.payload_json, '$.Fields.durationMs') AS REAL) / 1000.0,
+                            CAST(json_extract(ad_events.payload_json, '$.Fields.DurationMs') AS REAL) / 1000.0
+                        ) AS break_duration
                     FROM ad_events
                     JOIN ingest_runs ON ingest_runs.id = ad_events.run_id
                     WHERE ingest_runs.stream_id = ?
@@ -672,7 +683,16 @@ public struct IngestPersistence {
             }
 
             let classification: String? = row["classification"]
-            return classification == MarkerClassification.adStart.rawValue
+            guard classification == MarkerClassification.adStart.rawValue else {
+                return false
+            }
+            let pts: Double? = row["pts"]
+            let breakDuration: Double? = row["break_duration"]
+            guard let pts, let breakDuration, breakDuration.isFinite, breakDuration > 0 else {
+                return true
+            }
+            let toleranceSeconds = 2.0
+            return startSeconds <= pts + breakDuration + toleranceSeconds
         }
     }
 
